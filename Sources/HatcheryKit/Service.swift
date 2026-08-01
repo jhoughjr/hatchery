@@ -14,18 +14,24 @@ public struct ServiceKind: RawRepresentable, Hashable, Sendable, Codable {
     public static let mwserver = ServiceKind(rawValue: "mwserver")
     public static let paymentGateway = ServiceKind(rawValue: "payment-gateway")
     public static let communicationGateway = ServiceKind(rawValue: "communication-gateway")
+    /// The CONNECT proxy that carries GSX traffic. It answers `/healthz`, not `/health`.
+    public static let gsxGateway = ServiceKind(rawValue: "gsx-gateway")
 
     /// Kinds hatchery ships a contract for today.
     public static let known: [ServiceKind] = [.mwserver, .paymentGateway, .communicationGateway]
 
     /// Where this kind answers a readiness probe.
     ///
-    /// MWServer mounts its route beside the rest of its API, under `/api`. The gateways come
-    /// from the shared microservice template and answer at the root. Verified against the lab:
-    /// `/api/metrics` is 200 on mwserver and 404 on both gateways, and `/health` is the reverse.
+    /// `/health` is the estate convention: `microservice-auth` generates the operation, and
+    /// every service born from that template answers there. gsx-gateway is the one exception,
+    /// at `/healthz`.
+    ///
+    /// Note this is the path, not the shape. A gateway answers `/health` with a bare 200 and no
+    /// body, which reads as `responding` rather than `ready`. Only a service that returns a
+    /// readiness report can report readiness.
     public var defaultHealthPath: String {
         switch self {
-        case .mwserver: return "/api/health"
+        case .gsxGateway: return "/healthz"
         default: return "/health"
         }
     }

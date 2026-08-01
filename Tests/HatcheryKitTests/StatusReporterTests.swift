@@ -108,13 +108,13 @@ final class StatusReporterTests: XCTestCase {
 
     func testHealthURLUsesTheFirstDomainAndDefaultPath() {
         let spec = service("mwlab", domains: ["mwlab.opi", "mwlab.jimmyhoughjr.net"])
-        XCTAssertEqual(spec.healthURL()?.absoluteString, "http://mwlab.opi/api/health")
+        XCTAssertEqual(spec.healthURL()?.absoluteString, "http://mwlab.opi/health")
     }
 
     func testExplicitBaseURLOverridesDomains() {
         var spec = service("mwlab", domains: ["mwlab.opi"])
         spec.baseURL = "http://127.0.0.1:8080"
-        XCTAssertEqual(spec.healthURL()?.absoluteString, "http://127.0.0.1:8080/api/health")
+        XCTAssertEqual(spec.healthURL()?.absoluteString, "http://127.0.0.1:8080/health")
     }
 
     func testHealthPathIsOverridable() {
