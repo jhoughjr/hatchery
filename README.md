@@ -16,7 +16,28 @@ Working today:
 ```sh
 hatchery config validate <config.json> --service mwserver --backend dokku
 hatchery stack list --manifest hatchery.json
+hatchery status --manifest hatchery.json
 ```
+
+`status` asks each service what it says about itself and composes the stack:
+
+```
+mwlab  [dokku]  responding
+  mwlab                   responding   88ms    no health endpoint
+  paylab                  responding   85ms    HTTP 200, no readiness report
+  comlab                  responding   85ms    HTTP 200, no readiness report
+```
+
+The states run worst to best: `unreachable`, `degraded`, `responding`, `ready`. A stack
+reports the worst state among its services. `responding` means the service answered without
+a readiness report, which is what an older image looks like — better than silence, worse than
+an answer we can read. The exit code fails on `unreachable` or `degraded` only, so an image
+without a health route does not fail a script.
+
+Two details that came from the lab rather than from a document. A dokku service is probed at
+the box with a `Host` header, because a lab vhost usually has no public DNS record. And the
+readiness path follows the service kind: MWServer answers at `/api/health`, while the gateways
+come from the shared microservice template and answer at `/health`.
 
 ## Why this exists
 
