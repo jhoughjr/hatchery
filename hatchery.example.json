@@ -1,0 +1,42 @@
+{
+  "version" : 1,
+  "stacks" : [
+    {
+      "name" : "mwlab",
+      "backend" : "dokku",
+      "host" : "dokku@192.168.0.103",
+      "services" : [
+        {
+          "name" : "mwlab",
+          "kind" : "mwserver",
+          "image" : "mwserver2:arm64-bde0f7d-tf",
+          "domains" : [
+            "mwlab.opi",
+            "mwlab.jimmyhoughjr.net"
+          ],
+          "configFile" : "mwlab.config.json"
+        },
+        {
+          "name" : "paylab",
+          "kind" : "payment-gateway",
+          "image" : "payment-gateway:arm64-6be9967",
+          "domains" : [
+            "paylab.opi",
+            "paylab.jimmyhoughjr.net"
+          ],
+          "configFile" : "paylab.config.json"
+        },
+        {
+          "name" : "comlab",
+          "kind" : "communication-gateway",
+          "image" : "communication-gateway:arm64-6f6bb65",
+          "domains" : [
+            "comlab.opi",
+            "comlab.jimmyhoughjr.net"
+          ],
+          "configFile" : "comlab.config.json"
+        }
+      ]
+    }
+  ]
+}
