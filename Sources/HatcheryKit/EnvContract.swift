@@ -70,53 +70,84 @@ extension EnvContract {
         "DATABASE_APP_PASSWORD",
     ]
 
-    static func mwserver(backend: Backend) -> EnvContract {
-        switch backend {
-        case .appPlatform:
-            // Source of truth: MacWorkStack-infra deploy/tenant-template.yaml.
-            // Connection strings are the only wire format; the app fails at boot
-            // without DATABASE_URL.
-            return EnvContract(
-                required: [
-                    "DATABASE_URL", "DATABASE_OWNER_URL", "DATABASE_APP_URL",
-                    "KEYPAIR_JWKS", "PRIVATE_KEY_PEM",
-                    "APP_URL", "APP_ID",
-                    "PAYMENT_GATEWAY_URL", "PAYMENT_GATEWAY_TOKEN",
-                ],
-                optional: [
-                    "DATABASE_SSL_CERT", "ALL_ERRORS", "LOG_LEVEL", "DATABASE_LOG_LEVEL",
-                    "TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE",
-                ],
-                secret: [
-                    "DATABASE_OWNER_URL", "DATABASE_APP_URL",
-                    "KEYPAIR_JWKS", "PRIVATE_KEY_PEM", "PAYMENT_GATEWAY_TOKEN",
-                ],
-                retired: discreteDatabaseKeys,
-                ignored: dokkuInjected
-            )
+    /// Keys whose absence traps at boot.
+    ///
+    /// Source of truth is the code, not a deploy template: `EnvironmentKeys.get(_:)` calls
+    /// `fatalError` on a missing key, and `DatabaseURL.require(_:)` does the same. Every key
+    /// below is read through one of those two paths on the current `dev`.
+    ///
+    /// `KEYPAIR_JWKS` and `PRIVATE_KEY_PEM` are the exception. They read optionally and fall
+    /// back to `keypair.jwks` and `privatekey.pem` in the working directory. A deployed image
+    /// carries neither file, so they are required in practice for every backend here.
+    static let mwserverRequired: Set<String> = [
+        "DATABASE_URL",
+        "DATABASE_APP_URL",
+        "APP_URL",
+        "APP_ID",
+        "LOG_LEVEL",
+        "DATABASE_LOG_LEVEL",
+        "PAYMENT_GATEWAY_URL",
+        "PAYMENT_GATEWAY_TOKEN",
+        "TEMPORAL_ADDRESS",
+        "TEMPORAL_NAMESPACE",
+        "KEYPAIR_JWKS",
+        "PRIVATE_KEY_PEM",
+    ]
 
-        case .dokku:
-            // The lab still runs pre-cutover images, so the discrete keys remain
-            // legal here. They are optional, not retired.
-            return EnvContract(
-                required: [
-                    "DATABASE_URL",
-                    "KEYPAIR_JWKS", "PRIVATE_KEY_PEM",
-                    "APP_URL", "APP_ID",
-                    "PAYMENT_GATEWAY_URL", "PAYMENT_GATEWAY_TOKEN",
-                ],
-                optional: discreteDatabaseKeys.union([
-                    "DATABASE_APP_URL", "DATABASE_SSL_CERT",
-                    "ALL_ERRORS", "LOG_LEVEL", "DATABASE_LOG_LEVEL",
-                ]),
-                secret: [
-                    "DATABASE_URL", "DATABASE_APP_URL",
-                    "DATABASE_PASSWORD", "DATABASE_APP_PASSWORD",
-                    "KEYPAIR_JWKS", "PRIVATE_KEY_PEM", "PAYMENT_GATEWAY_TOKEN",
-                ],
-                ignored: dokkuInjected
-            )
-        }
+    /// Keys the server reads but tolerates the absence of.
+    ///
+    /// `DATABASE_OWNER_URL` belongs here rather than with the required set: it falls back to
+    /// `DATABASE_URL` where no owner pool exists, which is how local development and the tests run.
+    static let mwserverOptional: Set<String> = [
+        "DATABASE_OWNER_URL",
+        "DATABASE_SSL_CERT",
+        "DATABASE_SSL_CERT_PATH",
+        "DATABASE_MAX_CONNECTIONS",
+        "DATABASE_FLUENT_PER_LOOP",
+        "DATABASE_PGCLIENT_MAX",
+        "DATABASE_INFRA_MAX",
+        "DATABASE_COMMAND_MAX_CONNECTIONS",
+        "ALL_ERRORS",
+        "NOISE_GATE_VALUE",
+        "GSX_GATEWAY_HOST",
+        "GSX_GATEWAY_PORT",
+        "GSX_GATEWAY_TOKEN",
+        "MAIL_OUTBOUND_DISCARD",
+    ]
+
+    static let mwserverSecret: Set<String> = [
+        "DATABASE_URL",
+        "DATABASE_OWNER_URL",
+        "DATABASE_APP_URL",
+        "DATABASE_PASSWORD",
+        "DATABASE_APP_PASSWORD",
+        "KEYPAIR_JWKS",
+        "PRIVATE_KEY_PEM",
+        "PAYMENT_GATEWAY_TOKEN",
+        "GSX_GATEWAY_TOKEN",
+    ]
+
+    /// The contract tracks the current `dev` code for both backends, because the code decides
+    /// what traps at boot and the code is the same wherever the image runs.
+    ///
+    /// The backends differ only in how they treat the discrete connection keys. On App Platform
+    /// they are retired and their presence is a latent failure. On the self-hosted lab they are
+    /// tolerated, because the box runs older images that still read them and removing them from
+    /// a running app buys nothing.
+    ///
+    /// Validating an older lab config against this contract reports the keys that image never
+    /// needed, such as the temporal pair. That is a true statement about the lab being behind,
+    /// and it is the drift worth seeing rather than noise worth hiding.
+    static func mwserver(backend: Backend) -> EnvContract {
+        EnvContract(
+            required: mwserverRequired,
+            optional: backend == .dokku
+                ? mwserverOptional.union(discreteDatabaseKeys)
+                : mwserverOptional,
+            secret: mwserverSecret,
+            retired: backend == .appPlatform ? discreteDatabaseKeys : [],
+            ignored: dokkuInjected
+        )
     }
 
     static func paymentGateway(backend: Backend) -> EnvContract {
