@@ -7,8 +7,79 @@ struct Hatchery: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
-        subcommands: [Config.self, Stack.self, Status.self]
+        subcommands: [Config.self, Stack.self, Status.self, Up.self, Down.self, Restart.self]
     )
+}
+
+/// Shared by the lifecycle verbs, which differ only in the action they perform.
+struct LifecycleOptions: ParsableArguments {
+    @Argument(help: "Stack to act on.")
+    var stack: String
+
+    @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+    var manifest: String = "hatchery.json"
+
+    @Option(name: .shortAndLong, help: "Act on one service instead of every service.")
+    var service: String?
+
+    @Flag(name: .long, help: "Required to act on a production stack.")
+    var yes: Bool = false
+
+    func resolve() throws -> (StackSpec, [ServiceSpec]) {
+        let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
+        let parsed = try StackManifest.decode(from: data)
+
+        guard let spec = parsed.stack(named: stack) else {
+            throw ValidationError("no stack named '\(stack)' in \(manifest)")
+        }
+        // A production stack needs the flag. The environment is declared, so this is not a guess.
+        if spec.resolvedEnvironment.isProduction, !yes {
+            throw ValidationError(
+                "stack '\(spec.name)' is in \(spec.resolvedEnvironment.rawValue); pass --yes to act on it")
+        }
+
+        guard let service else { return (spec, spec.services) }
+        guard let only = spec.services.first(where: { $0.name == service }) else {
+            throw ValidationError("stack '\(spec.name)' declares no service named '\(service)'")
+        }
+        return (spec, [only])
+    }
+}
+
+/// Run one action and print a line for each service, failing the exit code if any did.
+private func runLifecycle(_ action: LifecycleRunner.Action, _ options: LifecycleOptions) async throws {
+    let (spec, services) = try options.resolve()
+    let runner = LifecycleRunner()
+
+    var failed = false
+    for service in services {
+        let result = await runner.perform(action, on: service, in: spec)
+        if result.succeeded {
+            print("\(service.name): \(action.label) ok")
+        } else {
+            failed = true
+            print("\(service.name): \(action.label) failed: \(result.reason ?? "unknown")")
+        }
+    }
+    if failed { throw ExitCode.failure }
+}
+
+struct Up: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Start the services a stack declares.")
+    @OptionGroup var options: LifecycleOptions
+    func run() async throws { try await runLifecycle(.start, options) }
+}
+
+struct Down: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Stop the services a stack declares.")
+    @OptionGroup var options: LifecycleOptions
+    func run() async throws { try await runLifecycle(.stop, options) }
+}
+
+struct Restart: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Restart the services a stack declares.")
+    @OptionGroup var options: LifecycleOptions
+    func run() async throws { try await runLifecycle(.restart, options) }
 }
 
 struct Status: AsyncParsableCommand {
