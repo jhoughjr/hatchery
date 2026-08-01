@@ -88,8 +88,72 @@ struct ServiceKindArgument: ExpressibleByArgument {
 struct Config: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Inspect and check service configuration.",
-        subcommands: [Validate.self]
+        subcommands: [Validate.self, Audit.self]
     )
+
+    /// Check what each service is *running with*, rather than what a file claims.
+    struct Audit: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Read live config from every declared service and check it against its contract."
+        )
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        @Option(name: .shortAndLong, help: "Audit one stack instead of every stack.")
+        var stack: String?
+
+        func run() async throws {
+            let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
+            let parsed = try StackManifest.decode(from: data)
+
+            let stacks: [StackSpec]
+            if let stack {
+                guard let found = parsed.stack(named: stack) else {
+                    throw ValidationError("no stack named '\(stack)' in \(manifest)")
+                }
+                stacks = [found]
+            } else {
+                stacks = parsed.stacks
+            }
+
+            let reader = LiveConfigReader()
+            var errors = 0
+            var warnings = 0
+
+            for spec in stacks {
+                print("\(spec.name)  [\(spec.backend.rawValue)]")
+                for service in spec.services {
+                    do {
+                        let config = try await reader.config(for: service, in: spec)
+                        guard let contract = EnvContract.contract(for: service.kind, backend: spec.backend) else {
+                            print("  \(service.name): no contract known for \(service.kind.rawValue)")
+                            continue
+                        }
+                        let issues = ConfigValidator.validate(config, against: contract)
+                        errors += issues.filter { $0.severity == .error }.count
+                        warnings += issues.filter { $0.severity == .warning }.count
+
+                        print("  \(service.name): \(config.count) keys, "
+                            + "\(issues.filter { $0.severity == .error }.count) error(s), "
+                            + "\(issues.filter { $0.severity == .warning }.count) warning(s)")
+                        for issue in issues {
+                            print("    \(issue.severity.rawValue): \(issue.key): \(issue.message)")
+                        }
+                    } catch {
+                        // A service we cannot read is not a passing service.
+                        errors += 1
+                        print("  \(service.name): could not read live config: \(error)")
+                    }
+                }
+            }
+
+            print("\(errors) error(s), \(warnings) warning(s)")
+            if errors > 0 {
+                throw ExitCode.failure
+            }
+        }
+    }
 
     struct Validate: ParsableCommand {
         static let configuration = CommandConfiguration(
