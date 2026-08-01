@@ -17,7 +17,21 @@ Working today:
 hatchery config validate <config.json> --service mwserver --backend dokku
 hatchery stack list --manifest hatchery.json
 hatchery status --manifest hatchery.json
+hatchery config audit --manifest hatchery.json
 ```
+
+`config audit` checks what each service is *running with* rather than what a file claims:
+
+```
+mwlab  [dokku]
+  mwlab: 21 keys, 0 error(s), 0 warning(s)
+  paylab: 10 keys, 0 error(s), 0 warning(s)
+  comlab: 9 keys, 0 error(s), 0 warning(s)
+```
+
+The distinction matters. `dokku config:set` merges rather than replaces, so a key set by hand
+never reaches the declared file and nothing reports the difference. The lab had exactly that:
+three keys were live on the app and absent from the file, and only reading the app found them.
 
 `status` asks each service what it says about itself and composes the stack:
 
