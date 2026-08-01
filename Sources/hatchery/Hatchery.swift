@@ -159,8 +159,78 @@ struct ServiceKindArgument: ExpressibleByArgument {
 struct Config: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Inspect and check service configuration.",
-        subcommands: [Validate.self, Audit.self]
+        subcommands: [Validate.self, Audit.self, Sync.self]
     )
+
+    /// Write what a service is running with into the file that declares it.
+    struct Sync: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Copy live config into the declared sidecar, so the two agree."
+        )
+
+        @Argument(help: "Stack to sync.")
+        var stack: String
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        @Option(name: .shortAndLong, help: "Sync one service instead of every service.")
+        var service: String?
+
+        @Flag(name: .long, help: "Report the difference without writing anything.")
+        var dryRun: Bool = false
+
+        func run() async throws {
+            let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
+            let parsed = try StackManifest.decode(from: data)
+
+            guard let spec = parsed.stack(named: stack) else {
+                throw ValidationError("no stack named '\(stack)' in \(manifest)")
+            }
+            let services: [ServiceSpec]
+            if let service {
+                guard let only = spec.services.first(where: { $0.name == service }) else {
+                    throw ValidationError("stack '\(spec.name)' declares no service named '\(service)'")
+                }
+                services = [only]
+            } else {
+                services = spec.services
+            }
+
+            let reader = LiveConfigReader()
+            var failed = false
+
+            for service in services {
+                do {
+                    let live = try await reader.config(for: service, in: spec)
+                    let url = ConfigSync.configURL(for: service, manifestPath: manifest)
+                    let declared = try ConfigSync.readDeclared(at: url)
+                    let difference = ConfigSync.diff(live: live, declared: declared)
+                    let needsWrite = ConfigSync.needsWrite(live: live, declared: declared)
+
+                    print("\(service.name): \(difference.summary)\(difference.isEmpty && needsWrite ? " (platform keys moved)" : "")")
+                    // Key names only. The values are why the sidecar is gitignored.
+                    for key in difference.added { print("    + \(key)") }
+                    for key in difference.changed { print("    ~ \(key)") }
+                    for key in difference.removed { print("    - \(key)") }
+
+                    guard needsWrite else { continue }
+                    if dryRun {
+                        print("    (dry run, \(url.lastPathComponent) not written)")
+                    } else {
+                        try ConfigSync.encode(ConfigSync.merged(live: live, declared: declared))
+                            .write(to: url, options: .atomic)
+                        print("    wrote \(url.lastPathComponent)")
+                    }
+                } catch {
+                    failed = true
+                    print("\(service.name): could not read live config: \(error)")
+                }
+            }
+
+            if failed { throw ExitCode.failure }
+        }
+    }
 
     /// Check what each service is *running with*, rather than what a file claims.
     struct Audit: AsyncParsableCommand {
