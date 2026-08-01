@@ -18,6 +18,18 @@ public struct ServiceKind: RawRepresentable, Hashable, Sendable, Codable {
     /// Kinds hatchery ships a contract for today.
     public static let known: [ServiceKind] = [.mwserver, .paymentGateway, .communicationGateway]
 
+    /// Where this kind answers a readiness probe.
+    ///
+    /// MWServer mounts its route beside the rest of its API, under `/api`. The gateways come
+    /// from the shared microservice template and answer at the root. Verified against the lab:
+    /// `/api/metrics` is 200 on mwserver and 404 on both gateways, and `/health` is the reverse.
+    public var defaultHealthPath: String {
+        switch self {
+        case .mwserver: return "/api/health"
+        default: return "/health"
+        }
+    }
+
     // Encode as a bare string rather than the synthesised `{"rawValue": …}` wrapper,
     // so manifests stay readable and hand-editable.
     public init(from decoder: Decoder) throws {

@@ -10,19 +10,78 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     public var image: String
     public var domains: [String]
     public var configFile: String
+    /// An explicit base URL, which overrides the address derived from `domains`.
+    /// Both this and ``healthPath`` are optional, so a manifest written before them still reads.
+    public var baseURL: String?
+    /// The readiness path, which defaults to the path for this service kind.
+    public var healthPath: String?
 
     public init(
         name: String,
         kind: ServiceKind,
         image: String,
         domains: [String] = [],
-        configFile: String
+        configFile: String,
+        baseURL: String? = nil,
+        healthPath: String? = nil
     ) {
         self.name = name
         self.kind = kind
         self.image = image
         self.domains = domains
         self.configFile = configFile
+        self.baseURL = baseURL
+        self.healthPath = healthPath
+    }
+}
+
+extension StackSpec {
+    /// The address of the box, with any SSH user stripped.
+    public var hostAddress: String? {
+        guard let host, !host.isEmpty else { return nil }
+        return host.split(separator: "@").last.map(String.init)
+    }
+}
+
+extension ServiceSpec {
+    /// Where to probe this service, or `nil` when nothing names an address.
+    ///
+    /// A dokku service is reached at the box rather than through its name, because a lab
+    /// vhost usually has no public DNS record and the proxy routes on the `Host` header.
+    /// Passing no stack falls back to the published name.
+    public func healthRequest(in stack: StackSpec? = nil) -> HealthRequest? {
+        let path = healthPath ?? kind.defaultHealthPath
+
+        if let baseURL,
+           let base = URL(string: baseURL),
+           let url = URL(string: path, relativeTo: base)?.absoluteURL {
+            return HealthRequest(url: url)
+        }
+
+        guard let vhost = domains.first, !vhost.isEmpty else { return nil }
+
+        if let stack, stack.backend == .dokku, let address = stack.hostAddress,
+           let url = URL(string: "http://\(address)\(path)") {
+            return HealthRequest(url: url, hostHeader: vhost)
+        }
+
+        guard let url = URL(string: "\(Self.scheme(forHost: vhost))://\(vhost)\(path)") else {
+            return nil
+        }
+        return HealthRequest(url: url)
+    }
+
+    /// The published address, ignoring any box-level routing.
+    public func healthURL() -> URL? {
+        healthRequest()?.url
+    }
+
+    /// A public name gets TLS. A single-label or lab-suffixed name is a LAN address that no
+    /// tunnel fronts, so it stays plain HTTP and a probe does not fail on a certificate.
+    static func scheme(forHost host: String) -> String {
+        let lanSuffixes = [".opi", ".local", ".internal", ".lan"]
+        guard host.contains(".") else { return "http" }
+        return lanSuffixes.contains(where: { host.hasSuffix($0) }) ? "http" : "https"
     }
 }
 

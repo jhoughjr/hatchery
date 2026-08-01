@@ -3,12 +3,72 @@ import Foundation
 import HatcheryKit
 
 @main
-struct Hatchery: ParsableCommand {
+struct Hatchery: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
-        subcommands: [Config.self, Stack.self]
+        subcommands: [Config.self, Stack.self, Status.self]
     )
+}
+
+struct Status: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Report the live state of the services a manifest declares."
+    )
+
+    @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+    var manifest: String = "hatchery.json"
+
+    @Option(name: .shortAndLong, help: "Report one stack instead of every stack.")
+    var stack: String?
+
+    @Option(name: .shortAndLong, help: "Seconds to wait for each service.")
+    var timeout: Int = 5
+
+    func run() async throws {
+        let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
+        let parsed = try StackManifest.decode(from: data)
+
+        let stacks: [StackSpec]
+        if let stack {
+            guard let found = parsed.stack(named: stack) else {
+                throw ValidationError("no stack named '\(stack)' in \(manifest)")
+            }
+            stacks = [found]
+        } else {
+            stacks = parsed.stacks
+        }
+
+        let reporter = StatusReporter(timeout: .seconds(timeout))
+        var worst: HealthState = .ready
+
+        for spec in stacks {
+            let report = await reporter.status(of: spec)
+            worst = min(worst, report.state)
+
+            print("\(report.stack)  [\(spec.backend.rawValue)]  \(report.state.rawValue)")
+            for service in report.services {
+                var line = "  \(service.service.padding(toLength: 24, withPad: " ", startingAt: 0))"
+                line += service.state.rawValue.padding(toLength: 13, withPad: " ", startingAt: 0)
+                if let latency = service.latencyMs {
+                    line += "\(latency)ms".padding(toLength: 8, withPad: " ", startingAt: 0)
+                } else {
+                    line += "        "
+                }
+                if let rev = service.gitRev {
+                    line += "rev=\(rev.prefix(7))  "
+                }
+                line += service.reasons.joined(separator: "; ")
+                print(line.trimmingCharacters(in: .whitespaces).isEmpty ? line : line)
+            }
+        }
+
+        // A script reads the exit code. `responding` is not a failure, because a service
+        // without a readiness route still answers, and an older image is not an outage.
+        if worst == .unreachable || worst == .degraded {
+            throw ExitCode.failure
+        }
+    }
 }
 
 extension Backend: ExpressibleByArgument {}
