@@ -16,8 +16,19 @@ public struct ServiceKind: RawRepresentable, Hashable, Sendable, Codable {
     public static let communicationGateway = ServiceKind(rawValue: "communication-gateway")
     /// The CONNECT proxy that carries GSX traffic. It answers `/healthz`, not `/health`.
     public static let gsxGateway = ServiceKind(rawValue: "gsx-gateway")
+    public static let bucket = ServiceKind(rawValue: "bucket")
+    public static let edge = ServiceKind(rawValue: "edge")
 
-    /// Kinds hatchery ships a contract for today.
+    /// Every kind the estate deploys.
+    ///
+    /// These raw values match the `service_kind` enum of the administration tier's registry
+    /// exactly. Keeping them character-identical makes the eventual join a mapping rather than
+    /// a translation table, so do not rename one without the other.
+    public static let all: [ServiceKind] = [
+        .mwserver, .paymentGateway, .communicationGateway, .gsxGateway, .bucket, .edge,
+    ]
+
+    /// Kinds hatchery ships an environment contract for today.
     public static let known: [ServiceKind] = [.mwserver, .paymentGateway, .communicationGateway]
 
     /// Where this kind answers a readiness probe.

@@ -15,6 +15,12 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     public var baseURL: String?
     /// The readiness path, which defaults to the path for this service kind.
     public var healthPath: String?
+    /// The registry's identifier for this deployment, once one exists.
+    ///
+    /// hatchery never mints this. The administration tier is the identity mint, and its
+    /// identifiers carry a `dep-` prefix. Carrying the value lets a report name the row the
+    /// tier already knows about, rather than inventing a second name for the same thing.
+    public var deploymentID: String?
 
     public init(
         name: String,
@@ -23,7 +29,8 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         domains: [String] = [],
         configFile: String,
         baseURL: String? = nil,
-        healthPath: String? = nil
+        healthPath: String? = nil,
+        deploymentID: String? = nil
     ) {
         self.name = name
         self.kind = kind
@@ -32,6 +39,8 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         self.configFile = configFile
         self.baseURL = baseURL
         self.healthPath = healthPath
+
+        self.deploymentID = deploymentID
     }
 }
 
@@ -85,19 +94,65 @@ extension ServiceSpec {
     }
 }
 
+/// Which environment a stack belongs to.
+///
+/// This is deliberately separate from ``Backend``. The backend says where a service runs;
+/// the environment says what it is for. The administration tier's registry treats environments
+/// as first-class rows with an `is_prod` flag, so the names here match the ones it seeds.
+public struct Environment: RawRepresentable, Hashable, Sendable, Codable {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let prod = Environment(rawValue: "prod")
+    public static let staging = Environment(rawValue: "staging")
+    public static let dev = Environment(rawValue: "dev")
+
+    /// Whether an action against this environment deserves a confirmation.
+    public var isProduction: Bool {
+        self == .prod
+    }
+
+    public init(from decoder: Decoder) throws {
+        self.rawValue = try decoder.singleValueContainer().decode(String.self)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 /// One deployable stack: a set of services on a single backend.
 public struct StackSpec: Codable, Sendable, Equatable {
     public var name: String
     public var backend: Backend
+    /// Defaults to `dev`, because an unlabelled stack is not production.
+    public var environment: Environment?
     /// SSH target for `dokku`; ignored for App Platform.
     public var host: String?
     public var services: [ServiceSpec]
 
-    public init(name: String, backend: Backend, host: String? = nil, services: [ServiceSpec] = []) {
+    public init(
+        name: String,
+        backend: Backend,
+        environment: Environment? = nil,
+        host: String? = nil,
+        services: [ServiceSpec] = []
+    ) {
         self.name = name
         self.backend = backend
+        self.environment = environment
         self.host = host
         self.services = services
+    }
+
+    /// An unlabelled stack reads as `dev`. Guessing `prod` would arm a confirmation prompt that
+    /// nobody asked for; guessing `dev` only ever errs toward doing what was asked.
+    public var resolvedEnvironment: Environment {
+        environment ?? .dev
     }
 }
 
