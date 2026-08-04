@@ -21,6 +21,12 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// identifiers carry a `dep-` prefix. Carrying the value lets a report name the row the
     /// tier already knows about, rather than inventing a second name for the same thing.
     public var deploymentID: String?
+    /// The tofu variable whose default carries this service's image, when tofu owns the deploy.
+    ///
+    /// A service without one cannot be deployed by hatchery. That is the honest answer rather
+    /// than a limitation: if nothing declares which variable moves, there is no way to change
+    /// the image without going around the declaration that owns it.
+    public var imageVariable: String?
 
     public init(
         name: String,
@@ -30,7 +36,8 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         configFile: String,
         baseURL: String? = nil,
         healthPath: String? = nil,
-        deploymentID: String? = nil
+        deploymentID: String? = nil,
+        imageVariable: String? = nil
     ) {
         self.name = name
         self.kind = kind
@@ -41,6 +48,32 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         self.healthPath = healthPath
 
         self.deploymentID = deploymentID
+        self.imageVariable = imageVariable
+    }
+}
+
+/// Where the OpenTofu configuration that owns a stack lives.
+///
+/// hatchery writes into this configuration and asks tofu what the write would do. It does not
+/// reach past it to the backend, because the image is a declared attribute: setting it directly
+/// would put two owners on one field and leave `tofu plan` permanently dirty.
+public struct TofuBinding: Codable, Sendable, Equatable {
+    /// The directory holding the configuration; `~` is expanded.
+    public var directory: String
+    /// The file declaring the image variables. Defaults to `variables.tf`.
+    public var variablesFile: String?
+
+    public init(directory: String, variablesFile: String? = nil) {
+        self.directory = directory
+        self.variablesFile = variablesFile
+    }
+
+    public var resolvedVariablesFile: String {
+        variablesFile ?? "variables.tf"
+    }
+
+    public var variablesPath: String {
+        Paths.join(Paths.expanded(directory), resolvedVariablesFile)
     }
 }
 
@@ -133,6 +166,8 @@ public struct StackSpec: Codable, Sendable, Equatable {
     public var environment: Environment?
     /// SSH target for `dokku`; ignored for App Platform.
     public var host: String?
+    /// The OpenTofu configuration that owns this stack, when one does.
+    public var tofu: TofuBinding?
     public var services: [ServiceSpec]
 
     public init(
@@ -140,13 +175,19 @@ public struct StackSpec: Codable, Sendable, Equatable {
         backend: Backend,
         environment: Environment? = nil,
         host: String? = nil,
+        tofu: TofuBinding? = nil,
         services: [ServiceSpec] = []
     ) {
         self.name = name
         self.backend = backend
         self.environment = environment
         self.host = host
+        self.tofu = tofu
         self.services = services
+    }
+
+    public func service(named name: String) -> ServiceSpec? {
+        services.first { $0.name == name }
     }
 
     /// An unlabelled stack reads as `dev`. Guessing `prod` would arm a confirmation prompt that
@@ -172,6 +213,22 @@ public struct StackManifest: Codable, Sendable, Equatable {
 
     public func stack(named name: String) -> StackSpec? {
         stacks.first { $0.name == name }
+    }
+
+    /// The same manifest with one service's declared image changed.
+    ///
+    /// The manifest is the source of truth for what a service should run. A deploy that moved
+    /// only the tofu variable would leave the declaration saying something that is no longer
+    /// true, and the next `hatchery status` would report drift hatchery itself created.
+    public func settingImage(stack stackName: String, service serviceName: String, to image: String) -> StackManifest {
+        var copy = self
+        for stackIndex in copy.stacks.indices where copy.stacks[stackIndex].name == stackName {
+            for serviceIndex in copy.stacks[stackIndex].services.indices
+            where copy.stacks[stackIndex].services[serviceIndex].name == serviceName {
+                copy.stacks[stackIndex].services[serviceIndex].image = image
+            }
+        }
+        return copy
     }
 }
 

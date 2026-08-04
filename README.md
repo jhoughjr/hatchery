@@ -8,8 +8,7 @@ changing the core.
 
 ## Status
 
-Early. The config contract and stack manifest are real and tested. Deploy and monitor
-are not built yet.
+Early, but the loop closes: configure, deploy, monitor, all against the live lab.
 
 Working today:
 
@@ -18,6 +17,9 @@ hatchery config validate <config.json> --service mwserver --backend dokku
 hatchery stack list --manifest hatchery.json
 hatchery status --manifest hatchery.json
 hatchery config audit --manifest hatchery.json
+hatchery config sync <stack> --manifest hatchery.json
+hatchery deploy <stack> <service> --image <ref>
+hatchery up|down|restart <stack>
 ```
 
 `config audit` checks what each service is *running with* rather than what a file claims:
@@ -50,8 +52,38 @@ without a health route does not fail a script.
 
 Two details that came from the lab rather than from a document. A dokku service is probed at
 the box with a `Host` header, because a lab vhost usually has no public DNS record. And the
-readiness path follows the service kind: MWServer answers at `/api/health`, while the gateways
-come from the shared microservice template and answer at `/health`.
+readiness path follows the estate convention rather than a path hatchery invented: `/health`
+for everything the shared microservice template generates, `/healthz` for gsx-gateway.
+
+`deploy` moves a service to a new image *through the declaration that owns it*:
+
+```
+mwlab: mwlab_image
+  mhehmsoth/mwserver2:arm64-0630f31-health -> mwserver2:arm64-abc1234
+  manifest updated to mwserver2:arm64-abc1234
+  tofu plan: changes pending
+  ...
+  nothing applied; re-run with --apply --yes
+```
+
+This is the part that most wants to be a shortcut and most must not be. The image is a
+tofu-declared attribute, so setting it at the box would leave the declaration stale and
+`tofu plan` permanently dirty — the same two-owners mistake `config sync` exists to undo. So
+`deploy` writes the tofu variable, runs `tofu plan -detailed-exitcode`, and shows what that
+would do. Nothing is applied unless `--apply --yes` says so.
+
+Three things it will not do quietly:
+
+- If the plan stops evaluating after the write, the variables file is **put back** and the
+  failure is reported. A configuration that no longer parses blocks every other change to
+  the stack, which is worse than an undeployed image.
+- The manifest moves only *after* tofu agrees the write evaluates. Writing it first would
+  leave the declaration claiming an image that never planned.
+- If the manifest and the tofu variable already disagreed, it says so before overwriting —
+  that means someone moved the image outside hatchery.
+
+The edit to `variables.tf` is textual rather than a parse-and-reprint, because the comments in
+that file explain how each image was built and where it came from. Exactly one line changes.
 
 ## Why this exists
 

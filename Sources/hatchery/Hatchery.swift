@@ -7,7 +7,9 @@ struct Hatchery: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
-        subcommands: [Config.self, Stack.self, Status.self, Up.self, Down.self, Restart.self]
+        subcommands: [
+            Config.self, Deploy.self, Stack.self, Status.self, Up.self, Down.self, Restart.self,
+        ]
     )
 }
 
@@ -62,6 +64,109 @@ private func runLifecycle(_ action: LifecycleRunner.Action, _ options: Lifecycle
         }
     }
     if failed { throw ExitCode.failure }
+}
+
+struct Deploy: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Move a service to a new image through the declaration that owns it.",
+        discussion: """
+            Writes the image into the stack's tofu variables file and its manifest entry, then \
+            runs `tofu plan` and shows what that would do. Nothing is applied unless --apply is \
+            passed. If the plan stops evaluating, the variables file is put back as it was.
+
+            Passing no --image reconciles tofu to the image the manifest already declares.
+            """
+    )
+
+    @Argument(help: "Stack the service belongs to.")
+    var stack: String
+
+    @Argument(help: "Service to deploy.")
+    var service: String
+
+    @Option(name: .shortAndLong, help: "Image to deploy. Defaults to what the manifest declares.")
+    var image: String?
+
+    @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+    var manifest: String = "hatchery.json"
+
+    @Flag(name: .long, help: "Run `tofu apply` once the plan is shown.")
+    var apply: Bool = false
+
+    @Flag(name: .long, help: "Required to deploy to a production stack, and to apply.")
+    var yes: Bool = false
+
+    @Flag(name: .long, help: "Show what would change without writing anything.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
+        let parsed = try StackManifest.decode(from: data)
+        guard let spec = parsed.stack(named: stack) else {
+            throw ValidationError("no stack named '\(stack)' in \(manifest)")
+        }
+        if spec.resolvedEnvironment.isProduction, !yes {
+            throw ValidationError(
+                "stack '\(spec.name)' is in \(spec.resolvedEnvironment.rawValue); pass --yes to deploy to it")
+        }
+        // Applying touches the world, so it is confirmed even outside production. Writing the
+        // file and planning are both reversible; an apply is not.
+        if apply, !yes {
+            throw ValidationError("--apply changes running infrastructure; pass --yes as well")
+        }
+
+        let deployer = Deployer()
+        let intent = try deployer.plan(service: service, in: spec, image: image)
+
+        print("\(intent.service): \(intent.variable)")
+        if intent.wasDrifted {
+            print("  manifest declares \(intent.declared), but the variable reads \(intent.current)")
+        }
+        if intent.needsWrite {
+            print("  \(intent.current) -> \(intent.target)")
+        } else {
+            print("  already \(intent.target)")
+        }
+
+        if dryRun {
+            print("  dry run; nothing written")
+            return
+        }
+
+        let result = try await deployer.deploy(
+            service: service, in: spec, image: image, apply: apply)
+
+        if result.reverted {
+            print("  plan failed; variables file put back")
+            print(result.outcome.output)
+            throw ExitCode.failure
+        }
+
+        // The manifest moves only once tofu has agreed the write evaluates. Writing it first
+        // would leave the declaration claiming an image that never planned.
+        if result.plan.updatesManifest {
+            let updated = parsed.settingImage(stack: stack, service: service, to: result.plan.target)
+            try updated.encoded().write(to: URL(fileURLWithPath: manifest))
+            print("  manifest updated to \(result.plan.target)")
+        }
+
+        switch result.outcome.verdict {
+        case .clean:
+            print("  tofu plan: no changes")
+        case .changes:
+            print("  tofu plan: changes pending")
+            print(result.outcome.output)
+        case .failed:
+            print(result.outcome.output)
+            throw ExitCode.failure
+        }
+
+        if let applied = result.applied {
+            print(applied)
+        } else if result.outcome.verdict == .changes {
+            print("  nothing applied; re-run with --apply --yes, or apply from \(spec.tofu?.directory ?? "the tofu directory")")
+        }
+    }
 }
 
 struct Up: AsyncParsableCommand {

@@ -30,11 +30,58 @@ public enum LiveConfigError: Error, CustomStringConvertible, Equatable {
 /// Runs one command and returns its standard output.
 public typealias CommandRunner = @Sendable ([String]) async throws -> Data
 
+/// Everything one command produced, including a nonzero status.
+///
+/// ``CommandRunner`` throws on a nonzero exit, which is right for a command whose only
+/// interesting outcome is its output. `tofu plan -detailed-exitcode` is not that command:
+/// it exits 2 to say *there are changes*, which is the answer rather than a failure.
+public struct CommandOutput: Sendable, Equatable {
+    public let status: Int32
+    public let standardOutput: String
+    public let standardError: String
+
+    public init(status: Int32, standardOutput: String, standardError: String = "") {
+        self.status = status
+        self.standardOutput = standardOutput
+        self.standardError = standardError
+    }
+
+    /// Whatever the command said, preferring stdout and falling back to stderr.
+    public var combined: String {
+        let out = standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let err = standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+        if out.isEmpty { return err }
+        if err.isEmpty { return out }
+        return out + "\n" + err
+    }
+}
+
+/// Runs one command in a directory and reports how it exited.
+public typealias CommandExecutor = @Sendable (
+    _ argv: [String],
+    _ workingDirectory: String?
+) async throws -> CommandOutput
+
 public enum ShellRunner {
     public static let live: CommandRunner = { argv in
+        let result = try await liveExecutor(argv, nil)
+        guard result.status == 0 else {
+            throw CommandFailure(
+                command: argv.first ?? "command",
+                status: result.status,
+                message: result.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        return Data(result.standardOutput.utf8)
+    }
+
+    public static let liveExecutor: CommandExecutor = { argv, workingDirectory in
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = argv
+        if let workingDirectory {
+            process.currentDirectoryURL = URL(fileURLWithPath: Paths.expanded(workingDirectory))
+        }
 
         let output = Pipe()
         let errors = Pipe()
@@ -43,20 +90,29 @@ public enum ShellRunner {
 
         try process.run()
         // Both pipes are drained before the wait. A process that fills a pipe buffer blocks
-        // until someone reads it, and waiting first would deadlock on a large config.
+        // until someone reads it, and waiting first would deadlock on a long plan.
         let outputData = output.fileHandleForReading.readDataToEndOfFile()
         let errorData = errors.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
 
-        guard process.terminationStatus == 0 else {
-            throw CommandFailure(
-                command: argv.first ?? "command",
-                status: process.terminationStatus,
-                message: String(decoding: errorData, as: UTF8.self)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-        }
-        return outputData
+        return CommandOutput(
+            status: process.terminationStatus,
+            standardOutput: String(decoding: outputData, as: UTF8.self),
+            standardError: String(decoding: errorData, as: UTF8.self)
+        )
+    }
+}
+
+public enum Paths {
+    /// Expands a leading `~`, which a manifest is likely to carry because a person wrote it.
+    public static func expanded(_ path: String) -> String {
+        guard path == "~" || path.hasPrefix("~/") else { return path }
+        return NSString(string: path).expandingTildeInPath
+    }
+
+    public static func join(_ directory: String, _ file: String) -> String {
+        guard !directory.isEmpty else { return file }
+        return directory.hasSuffix("/") ? directory + file : directory + "/" + file
     }
 }
 
