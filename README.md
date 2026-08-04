@@ -18,9 +18,56 @@ hatchery stack list --manifest hatchery.json
 hatchery status --manifest hatchery.json
 hatchery config audit --manifest hatchery.json
 hatchery config sync <stack> --manifest hatchery.json
+hatchery service new <stack> <name> --kind <kind> --domain <d> --image <ref>
 hatchery deploy <stack> <service> --image <ref>
 hatchery up|down|restart <stack>
 ```
+
+`service new` authors a service that does not exist yet — the declaration, its image variable,
+its config, and its manifest entry:
+
+```
+  write paylab2.tf
+  append to variables.tf
+  write paylab2.config.json
+    APP_URL                  composed
+    DATABASE_DB              composed
+    DATABASE_PASSWORD        NEEDS VALUE
+    GATEWAY_ADMIN_TOKEN      minted (32 bytes)
+    KEYPAIR_JWKS             minted (RSA-2048, RS512)
+
+  3 key(s) need values before this will boot:
+    DATABASE_PASSWORD — the database role already exists; a new password would not connect
+```
+
+### Where secrets come from
+
+Until now they came from nowhere: the values were set by hand on the box once, and everything
+since — `pull-mwlab-config.sh`, then `config sync` — copied them back down. That works for a
+service that already runs and has nothing to say about one that does not.
+
+So each declared key gets an origin, and the distinction is the whole point:
+
+| Origin | Meaning |
+| --- | --- |
+| `minted` | hatchery generated it; nothing else has a claim on the value |
+| `shared` | copied from a sibling, because the value has to match across the stack |
+| `composed` | derived from what the manifest already declares |
+| `NEEDS VALUE` | only a person or a third party has it |
+
+Three rules, each from the lab rather than from a preference. A **signing key is shared** when
+the stack already has one — the services verify each other's tokens, so a fresh key is a key
+nothing accepts — and minted only when there is no sibling to share with. **Database credentials
+are never invented**, because the role exists before the service does; a minted password produces
+a service that cannot connect. **Third-party credentials are never invented**, and saying so is
+more useful than a placeholder that looks filled in.
+
+`KEYPAIR_JWKS` is minted as RSA-2048/RS512 rather than an elliptic curve, because that is what
+the live keys are. CryptoKit has no RSA, so hatchery shells out to `openssl` and reads the
+PKCS#1 structure directly — nine DER integers that are exactly a private RSA JWK's fields.
+
+Not everything is an environment variable. Stripe credentials for the lab live in the database,
+so the origins above cover the config half of the problem and not the whole of it.
 
 `config audit` checks what each service is *running with* rather than what a file claims:
 

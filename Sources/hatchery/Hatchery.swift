@@ -8,7 +8,8 @@ struct Hatchery: AsyncParsableCommand {
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
-            Config.self, Deploy.self, Stack.self, Status.self, Up.self, Down.self, Restart.self,
+            Config.self, Deploy.self, Service.self, Stack.self, Status.self,
+            Up.self, Down.self, Restart.self,
         ]
     )
 }
@@ -165,6 +166,151 @@ struct Deploy: AsyncParsableCommand {
             print(applied)
         } else if result.outcome.verdict == .changes {
             print("  nothing applied; re-run with --apply --yes, or apply from \(spec.tofu?.directory ?? "the tofu directory")")
+        }
+    }
+}
+
+struct Service: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Work with the services in a stack.",
+        subcommands: [New.self]
+    )
+
+    struct New: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Author a new service into a stack.",
+            discussion: """
+                Writes the backend declaration, its image variable, and a config seeded with \
+                everything hatchery is entitled to generate, then adds the service to the \
+                manifest and runs `tofu plan`. Nothing is applied.
+
+                Secrets follow three rules. A signing key is shared from a sibling service when \
+                the stack already has one, because the services verify each other's tokens; it \
+                is minted only when there is nothing to share with, or when --mint-keypair says \
+                so. Database credentials are never invented, because the role exists before the \
+                service does. Third-party credentials are never invented, and are reported as \
+                needing a value.
+                """
+        )
+
+        @Argument(help: "Stack to add the service to.")
+        var stack: String
+
+        @Argument(help: "Name of the new service.")
+        var name: String
+
+        @Option(name: .shortAndLong, help: "Service kind. One of: \(ServiceKind.known.map(\.rawValue).joined(separator: ", ")).")
+        var kind: ServiceKindArgument
+
+        @Option(name: .long, help: "A domain for the service. Repeat for more than one.")
+        var domain: [String] = []
+
+        @Option(name: .shortAndLong, help: "Image to deploy.")
+        var image: String
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        @Option(name: .long, help: "Port the container listens on.")
+        var port: Int = 8080
+
+        @Option(name: .long, help: "Docker network the app must join to reach its database.")
+        var network: String?
+
+        @Flag(name: .long, help: "Gate the declaration behind an enable_<name> variable.")
+        var gated: Bool = false
+
+        @Flag(name: .long, help: "Mint a fresh signing key instead of sharing the stack's.")
+        var mintKeypair: Bool = false
+
+        @Flag(name: .long, help: "Show what would be written without writing anything.")
+        var dryRun: Bool = false
+
+        @Flag(name: .long, help: "Required to author into a production stack.")
+        var yes: Bool = false
+
+        func run() async throws {
+            let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
+            let parsed = try StackManifest.decode(from: data)
+            guard let spec = parsed.stack(named: stack) else {
+                throw ValidationError("no stack named '\(stack)' in \(manifest)")
+            }
+            if spec.resolvedEnvironment.isProduction, !yes {
+                throw ValidationError(
+                    "stack '\(spec.name)' is in \(spec.resolvedEnvironment.rawValue); pass --yes")
+            }
+            guard !domain.isEmpty else {
+                throw ValidationError("pass at least one --domain")
+            }
+
+            // Sibling config is what makes sharing possible, and it is read from the running
+            // services rather than from the declared files, because the box is the source of
+            // truth for what a value actually is.
+            var siblings: [String: [String: String]] = [:]
+            let reader = LiveConfigReader()
+            for existing in spec.services {
+                if let config = try? await reader.config(for: existing, in: spec) {
+                    siblings[existing.name] = config
+                }
+            }
+
+            let service = ServiceSpec(
+                name: name,
+                kind: kind.kind,
+                image: image,
+                domains: domain,
+                configFile: "\(name).config.json"
+            )
+
+            let scaffolder = Scaffolder()
+            let result = try await scaffolder.plan(
+                service: service, into: stack, manifest: parsed,
+                containerPort: port, network: network, gated: gated,
+                siblings: siblings, mintKeypair: mintKeypair)
+
+            for file in result.files {
+                let verb = file.role == .variableAppend ? "append to" : "write"
+                print("  \(verb) \(file.path)")
+            }
+            for secret in result.secrets {
+                print("    \(secret.key.padding(toLength: max(24, secret.key.count), withPad: " ", startingAt: 0)) \(secret.origin.label)")
+            }
+
+            if dryRun {
+                print("  dry run; nothing written")
+                return
+            }
+
+            let written = try scaffolder.write(result, in: spec)
+            print("  wrote \(written.count) file(s)")
+
+            try result.manifest.encoded().write(to: URL(fileURLWithPath: manifest))
+            print("  manifest updated")
+
+            let unresolved = result.unresolved
+            if !unresolved.isEmpty {
+                print("")
+                print("  \(unresolved.count) key(s) need values before this will boot:")
+                for secret in unresolved {
+                    if case .supplied(let reason) = secret.origin {
+                        print("    \(secret.key) — \(reason)")
+                    }
+                }
+            }
+
+            // The plan runs last, so what it reports is the declaration as it now stands.
+            guard let updatedStack = result.manifest.stack(named: stack) else { return }
+            let outcome = try await Deployer().tofuPlan(in: updatedStack)
+            switch outcome.verdict {
+            case .clean:
+                print("  tofu plan: no changes")
+            case .changes:
+                print("  tofu plan: changes pending")
+            case .failed:
+                print("  tofu plan failed:")
+                print(outcome.output)
+                throw ExitCode.failure
+            }
         }
     }
 }
