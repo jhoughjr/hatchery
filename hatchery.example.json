@@ -5,11 +5,15 @@
       "name" : "mwlab",
       "backend" : "dokku",
       "host" : "dokku@192.168.0.103",
+      "tofu" : {
+        "directory" : "~/infra-state/mwserver-tf"
+      },
       "services" : [
         {
           "name" : "mwlab",
           "kind" : "mwserver",
-          "image" : "mwserver2:arm64-bde0f7d-tf",
+          "image" : "mhehmsoth/mwserver2:arm64-0630f31-health",
+          "imageVariable" : "mwlab_image",
           "domains" : [
             "mwlab.opi",
             "mwlab.jimmyhoughjr.net"
@@ -20,6 +24,7 @@
           "name" : "paylab",
           "kind" : "payment-gateway",
           "image" : "payment-gateway:arm64-6be9967",
+          "imageVariable" : "paylab_image",
           "domains" : [
             "paylab.opi",
             "paylab.jimmyhoughjr.net"
@@ -30,6 +35,7 @@
           "name" : "comlab",
           "kind" : "communication-gateway",
           "image" : "communication-gateway:arm64-6f6bb65",
+          "imageVariable" : "comlab_image",
           "domains" : [
             "comlab.opi",
             "comlab.jimmyhoughjr.net"
