@@ -130,7 +130,12 @@ connection-string cutover; the lab still runs pre-cutover images, so the same ke
 legal there. `EnvContract` encodes that difference rather than pretending one contract
 fits both.
 
-AWS is not implemented. It will be a third backend, not a rewrite.
+Neither AWS nor App Platform is implemented as an *action* backend yet — `EnvContract` knows
+App Platform's config contract, but reading live config, lifecycle, and deploy are all dokku-only
+today. AWS is wanted ahead of DigitalOcean; both are wanted eventually.
+
+They arrive as implementations behind a protocol rather than as branches inside each verb, so a
+new provider is a new file rather than an edit to seven of them.
 
 ### Relationship to roost
 
