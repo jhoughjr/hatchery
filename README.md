@@ -374,6 +374,32 @@ When hatchery needs a URL to exist it asks roost (`roost route <sub>`) rather th
 reimplementing route publishing. hatchery can be installed as `roost-hatch` so roost's
 plugin dispatch picks it up.
 
+#### Where they actually overlap today
+
+That division reads cleanly and is not yet true in the code. Both tools drive the same box
+over the same SSH connection, and three commands do the same work:
+
+| | roost | hatchery |
+| --- | --- | --- |
+| logs | `ssh dokku@h logs <app> -n 200` | `ssh dokku@h logs <app> --num 200` |
+| restart | `ssh dokku@h ps:restart <app>` | the same command |
+| read config | `config:show` | `config:export --format json` |
+
+Two front doors to one command is harmless. **Config writes are not.**
+
+`roost config <app> KEY=VALUE` runs `dokku config:set` on the box. hatchery deliberately
+refuses to do that: it writes the declaration and lets tofu apply, so that tofu stays the
+single owner of what the app runs with. A value set through roost is therefore invisible to
+the declaration, and `tofu plan` starts describing something that is no longer true.
+
+That is exactly the drift `hatchery config audit` and `config sync` exist to find — the lab
+had three such keys live on `mwlab` and absent from its file, which is what prompted those
+commands. So the two tools do not merely duplicate here; they disagree about who owns config,
+and roost wins silently on the box.
+
+Until that is settled in code rather than in this file: **prefer `hatchery config set` over
+`roost config <app> K=V`**, and run `hatchery config audit` after any use of the latter.
+
 ### What hatchery does not rebuild
 
 `MacWorkStack-infra` already solves local dev (`compose.yaml` + `db/init/`) and tenant
