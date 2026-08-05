@@ -297,3 +297,97 @@ struct OnboardingTests {
         #expect(step?.why.contains("before the service does") == true)
     }
 }
+
+@Suite("The dokku SSH user")
+struct DokkuSSHUserTests {
+    @Test("a bare address gets the dokku user, because ssh would use the local login")
+    func addsUser() {
+        // `ssh 192.168.0.103` arrives as whoever is logged in here, fails on publickey, and
+        // reads as a missing key rather than as the wrong account.
+        #expect(DokkuProvider.sshTarget("192.168.0.103") == "dokku@192.168.0.103")
+        #expect(DokkuProvider.sshTarget("opi.local") == "dokku@opi.local")
+        #expect(DokkuProvider.sshTarget("  192.168.0.103  ") == "dokku@192.168.0.103")
+    }
+
+    @Test("a target that already names dokku is left alone")
+    func keepsCorrectUser() {
+        #expect(DokkuProvider.sshTarget("dokku@192.168.0.103") == "dokku@192.168.0.103")
+    }
+
+    @Test("a different user is not rewritten, because that would hide the mistake")
+    func doesNotRewriteExplicitUser() {
+        #expect(DokkuProvider.sshTarget("jimmyhoughjr@192.168.0.103") == "jimmyhoughjr@192.168.0.103")
+
+        let warning = DokkuProvider.userWarning("jimmyhoughjr@192.168.0.103")
+        #expect(warning?.contains("jimmyhoughjr") == true)
+        #expect(warning?.contains("dokku@192.168.0.103") == true)
+    }
+
+    @Test("no warning for a correct or bare target")
+    func warnsOnlyWhenWrong() {
+        #expect(DokkuProvider.userWarning("dokku@h") == nil)
+        #expect(DokkuProvider.userWarning("192.168.0.103") == nil)
+        #expect(DokkuProvider.userWarning("") == nil)
+    }
+
+    @Test("an empty host stays empty rather than becoming dokku@")
+    func emptyStaysEmpty() {
+        #expect(DokkuProvider.sshTarget("") == "")
+        #expect(DokkuProvider.sshTarget("   ") == "")
+    }
+
+    @Test("every command hatchery sends reaches the box as dokku")
+    func everyCommandUsesTheDokkuUser() async throws {
+        let seen = LockedBox<[[String]]>([])
+        let record: @Sendable ([String]) async throws -> Data = { argv in
+            seen.value = seen.value + [argv]
+            return Data("true".utf8)
+        }
+        // A stack saved before this fix, holding a bare address.
+        let bare = StackSpec(
+            name: "lab", backend: .dokku, host: "192.168.0.103",
+            services: [ServiceSpec(name: "app", kind: .mwserver, image: "i", configFile: "c.json")])
+        let service = bare.services[0]
+
+        _ = try? await LogReader(run: record).logs(for: service, in: bare)
+        _ = await LifecycleRunner(run: record).perform(.restart, on: service, in: bare)
+        _ = try? await LifecycleRunner(run: record).isRunning(service, in: bare)
+        _ = try? await LiveConfigReader(run: record).config(for: service, in: bare)
+
+        #expect(seen.value.count == 4)
+        for argv in seen.value {
+            #expect(argv.contains("dokku@192.168.0.103"), "a command went out as \(argv)")
+            #expect(!argv.contains("192.168.0.103") || argv.contains("dokku@192.168.0.103"))
+        }
+    }
+
+    @Test("a bare host is normalised into the manifest, not just at call time")
+    func normalisesOnCreate() throws {
+        let tool = StackBootstrapper(
+            execute: { _, _ in CommandOutput(status: 0, standardOutput: "ok") },
+            writeFile: { _, _ in }, fileExists: { _ in false }, createDirectory: { _ in },
+            environment: [:])
+        let result = try tool.plan(
+            name: "lab", backend: .dokku, host: "192.168.0.103", tofuDir: "/infra/lab")
+
+        #expect(result.stack.host == "dokku@192.168.0.103")
+        #expect(result.stack.settings?["host"] == "dokku@192.168.0.103")
+    }
+
+    @Test("preflight blames the user rather than the key when the user is wrong")
+    func preflightNamesTheRealCause() async {
+        let checks = await Preflight(execute: { argv, _ in
+            if argv.first == "tofu" { return CommandOutput(status: 0, standardOutput: "v1") }
+            if argv.contains("-V") { return CommandOutput(status: 0, standardOutput: "OpenSSH") }
+            return CommandOutput(
+                status: 255, standardOutput: "",
+                standardError: "jimmyhoughjr@192.168.0.103: Permission denied (publickey)")
+        }).dokku(host: "jimmyhoughjr@192.168.0.103")
+
+        let box = checks.first { $0.name == "box reachable" }
+        #expect(box?.status == .failed)
+        // The old advice sent people to authorize a key for the wrong account entirely.
+        #expect(box?.remedy?.contains("not the dokku account") == true)
+        #expect(box?.remedy?.contains("ssh-keys:add") != true)
+    }
+}

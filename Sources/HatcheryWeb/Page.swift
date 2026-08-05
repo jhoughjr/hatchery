@@ -331,6 +331,15 @@ enum Page {
           renderBackends();
         }
 
+        // A select only re-rendered when the dialog was confirmed, so changing it looked like
+        // it did nothing until you pressed done — which reads as closing, not switching.
+        document.addEventListener('change', event => {
+          if (event.target && event.target.id === 'setup-backend') {
+            $('wizard').returnValue = 'switch';
+            $('wizard').close();
+          }
+        });
+
         document.addEventListener('click', event => {
           const target = event.target.closest('button[data-action]');
           if (!target) return;
@@ -739,10 +748,17 @@ enum Page {
             + meta.backends.map(b => '<option value="' + escapeHTML(b.name) + '"'
                 + (b.name === chosen ? ' selected' : '') + '>' + escapeHTML(b.label) + '</option>').join('')
             + '</select><div class="hint">Pick another to read its guide.</div></div>' : '';
-          const ok = await step('Setting up ' + chosen,
+          const dialog = $('wizard');
+          const outcome = await step('Setting up ' + chosen,
                      'what this backend needs before hatchery can use it', picker + body, 'done');
-          const next = $('setup-backend') && $('setup-backend').value;
-          if (ok && next && next !== chosen) { return showSetup(next); }
+          // `switch` is the change listener above closing the dialog to redraw it.
+          if (dialog.returnValue === 'switch') {
+            const next = $('setup-backend') && $('setup-backend').value;
+            dialog.returnValue = '';
+            if (next && next !== chosen) { return showSetup(next); }
+            return showSetup(chosen);
+          }
+          void outcome;
         }
 
         // ---- detail, logs, config, diffs ------------------------------------

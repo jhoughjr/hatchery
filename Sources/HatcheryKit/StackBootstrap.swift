@@ -128,6 +128,11 @@ public struct StackBootstrapper: Sendable {
         // Missing settings are refused here rather than surfacing as a provider error later.
         var values = settings
         if !host.isEmpty { values["host"] = host }
+        // Normalised before it is stored, so the manifest records the target that will actually
+        // be used rather than one that silently becomes the local login.
+        if backend == .dokku, let given = values["host"], !given.isEmpty {
+            values["host"] = DokkuProvider.sshTarget(given)
+        }
         let missing = provider.missingSettings(values, environment: processEnvironment)
         guard missing.isEmpty else {
             throw BootstrapError.missingSettings(
@@ -139,7 +144,7 @@ public struct StackBootstrapper: Sendable {
             name: name,
             backend: backend,
             environment: environment,
-            host: host,
+            host: values["host"] ?? (host.isEmpty ? nil : host),
             tofu: TofuBinding(directory: tofuDir),
             // Only the declared, non-secret values: a token never reaches the manifest.
             settings: provider.settings.storable(values),

@@ -193,6 +193,43 @@ public struct DokkuProvider: ServiceProvider {
         return files
     }
 
+    /// The account dokku commands must arrive as.
+    ///
+    /// Not a preference: `dokku` is not a shell account. Its authorized_keys entry wraps every
+    /// command in dokku's own dispatcher, which is what turns `ssh <host> logs app` into a dokku
+    /// command. Any other user either fails to authenticate or lands in a plain shell where
+    /// `logs` means nothing.
+    public static let sshUser = "dokku"
+
+    /// The SSH target to actually use for a host as someone wrote it.
+    ///
+    /// A bare address is the whole bug this exists for: `ssh 192.168.0.103` falls back to the
+    /// *local* login, so it arrives as `jimmyhoughjr@…`, fails on publickey, and the failure
+    /// reads as a missing key rather than as the wrong user.
+    public static func sshTarget(_ host: String) -> String {
+        let trimmed = host.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return trimmed }
+        guard trimmed.contains("@") else { return "\(sshUser)@\(trimmed)" }
+        return trimmed
+    }
+
+    /// Whether a target names a user that cannot work, and what to say about it.
+    ///
+    /// An explicit wrong user is left alone rather than rewritten — silently changing what
+    /// someone typed would hide the mistake instead of correcting it.
+    public static func userWarning(_ host: String) -> String? {
+        let trimmed = host.trimmingCharacters(in: .whitespaces)
+        guard let user = trimmed.split(separator: "@").first, trimmed.contains("@") else {
+            return nil
+        }
+        guard String(user) != sshUser else { return nil }
+        return """
+            '\(user)' is not the dokku account. Dokku commands must arrive as \
+            \(sshUser)@\(trimmed.split(separator: "@").last.map(String.init) ?? "<host>"); any \
+            other user lands in a plain shell where dokku commands mean nothing.
+            """
+    }
+
     /// A terraform identifier for a service name. Dokku app names allow characters that a
     /// resource label does not, so they are folded rather than passed through.
     static func identifier(_ name: String) -> String {

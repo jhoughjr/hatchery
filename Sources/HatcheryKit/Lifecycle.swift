@@ -91,7 +91,9 @@ public struct LifecycleRunner: Sendable {
         }
 
         do {
-            _ = try await self.run(Self.command(host: host, action: action, app: service.name))
+            _ = try await self.run(
+                Self.command(
+                    host: DokkuProvider.sshTarget(host), action: action, app: service.name))
             return LifecycleResult(service: service.name, action: action.label, succeeded: true)
         } catch {
             return LifecycleResult(
@@ -123,7 +125,8 @@ public struct LifecycleRunner: Sendable {
         guard let host = stack.host, !host.isEmpty else {
             throw LifecycleError.noHost(stack: stack.name)
         }
-        let data = try await self.run(Self.runningCommand(host: host, app: service.name))
+        let data = try await self.run(
+            Self.runningCommand(host: DokkuProvider.sshTarget(host), app: service.name))
         let answer = String(decoding: data, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()

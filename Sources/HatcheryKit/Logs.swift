@@ -102,7 +102,9 @@ public struct LogReader: Sendable {
         }
 
         let capped = max(1, min(lines, Self.maximumLines))
-        let data = try await run(Self.command(host: host, app: service.name, lines: capped))
+        let data = try await run(
+            Self.command(
+                host: DokkuProvider.sshTarget(host), app: service.name, lines: capped))
         return String(decoding: data, as: UTF8.self)
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { LogLine.classify(String($0)) }
