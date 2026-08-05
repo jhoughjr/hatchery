@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import HatcheryKit
+import HatcheryWeb
 
 @main
 struct Hatchery: AsyncParsableCommand {
@@ -8,7 +9,7 @@ struct Hatchery: AsyncParsableCommand {
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
-            Config.self, Deploy.self, Service.self, Stack.self, Status.self,
+            Config.self, Deploy.self, Serve.self, Service.self, Stack.self, Status.self,
             Up.self, Down.self, Restart.self,
         ]
     )
@@ -167,6 +168,57 @@ struct Deploy: AsyncParsableCommand {
         } else if result.outcome.verdict == .changes {
             print("  nothing applied; re-run with --apply --yes, or apply from \(spec.tofu?.directory ?? "the tofu directory")")
         }
+    }
+}
+
+struct Serve: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Serve the dashboard on this machine.",
+        discussion: """
+            hatchery manages deployments, so it deliberately does not run inside one. If it were \
+            a service on the box it manages, restarting that stack would kill it mid-action, and \
+            the moment you most need it — the box wedged, the apps down — is exactly when it \
+            would not be there. It runs as a local process instead.
+
+            It binds 127.0.0.1 by default, which nothing off this machine can reach. Binding \
+            anything else requires --token, because this process holds SSH access to every stack \
+            it manages.
+            """
+    )
+
+    @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+    var manifest: String = "hatchery.json"
+
+    @Option(name: .long, help: "Address to bind.")
+    var bind: String = "127.0.0.1"
+
+    @Option(name: .shortAndLong, help: "Port to listen on.")
+    var port: Int = 7878
+
+    @Option(name: .long, help: "Require this token on every API request. Required to bind off-host.")
+    var token: String?
+
+    func run() async throws {
+        let path = manifest
+        // Read per request rather than once at boot, so editing the manifest or running
+        // `service new` shows up without a restart.
+        let load: @Sendable () throws -> StackManifest = {
+            try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
+        }
+        _ = try load()  // Fail now with a clear message rather than on the first request.
+
+        let api = HatcheryAPI(loadManifest: load, token: token)
+        let server = try WebServer(api: api, host: bind, port: port, hasToken: token != nil)
+
+        print("hatchery serving http://\(bind):\(port)")
+        if BindAddress.isLoopback(bind) {
+            print("  bound to loopback — not reachable from the LAN")
+            print("  from elsewhere: ssh -L \(port):localhost:\(port) <this-host>")
+        } else {
+            print("  reachable from the network — token required on every API request")
+        }
+        print("  manifest: \(path)")
+        try await server.run()
     }
 }
 
