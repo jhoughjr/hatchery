@@ -180,8 +180,15 @@ enum Wire {
     }
 
     struct Kinds: Encodable {
+        /// Backends, each saying whether hatchery can author into it today.
+        struct BackendOption: Encodable {
+            let name: String
+            let authorable: Bool
+            let note: String?
+        }
+
         let kinds: [String]
-        let backends: [String]
+        let backends: [BackendOption]
         let environments: [String]
     }
 }
@@ -262,7 +269,15 @@ public struct HatcheryAPI: Sendable {
             return .json(
                 Wire.Kinds(
                     kinds: ServiceKind.known.map(\.rawValue),
-                    backends: Backend.allCases.map(\.rawValue),
+                    // Whether a backend can be authored is asked of the provider registry rather
+                    // than hardcoded here, so a new provider shows up in the menu by existing.
+                    backends: Backend.allCases.map { backend in
+                        let authorable = (try? Providers.provider(for: backend)) != nil
+                        return Wire.Kinds.BackendOption(
+                            name: backend.rawValue,
+                            authorable: authorable,
+                            note: authorable ? nil : "\(backend.rawValue) stacks cannot be created by hatchery yet")
+                    },
                     environments: [
                         Environment.dev.rawValue, Environment.staging.rawValue,
                         Environment.prod.rawValue,

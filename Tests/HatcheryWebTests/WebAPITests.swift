@@ -438,3 +438,50 @@ struct PageWiringTests {
         #expect(Page.markup.hasSuffix("</html>"))
     }
 }
+
+@Suite("Menu data")
+struct KindsRouteTests {
+    @Test("service kinds are listed for the wizard")
+    func listsKinds() async {
+        let response = await api().handle(WebRequest(method: "GET", path: "/api/kinds"))
+        #expect(response.status == 200)
+        #expect(response.text.contains("mwserver"))
+        #expect(response.text.contains("payment-gateway"))
+        #expect(response.text.contains("communication-gateway"))
+    }
+
+    @Test("each backend says whether hatchery can author into it")
+    func reportsAuthorable() async {
+        let response = await api().handle(WebRequest(method: "GET", path: "/api/kinds"))
+
+        // dokku can be created; App Platform cannot yet, and says so rather than being offered
+        // as a menu entry that fails after the form is filled in.
+        #expect(response.text.contains("\"authorable\":true"))
+        #expect(response.text.contains("\"authorable\":false"))
+        #expect(response.text.contains("cannot be created by hatchery yet"))
+    }
+
+    @Test("authorability is asked of the provider registry, not restated here")
+    func matchesProviderRegistry() {
+        // If a provider is added, the menu picks it up by existing. This test fails if the two
+        // ever disagree, which is the only way the menu can start lying.
+        for backend in Backend.allCases {
+            let hasProvider = (try? Providers.provider(for: backend)) != nil
+            #expect(hasProvider == (backend == .dokku))
+        }
+    }
+
+    @Test("environments are offered in the order a person escalates through them")
+    func environmentOrder() async {
+        let response = await api().handle(WebRequest(method: "GET", path: "/api/kinds"))
+        let text = response.text
+        guard let dev = text.range(of: "dev"), let staging = text.range(of: "staging"),
+            let prod = text.range(of: "prod")
+        else {
+            Issue.record("an environment is missing from the menu")
+            return
+        }
+        #expect(dev.lowerBound < staging.lowerBound)
+        #expect(staging.lowerBound < prod.lowerBound)
+    }
+}
