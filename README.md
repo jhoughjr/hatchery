@@ -21,7 +21,58 @@ hatchery config sync <stack> --manifest hatchery.json
 hatchery service new <stack> <name> --kind <kind> --domain <d> --image <ref>
 hatchery deploy <stack> <service> --image <ref>
 hatchery up|down|restart <stack>
+hatchery serve
 ```
+
+## The dashboard
+
+`hatchery serve` puts the same operations behind a browser:
+
+```
+$ hatchery serve
+hatchery serving http://127.0.0.1:7878
+  bound to loopback — not reachable from the LAN
+  from elsewhere: ssh -L 7878:localhost:7878 <this-host>
+```
+
+One self-contained page, no build step, no asset pipeline — the markup is a string in the
+binary, so the page cannot drift from the code serving it. It polls status every ten seconds
+and follows the browser's light or dark theme.
+
+### It does not run inside what it manages
+
+hatchery manages deployments, so it deliberately is not one. Running it as an app on the box it
+administers means a restart of that stack kills the tool mid-action, and the moment you most
+need it — box wedged, apps down — is exactly when it would not be there. It is a local process.
+There is no Dockerfile here on purpose.
+
+### Confirmation is enforced on the server
+
+The browser dialog that asks you to type a service's name is a convenience. It is not the
+control, because anything can post to the endpoint. So every mutating request carries the name
+of what it is about to change, and the server refuses a mismatch:
+
+```
+$ curl -XPOST localhost:7878/api/lifecycle -d '{"stack":"mwlab","service":"mwlab","action":"restart","confirm":"wrong"}'
+{"error":"confirmation did not match; expected 'mwlab' to change it"}
+```
+
+Applying a deploy to a **production** stack is refused outright and stays on the CLI. The
+browser is the wrong place for the one action with no undo.
+
+### Binding and tokens
+
+The default bind is `127.0.0.1`, which nothing off the machine can reach, so no token is needed
+to get started. Binding anything else **requires** `--token` and is refused without one — this
+process holds SSH access to every stack it manages, so an open port is an open shell by proxy.
+
+```sh
+hatchery serve                                   # loopback, no token
+hatchery serve --bind 0.0.0.0 --token "$(openssl rand -base64 24)"
+```
+
+The token is compared without an early exit, so how long the check takes says nothing about how
+much of it matched.
 
 `service new` authors a service that does not exist yet — the declaration, its image variable,
 its config, and its manifest entry:

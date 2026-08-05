@@ -5,6 +5,12 @@ public struct CommandFailure: Error, CustomStringConvertible, Equatable {
     public let status: Int32
     public let message: String
 
+    public init(command: String, status: Int32, message: String) {
+        self.command = command
+        self.status = status
+        self.message = message
+    }
+
     public var description: String {
         message.isEmpty ? "\(command) failed (\(status))" : "\(command) failed (\(status)): \(message)"
     }
