@@ -9,7 +9,8 @@ struct Hatchery: AsyncParsableCommand {
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
-            Config.self, Deploy.self, Serve.self, Service.self, Stack.self, Status.self,
+            Config.self, Deploy.self, Doctor.self, Serve.self, Service.self, Stack.self,
+            Status.self,
             Up.self, Down.self, Restart.self,
         ]
     )
@@ -172,6 +173,53 @@ struct Deploy: AsyncParsableCommand {
         } else if result.outcome.verdict == .changes {
             print("  nothing applied; re-run with --apply --yes, or apply from \(spec.tofu?.directory ?? "the tofu directory")")
         }
+    }
+}
+
+struct Doctor: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Check the prerequisites for managing a stack.",
+        discussion: """
+            Checks the things that otherwise fail halfway through `tofu init`, or after a stack \
+            has been half-written, as a provider error that says nothing about the missing SSH \
+            key that actually caused it.
+            """
+    )
+
+    @Option(name: .long, help: "SSH target to test, e.g. dokku@192.168.0.103.")
+    var host: String?
+
+    @Option(name: .shortAndLong, help: "Check the host of a stack in the manifest instead.")
+    var stack: String?
+
+    @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+    var manifest: String = "hatchery.json"
+
+    func run() async throws {
+        var target = host
+        if target == nil, let name = stack {
+            let path = try ManifestLocator.resolve(manifest)
+            let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
+            guard let spec = parsed.stack(named: name) else {
+                throw ValidationError("no stack named '\(name)' in \(path)")
+            }
+            target = spec.host
+        }
+
+        let checks = await Preflight().run(host: target)
+        for check in checks {
+            let mark: String
+            switch check.status {
+            case .ok: mark = "ok  "
+            case .failed: mark = "FAIL"
+            case .skipped: mark = "--  "
+            }
+            print("  \(mark) \(check.name): \(check.detail)")
+            if let remedy = check.remedy {
+                print("       -> \(remedy)")
+            }
+        }
+        if !checks.allPassed { throw ExitCode.failure }
     }
 }
 

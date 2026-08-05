@@ -104,6 +104,35 @@ enum Page {
           .needs { color: var(--degraded); }
           .add { font-size: 0.75rem; }
           .last { margin-left: auto; }
+          .detail {
+            background: var(--bg); border-top: 1px solid var(--line);
+            padding: 0.75rem 1rem; font-size: 0.8rem;
+          }
+          .detail dl { display: grid; grid-template-columns: 7rem 1fr; gap: 0.15rem 0.75rem; margin: 0 0 0.75rem; }
+          .detail dt { color: var(--dim); }
+          .detail dd { margin: 0; word-break: break-all; }
+          .kv { display: grid; grid-template-columns: minmax(8rem, auto) 1fr; gap: 0.1rem 0.75rem; }
+          .kv .k { color: var(--dim); }
+          .kv .v { word-break: break-all; }
+          .kv .sec { color: var(--degraded); }
+          .issue { margin-top: 0.4rem; }
+          .issue.error { color: var(--unreachable); }
+          .issue.warning { color: var(--degraded); }
+          pre.out {
+            margin: 0; max-height: 22rem; overflow: auto; font-size: 0.75rem;
+            background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
+            padding: 0.5rem; line-height: 1.4;
+          }
+          pre.out div { white-space: pre-wrap; }
+          .l-error { color: var(--unreachable); }
+          .l-warning { color: var(--degraded); }
+          .l-info { color: var(--dim); }
+          .d-add { color: var(--ready); }
+          .d-remove { color: var(--unreachable); }
+          .d-change { color: var(--degraded); }
+          .d-header { color: var(--fg); font-weight: 600; }
+          dialog.wide { max-width: 52rem; width: 90vw; }
+          .tally { margin: 0.25rem 0 0.75rem; font-size: 0.8rem; }
           .stack-actions {
             padding: 0.6rem 1rem; border-top: 1px solid var(--line);
             display: flex; gap: 0.5rem;
@@ -153,9 +182,16 @@ enum Page {
             + stamp + '  ' + escapeHTML(message) + '</span>\\n' + $('log').innerHTML;
         }
 
+        // Written with split/join rather than a regex on purpose. A character class holding
+        // quote characters is indistinguishable from an unterminated string to anything reading
+        // this file line by line — including the test that checks exactly that.
         function escapeHTML(s) {
-          return String(s).replace(/[&<>"']/g, c => ({
-            '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+          return String(s)
+            .split('&').join('&amp;')
+            .split('<').join('&lt;')
+            .split('>').join('&gt;')
+            .split('"').join('&quot;')
+            .split("'").join('&#39;');
         }
 
         // The dialog requires the target's name typed out. The server checks it too — this is
@@ -215,6 +251,9 @@ enum Page {
             case 'new-service': newService(stack); break;
             case 'new-stack': newStack(); break;
             case 'apply': applyStack(stack); break;
+            case 'logs': showLogs(stack, service); break;
+            case 'config': showConfig(stack, service); break;
+            case 'edit-config': editConfig(stack, service); break;
           }
         });
 
@@ -241,9 +280,17 @@ enum Page {
                 +   '</span>' + reasons + '</td>'
                 + '<td class="num">' + latency + '</td>'
                 + '<td class="actions">'
+                +   button('logs', 'logs', stack.name, svc.name)
+                +   ' '
+                +   button('config', 'config', stack.name, svc.name)
+                +   ' '
                 +   button('restart', 'restart', stack.name, svc.name)
                 +   ' '
                 +   button('deploy', 'deploy', stack.name, svc.name)
+                + '</td></tr>'
+                + '<tr><td colspan="4" style="padding:0;border-top:0">'
+                +   '<div class="detail" id="d-' + escapeHTML(stack.name) + '-'
+                +     escapeHTML(svc.name) + '" hidden></div>'
                 + '</td></tr>';
             }).join('');
             const badge = stack.isProduction ? '<span class="prod">prod</span>' : '';
@@ -267,9 +314,34 @@ enum Page {
               service, 'Restart ' + service);
         }
 
-        function deploy(stack, service) {
-          act('/api/deploy', {stack, service, apply: false, confirm: service},
-              service, 'Plan a deploy of ' + service + ' (nothing is applied)');
+        // Plans, renders the diff into the service's own panel, and only then offers to apply.
+        // Reading the plan before applying is the whole reason the deploy path goes through
+        // tofu rather than around it.
+        async function deploy(stack, service) {
+          if (!(await confirmNamed(service, 'Plan a deploy of ' + service + ' — nothing is applied yet')))
+            { log('cancelled'); return; }
+
+          const box = togglePanel(stack, service, {kind: 'plan', body: 'planning…'});
+          busy = true;
+          const res = await send('/api/deploy', {stack, service, apply: false, confirm: service});
+          busy = false;
+          log(res.data.message || res.data.error, !res.ok);
+
+          const target = panel(stack, service);
+          if (!target) return;
+          if (!res.data.summary) {
+            target.innerHTML = '<span class="err">' + escapeHTML(res.data.error || 'no plan') + '</span>';
+            target.hidden = false;
+            return;
+          }
+          target.dataset.kind = 'plan';
+          target.innerHTML = renderPlan(res.data.summary)
+            + (res.data.summary.parsed && !(res.data.summary.add === 0
+                 && res.data.summary.change === 0 && res.data.summary.destroy === 0)
+               ? '<div style="margin-top:0.6rem">'
+                 + button('apply', 'apply this stack', stack, null, 'add') + '</div>'
+               : '');
+          target.hidden = false;
         }
 
         async function refresh() {
@@ -328,18 +400,33 @@ enum Page {
         }
 
         async function newStack() {
-          const ok = await step('New stack', 'Step 1 of 2 — where it lives',
-              field('w-name', 'Name', '', 'lowercase, dashes allowed')
-            + field('w-host', 'SSH target', 'dokku@192.168.0.103', 'user@host for the box')
-            + field('w-dir', 'Tofu directory', '~/infra-state/', 'must be empty or new')
-            + select('w-env', 'Environment', meta.environments, 'prod requires the CLI to apply'));
+          const ok = await step('New stack', 'Step 1 of 3 — where it lives',
+              field('w-name', 'Name', '',
+                    'Identifies the stack in hatchery. Lowercase, dashes allowed.')
+            + field('w-host', 'SSH target', 'dokku@192.168.0.103',
+                    'How hatchery reaches the box to create and manage apps. The user must be '
+                    + 'dokku — that account is what turns an SSH command into a dokku command — '
+                    + 'and your key must already be authorized for it. Checked in the next step.')
+            + field('w-dir', 'Tofu directory', '~/infra-state/',
+                    'Where the generated tofu configuration and the config file for each service are '
+                    + 'written. Must be empty or not exist. Keep it somewhere durable and backed '
+                    + 'up: it holds the state that maps tofu to the running apps.')
+            + select('w-env', 'Environment', meta.environments,
+                     'Labels the stack. A prod stack refuses to apply from the browser.'));
           if (!ok) { log('cancelled'); return; }
 
           const name = $('w-name').value.trim();
-          const body = {name, host: $('w-host').value.trim(), tofuDir: $('w-dir').value.trim(),
-                        environment: $('w-env').value, confirm: name};
+          const host = $('w-host').value.trim();
+          const dir = $('w-dir').value.trim();
+          const env = $('w-env').value;
+
+          // Check before creating rather than after. These failures otherwise surface halfway
+          // through `tofu init`, as a provider error that never mentions the real cause.
+          if (!(await preflight(host))) return;
+
           busy = true;
-          const res = await send('/api/stacks/new', body);
+          const res = await send('/api/stacks/new',
+            {name, host, tofuDir: dir, environment: env, confirm: name});
           busy = false;
           log(res.data.message || res.data.error, !res.ok);
           if (!res.ok) return;
@@ -347,15 +434,53 @@ enum Page {
           newService(name);
         }
 
+        async function preflight(host) {
+          $('wiz-title').textContent = 'Checking prerequisites';
+          $('wiz-body').innerHTML = '<div class="steps">Step 2 of 3 — can we reach it?</div>'
+            + '<div id="pf">checking ' + escapeHTML(host) + '…</div>';
+          $('wiz-ok').textContent = 'continue';
+          const dialog = $('wizard');
+          const done = new Promise(resolve => { dialog.onclose = () => resolve(dialog.returnValue === 'ok'); });
+          dialog.showModal();
+
+          const res = await get('/api/preflight?host=' + encodeURIComponent(host));
+          const checks = res.ok ? res.data : [];
+          const failed = checks.some(c => c.status === 'failed');
+          $('pf').innerHTML = checks.map(c => {
+            const cls = c.status === 'ok' ? 'd-add' : (c.status === 'failed' ? 'err' : 'hint');
+            const mark = c.status === 'ok' ? 'ok' : (c.status === 'failed' ? 'FAIL' : '--');
+            return '<div class="' + cls + '">' + mark + '  ' + escapeHTML(c.name) + ': '
+              + escapeHTML(c.detail) + '</div>'
+              + (c.remedy ? '<div class="hint">&nbsp;&nbsp;&nbsp;&rarr; ' + escapeHTML(c.remedy)
+                            + '</div>' : '');
+          }).join('');
+          if (failed) {
+            $('pf').innerHTML += '<div class="hint" style="margin-top:0.6rem">'
+              + 'Fix these and try again — creating the stack now would fail partway through.</div>';
+            $('wiz-ok').textContent = 'create anyway';
+          }
+          const proceed = await done;
+          if (!proceed) log('cancelled at prerequisites');
+          return proceed;
+        }
+
         async function newService(stack) {
-          const ok = await step('New service in ' + stack, 'Step 2 of 2 — what runs',
-              field('s-name', 'Name', '', 'also names its config file')
-            + select('s-kind', 'Kind', meta.kinds)
-            + field('s-image', 'Image', '', 'a tag already built on the host')
-            + field('s-domains', 'Domains', '', 'comma separated')
+          const ok = await step('New service in ' + stack, 'Step 3 of 3 — what runs',
+              field('s-name', 'Name', '',
+                    'Becomes the dokku app name and names its config file.')
+            + select('s-kind', 'Kind',  meta.kinds,
+                     'Decides which environment contract applies — what it needs to boot, '
+                     + 'and which of those hatchery can supply for you.')
+            + field('s-image', 'Image', '',
+                    'A tag that already exists on the host. hatchery does not build images; '
+                    + 'build it on the box first, then name it here.')
+            + field('s-domains', 'Domains', '',
+                    'Comma separated. The first is what health checks are sent to.')
             + field('s-network', 'Docker network', 'macworkstack-infra_default',
-                    'how it reaches its database; blank for none')
-            + field('s-port', 'Container port', '8080'),
+                    'The docker network holding the database. Without it the app starts and '
+                    + 'then cannot reach postgres. Blank if it needs no database.')
+            + field('s-port', 'Container port', '8080',
+                    'The port inside the container. Dokku maps 80 to it.'),
             'create');
           if (!ok) { log('cancelled'); return; }
 
@@ -411,6 +536,120 @@ enum Page {
           log(res.data.message || res.data.error, !res.ok);
           if (res.data.detail) log(res.data.detail, !res.ok);
           refresh();
+        }
+
+        // ---- detail, logs, config, diffs ------------------------------------
+        // The detail panel lives under its service row and toggles, so opening one does not
+        // navigate away from everything else that is currently degraded.
+        function panel(stack, service) { return $('d-' + stack + '-' + service); }
+
+        function togglePanel(stack, service, html) {
+          const box = panel(stack, service);
+          if (!box) return null;
+          if (!box.hidden && box.dataset.kind === html.kind) { box.hidden = true; return null; }
+          box.dataset.kind = html.kind;
+          box.innerHTML = html.body;
+          box.hidden = false;
+          return box;
+        }
+
+        async function get(path) {
+          const res = await fetch(path, {headers});
+          const data = await res.json().catch(() => ({}));
+          return {ok: res.ok, data};
+        }
+
+        function query(stack, service, extra) {
+          return '?stack=' + encodeURIComponent(stack)
+            + '&service=' + encodeURIComponent(service) + (extra || '');
+        }
+
+        async function showLogs(stack, service) {
+          const box = togglePanel(stack, service, {kind: 'logs', body: 'reading logs…'});
+          if (!box) return;
+          const res = await get('/api/logs' + query(stack, service, '&lines=200'));
+          if (!res.ok) { box.innerHTML = '<span class="err">' + escapeHTML(res.data.error) + '</span>'; return; }
+          const lines = res.data.lines || [];
+          box.innerHTML = lines.length
+            ? '<pre class="out">' + lines.map(l =>
+                '<div class="l-' + l.level + '">' + escapeHTML(l.text) + '</div>').join('') + '</pre>'
+            : '<span class="hint">no output</span>';
+        }
+
+        async function showConfig(stack, service) {
+          const box = togglePanel(stack, service, {kind: 'config', body: 'reading config…'});
+          if (!box) return;
+          const res = await get('/api/config' + query(stack, service));
+          if (!res.ok) { box.innerHTML = '<span class="err">' + escapeHTML(res.data.error) + '</span>'; return; }
+          const c = res.data;
+          const secret = new Set(c.secretKeys || []);
+          const keys = Object.keys(c.declared || {}).sort();
+
+          const rows = keys.map(k =>
+            '<div class="k' + (secret.has(k) ? ' sec' : '') + '">' + escapeHTML(k) + '</div>'
+            + '<div class="v">' + escapeHTML(c.declared[k]) + '</div>').join('');
+
+          const issues = (c.issues || []).map(i =>
+            '<div class="issue ' + i.severity + '">' + escapeHTML(i.severity) + ': '
+            + escapeHTML(i.key) + ' — ' + escapeHTML(i.message) + '</div>').join('');
+
+          box.innerHTML = '<dl>'
+            + '<dt>image</dt><dd>' + escapeHTML(c.image) + '</dd>'
+            + '<dt>kind</dt><dd>' + escapeHTML(c.kind) + '</dd>'
+            + '<dt>domains</dt><dd>' + escapeHTML((c.domains || []).join(', ')) + '</dd>'
+            + '<dt>source</dt><dd>' + escapeHTML(c.source)
+            +   (c.source === 'live' ? ' (what it is running with)' : ' (the file; the box was unreachable)')
+            + '</dd></dl>'
+            + '<div class="kv">' + rows + '</div>' + issues
+            + '<div style="margin-top:0.6rem">'
+            + button('edit-config', 'edit', stack, service, 'add') + '</div>';
+        }
+
+        // Secret values are shown as a fingerprint, never the value, so a field left untouched
+        // must not be posted back — that would write the fingerprint over the real secret.
+        async function editConfig(stack, service) {
+          const res = await get('/api/config' + query(stack, service));
+          if (!res.ok) { log(res.data.error, true); return; }
+          const c = res.data;
+          const secret = new Set(c.secretKeys || []);
+          const keys = Object.keys(c.declared || {}).sort();
+
+          const body = keys.map(k => field('c-' + k, k,
+            secret.has(k) ? '' : c.declared[k],
+            secret.has(k) ? 'secret — leave blank to keep it unchanged' : null)).join('')
+            + '<div class="field"><label>Add a key</label>'
+            + '<input id="c-new-key" placeholder="KEY" autocomplete="off">'
+            + '<input id="c-new-val" placeholder="value" autocomplete="off"></div>';
+
+          const ok = await step('Config for ' + service, keys.length + ' key(s)', body, 'save');
+          if (!ok) { log('cancelled'); return; }
+
+          const values = {};
+          keys.forEach(k => {
+            const v = $('c-' + k).value;
+            if (secret.has(k)) { if (v) values[k] = v; }
+            else if (v !== c.declared[k]) { values[k] = v; }
+          });
+          const newKey = $('c-new-key').value.trim();
+          if (newKey) values[newKey] = $('c-new-val').value;
+
+          if (!Object.keys(values).length) { log('nothing changed'); return; }
+          busy = true;
+          const out = await send('/api/config/set', {stack, service, values, confirm: service});
+          busy = false;
+          log(out.data.message || out.data.error, !out.ok);
+          if (out.data.detail) log(out.data.detail, !out.ok);
+        }
+
+        function renderPlan(summary) {
+          const lines = (summary.lines || []).map(l =>
+            '<div class="d-' + l.kind + '">' + escapeHTML(l.text) + '</div>').join('');
+          const tally = summary.parsed
+            ? '<div class="tally"><span class="d-add">+' + summary.add + ' add</span>  '
+              + '<span class="d-change">~' + summary.change + ' change</span>  '
+              + '<span class="d-remove">-' + summary.destroy + ' destroy</span></div>'
+            : '';
+          return tally + '<pre class="out">' + lines + '</pre>';
         }
 
         refresh();

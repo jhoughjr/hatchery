@@ -84,6 +84,35 @@ administers means a restart of that stack kills the tool mid-action, and the mom
 need it — box wedged, apps down — is exactly when it would not be there. It is a local process.
 There is no Dockerfile here on purpose.
 
+### Prerequisites, checked before anything is written
+
+`hatchery doctor` checks the things that otherwise surface halfway through `tofu init` — as a
+provider error that never mentions the missing SSH key that actually caused it:
+
+```
+  ok   tofu installed: OpenTofu v1.12.5
+  ok   ssh client: OpenSSH_10.2p1, LibreSSL 3.3.6
+  FAIL box reachable: ssh: connect to host 10.99.99.99 port 22: Operation timed out
+       -> the box is not reachable from here; check you are on the same network
+  --   dokku responds: the box could not be reached
+```
+
+One cause produces one failure: an unreachable box *skips* the dokku check rather than reporting
+a second thing to fix. The wizard runs the same checks as its middle step, before creating
+anything.
+
+The SSH target is the field worth explaining, and the wizard now does: it is how hatchery
+reaches the box to create and manage apps, the user must be `dokku` — that account is what turns
+an SSH command into a dokku command — and your key must already be authorized for it.
+
+### Looking at one service
+
+Each service row expands. **logs** reads `dokku logs` (colour codes stripped, lines classified
+by severity). **config** shows what it is actually running with, secrets replaced by a
+fingerprint *before the value leaves the process*, alongside the contract issues `config audit`
+would report. **deploy** renders the plan as a diff with its tally, and only then offers to
+apply.
+
 ### Confirmation is enforced on the server
 
 The browser dialog that asks you to type a service's name is a convenience. It is not the
