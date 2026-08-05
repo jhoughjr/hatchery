@@ -69,6 +69,8 @@ public enum Backend: String, Codable, Sendable, CaseIterable {
     case dokku
     /// DigitalOcean App Platform — the production tenant plane.
     case appPlatform
+    /// AWS App Runner — a container, a URL and a health check, without a VPC to assemble.
+    case aws
 }
 
 extension Backend {

@@ -70,6 +70,26 @@ public struct ScaffoldRequest: Sendable, Equatable {
 public protocol ServiceProvider: Sendable {
     var backend: Backend { get }
 
+    /// A name for a person rather than the raw value.
+    var displayName: String { get }
+
+    /// Whether hatchery can create a stack on this backend today.
+    ///
+    /// A backend can be known — its config contract understood, its live state readable — long
+    /// before hatchery can author one from nothing. Saying which is which stops the UI offering
+    /// a menu entry that fails after the form is filled in.
+    var authorable: Bool { get }
+
+    /// How to get this backend working from nothing, on the machine and wherever it runs.
+    var setupSteps: [SetupStep] { get }
+
+    /// Whether *this* machine is configured to use the backend.
+    ///
+    /// Each backend answers for itself: dokku needs a reachable box and an authorized key, AWS
+    /// needs credentials and a region. Asking a single hardcoded checker would mean it knew
+    /// about every backend, which is the shape this protocol exists to avoid.
+    func readiness(host: String?, execute: @escaping CommandExecutor) async -> [PreflightCheck]
+
     /// The files that declare this service to the backend.
     func declaration(for request: ScaffoldRequest) throws -> [GeneratedFile]
 
@@ -78,18 +98,36 @@ public protocol ServiceProvider: Sendable {
 
     /// The name of the variable above, so the manifest can record it.
     func imageVariableName(for request: ScaffoldRequest) -> String?
+
+    /// The tofu configuration a stack on this backend starts from.
+    func bootstrapFiles(host: String, sshKeyPath: String, region: String?) -> [GeneratedFile]
+}
+
+extension ServiceProvider {
+    public var displayName: String { backend.rawValue }
 }
 
 public enum Providers {
-    /// Every backend hatchery can author into today.
-    public static func provider(for backend: Backend) throws -> any ServiceProvider {
+    /// One support type per backend, whether or not it can be authored yet.
+    ///
+    /// Every backend has an entry, because "can I use this here?" and "can hatchery create one?"
+    /// are different questions and only the second has a negative answer for App Platform.
+    public static func support(for backend: Backend) -> any ServiceProvider {
         switch backend {
-        case .dokku:
-            return DokkuProvider()
-        case .appPlatform:
-            // App Platform is a real config contract but not yet an action backend. Throwing
-            // here is the honest answer; a half-written spec would be worse than none.
-            throw ProviderError.noProvider(.appPlatform)
+        case .dokku: return DokkuProvider()
+        case .aws: return AWSProvider()
+        case .appPlatform: return AppPlatformProvider()
         }
+    }
+
+    public static var all: [any ServiceProvider] {
+        Backend.allCases.map(support(for:))
+    }
+
+    /// The provider to author with, or an error naming the backend that cannot.
+    public static func provider(for backend: Backend) throws -> any ServiceProvider {
+        let support = support(for: backend)
+        guard support.authorable else { throw ProviderError.noProvider(backend) }
+        return support
     }
 }

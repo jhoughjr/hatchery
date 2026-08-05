@@ -30,6 +30,94 @@ public enum Onboarding {
     /// The dokku version the lab is known to work against, for reference rather than pinning.
     public static let knownGoodDokku = "0.38.19"
 
+    /// Getting an AWS account to the point hatchery can author an App Runner service into it.
+    ///
+    /// Two of these are once-per-account rather than once-per-stack, and saying which is which
+    /// matters: the access role in particular is the step people repeat unnecessarily and then
+    /// wonder why they have four of them.
+    public static var awsSteps: [SetupStep] {
+        [
+            SetupStep(
+                title: "Install the AWS CLI and sign in",
+                why: """
+                    hatchery does not hold AWS credentials. It shells out to the CLI and to tofu, \
+                    both of which read whatever your profile, environment or SSO session already \
+                    provides — so there is nothing for hatchery to store or leak.
+                    """,
+                on: "here",
+                commands: [
+                    "brew install awscli",
+                    "aws configure          # or: aws sso login --profile <name>",
+                    "aws configure set region us-east-1",
+                ],
+                verify: "aws sts get-caller-identity"),
+
+            SetupStep(
+                title: "Create the App Runner ECR access role (once per account)",
+                why: """
+                    App Runner pulls the image itself, so it needs a role it can assume to read \
+                    ECR. This is per account, not per service — every stack in the account shares \
+                    one. Its ARN goes in apprunner_access_role_arn, which hatchery leaves blank \
+                    for you to fill.
+                    """,
+                on: "here",
+                commands: [
+                    "aws iam create-role --role-name AppRunnerECRAccess \\",
+                    "  --assume-role-policy-document '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"build.apprunner.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}'",
+                    "aws iam attach-role-policy --role-name AppRunnerECRAccess \\",
+                    "  --policy-arn arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess",
+                ],
+                verify: "aws iam get-role --role-name AppRunnerECRAccess --query Role.Arn"),
+
+            SetupStep(
+                title: "Create an ECR repository and push an image",
+                why: """
+                    App Runner deploys an image; it does not build one. The repository URI and \
+                    tag are what you give hatchery as the image, the same way a dokku stack takes \
+                    a tag already built on the box.
+                    """,
+                on: "here",
+                commands: [
+                    "aws ecr create-repository --repository-name <service>",
+                    "aws ecr get-login-password | docker login --username AWS --password-stdin \\",
+                    "  <account>.dkr.ecr.<region>.amazonaws.com",
+                    "docker push <account>.dkr.ecr.<region>.amazonaws.com/<service>:<tag>",
+                ],
+                verify: "aws ecr describe-images --repository-name <service>"),
+
+            SetupStep(
+                title: "Point hatchery at it",
+                why: """
+                    Everything above is the account. This is the part hatchery does: check what \
+                    it needs, write the tofu, and create the stack.
+                    """,
+                on: "here",
+                commands: [
+                    "hatchery doctor --backend aws",
+                    "hatchery stack new <name> --backend aws --tofu-dir ~/infra-state/<name>",
+                ],
+                verify: "hatchery status"),
+        ]
+    }
+
+    /// App Platform is understood but not authorable, so its guide says so rather than pretending.
+    public static var appPlatformSteps: [SetupStep] {
+        [
+            SetupStep(
+                title: "hatchery cannot create an App Platform stack",
+                why: """
+                    Its environment contract is understood — `config validate` uses it — but a \
+                    spec is YAML applied through doctl rather than tofu, and every secret reads \
+                    back as EV[...] ciphertext, so reading one is a separate problem. Use dokku \
+                    or aws for a stack hatchery creates, and manage existing App Platform apps \
+                    with doctl.
+                    """,
+                on: "here",
+                commands: ["brew install doctl", "doctl auth init"],
+                verify: "doctl apps list"),
+        ]
+    }
+
     public static var dokkuSteps: [SetupStep] {
         [
             SetupStep(

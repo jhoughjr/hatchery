@@ -145,7 +145,7 @@ extension EnvContract {
                 ? mwserverOptional.union(discreteDatabaseKeys)
                 : mwserverOptional,
             secret: mwserverSecret,
-            retired: backend == .appPlatform ? discreteDatabaseKeys : [],
+            retired: backend == .dokku ? [] : discreteDatabaseKeys,
             ignored: dokkuInjected
         )
     }
@@ -162,7 +162,9 @@ extension EnvContract {
             ignored: dokkuInjected
         )
         switch backend {
-        case .appPlatform:
+        case .appPlatform, .aws:
+            // Neither has a postgres on the same box to reach with discrete keys; both take a
+            // connection string, so the retired set is the same.
             contract.required.insert("DATABASE_URL")
             contract.retired = discreteDatabaseKeys
         case .dokku:
@@ -180,7 +182,9 @@ extension EnvContract {
             ignored: dokkuInjected
         )
         switch backend {
-        case .appPlatform:
+        case .appPlatform, .aws:
+            // Neither has a postgres on the same box to reach with discrete keys; both take a
+            // connection string, so the retired set is the same.
             contract.required.insert("DATABASE_URL")
             contract.retired = discreteDatabaseKeys
         case .dokku:
