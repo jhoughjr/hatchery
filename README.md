@@ -24,6 +24,19 @@ hatchery up|down|restart <stack>
 hatchery serve
 ```
 
+### Finding the manifest
+
+A manifest lives next to the config files it names, because `configFile` resolves relative to
+the manifest's own directory — which is rarely the directory you are standing in. So a command
+with no `--manifest` looks in three places, in order:
+
+1. `./hatchery.json`
+2. `$HATCHERY_MANIFEST`
+3. `~/.config/hatchery/hatchery.json`
+
+An explicitly passed `--manifest` is used exactly as given and never falls back, because
+second-guessing it would hide a typo. Finding nothing lists everywhere it looked.
+
 ## The dashboard
 
 `hatchery serve` puts the same operations behind a browser:
