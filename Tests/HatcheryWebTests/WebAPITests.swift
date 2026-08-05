@@ -322,3 +322,49 @@ struct RequestTranslationTests {
         #expect(request.headers["x-hatchery-token"] == "abc")
     }
 }
+
+@Suite("The page's own wiring")
+struct PageWiringTests {
+    /// Buttons must not carry inline handlers.
+    ///
+    /// An `onclick` is a JS string inside an HTML attribute inside a Swift string literal. One
+    /// wrong quote there is a *parse* error, which kills the entire script rather than one
+    /// button — the page then renders and sits on "loading…" forever, with nothing working.
+    /// That shipped once. Buttons carry `data-action` and a delegated listener dispatches them.
+    @Test("no button carries an inline onclick")
+    func noInlineHandlers() {
+        #expect(!Page.markup.contains("onclick=\""))
+    }
+
+    @Test("every button action has a case that handles it, and every case has a button")
+    func actionsAndCasesAgree() {
+        let markup = Page.markup
+
+        func matches(_ pattern: String) -> Set<String> {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+            let range = NSRange(markup.startIndex..., in: markup)
+            var found: Set<String> = []
+            for match in regex.matches(in: markup, range: range) {
+                if let captured = Range(match.range(at: 1), in: markup) {
+                    found.insert(String(markup[captured]))
+                }
+            }
+            return found
+        }
+
+        let dispatched = matches("button\\('([a-z-]+)'")
+        let handled = matches("case '([a-z-]+)':")
+
+        #expect(!dispatched.isEmpty)
+        // A button with no case does nothing when clicked; a case with no button is dead code
+        // that outlived whatever used to call it.
+        #expect(dispatched == handled)
+    }
+
+    @Test("the script is served whole, so a truncated page is visible rather than silent")
+    func scriptIsClosed() {
+        #expect(Page.markup.contains("<script>"))
+        #expect(Page.markup.contains("</script>"))
+        #expect(Page.markup.hasSuffix("</html>"))
+    }
+}

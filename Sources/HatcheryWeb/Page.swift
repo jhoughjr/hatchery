@@ -103,6 +103,11 @@ enum Page {
           .origins .val { color: var(--dim); }
           .needs { color: var(--degraded); }
           .add { font-size: 0.75rem; }
+          .last { margin-left: auto; }
+          .stack-actions {
+            padding: 0.6rem 1rem; border-top: 1px solid var(--line);
+            display: flex; gap: 0.5rem;
+          }
         </style>
         </head>
         <body>
@@ -187,6 +192,32 @@ enum Page {
 
         let lastStacks = [];
 
+        // Buttons carry their target in data attributes and are dispatched by one delegated
+        // listener below. An inline onclick would mean a JS string inside an HTML attribute
+        // inside a Swift string literal, and getting a quote wrong there is a *parse* error —
+        // which kills the whole script, not just the button. That is exactly what happened.
+        function button(action, label, stack, service, extraClass) {
+          return '<button data-action="' + action + '"'
+            + (stack ? ' data-stack="' + escapeHTML(stack) + '"' : '')
+            + (service ? ' data-service="' + escapeHTML(service) + '"' : '')
+            + (extraClass ? ' class="' + extraClass + '"' : '')
+            + (busy ? ' disabled' : '') + '>' + escapeHTML(label) + '</button>';
+        }
+
+        document.addEventListener('click', event => {
+          const target = event.target.closest('button[data-action]');
+          if (!target) return;
+          const stack = target.dataset.stack;
+          const service = target.dataset.service;
+          switch (target.dataset.action) {
+            case 'restart': restart(stack, service); break;
+            case 'deploy': deploy(stack, service); break;
+            case 'new-service': newService(stack); break;
+            case 'new-stack': newStack(); break;
+            case 'apply': applyStack(stack); break;
+          }
+        });
+
         function render(stacks) {
           lastStacks = stacks;
           if (!stacks.length) {
@@ -194,7 +225,7 @@ enum Page {
               + '<h2>Nothing declared yet</h2>'
               + '<p>Create a stack, add a service, and hatchery will write the tofu,'
               + ' mint what it can, and tell you what it cannot.</p>'
-              + '<button class="primary" onclick="newStack()">Create a stack</button></div>';
+              + button('new-stack', 'Create a stack', null, null, 'primary') + '</div>';
             return;
           }
           $('stacks').innerHTML = stacks.map(stack => {
@@ -210,12 +241,9 @@ enum Page {
                 +   '</span>' + reasons + '</td>'
                 + '<td class="num">' + latency + '</td>'
                 + '<td class="actions">'
-                +   '<button ' + (busy ? 'disabled' : '') + ' onclick="restart(\\''
-                +     escapeHTML(stack.name) + '\\',\\'' + escapeHTML(svc.name)
-                +     '\\')">restart</button> '
-                +   '<button ' + (busy ? 'disabled' : '') + ' onclick="deploy(\\''
-                +     escapeHTML(stack.name) + '\\',\\'' + escapeHTML(svc.name)
-                +     '\\')">deploy</button>'
+                +   button('restart', 'restart', stack.name, svc.name)
+                +   ' '
+                +   button('deploy', 'deploy', stack.name, svc.name)
                 + '</td></tr>';
             }).join('');
             const badge = stack.isProduction ? '<span class="prod">prod</span>' : '';
@@ -226,13 +254,10 @@ enum Page {
               + '<span class="meta state ' + escapeHTML(stack.state || '')
               + '" style="margin-left:auto">' + escapeHTML(stack.state || '') + '</span>'
               + '</header><table>' + rows + '</table>'
-              + '<div style="padding:0.6rem 1rem;border-top:1px solid var(--line);display:flex;gap:0.5rem">'
-              +   '<button class="add" onclick="newService(\'' + escapeHTML(stack.name)
-              +     '\')">+ service</button>'
-              +   '<button class="add" onclick="applyStack(\'' + escapeHTML(stack.name)
-              +     '\')">apply</button>'
-              +   '<button class="add" style="margin-left:auto" onclick="newStack()">'
-              +     '+ stack</button>'
+              + '<div class="stack-actions">'
+              +   button('new-service', '+ service', stack.name, null, 'add')
+              +   button('apply', 'apply', stack.name, null, 'add')
+              +   button('new-stack', '+ stack', null, null, 'add last')
               + '</div></section>';
           }).join('');
         }
