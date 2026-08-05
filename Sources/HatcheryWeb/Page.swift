@@ -413,8 +413,23 @@ enum Page {
         // ---- wizard ----------------------------------------------------------
         // Each step only opens once the one before it succeeded, so a half-made stack is
         // never left looking finished.
-        let meta = {kinds: [], backends: ['dokku'], environments: ['dev','staging','prod']};
-        fetch('/api/kinds', {headers}).then(r => r.json()).then(m => { meta = m; }).catch(() => {});
+        // Loaded once, and awaited before any step that needs it. Rendering a menu from a
+        // fetch that has not landed yet gives an empty dropdown with nothing to pick, and
+        // swallowing the failure leaves it empty forever with no sign of why.
+        let meta = null;
+        const metaReady = fetch('/api/kinds', {headers})
+          .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+          .then(m => { meta = m; return m; });
+
+        async function ensureMeta() {
+          if (meta) return meta;
+          try {
+            return await metaReady;
+          } catch (e) {
+            log('could not load service kinds: ' + e.message, true);
+            return null;
+          }
+        }
 
         function field(id, label, value, hint, type) {
           return '<div class="field"><label for="' + id + '">' + escapeHTML(label) + '</label>'
@@ -451,9 +466,21 @@ enum Page {
         }
 
         async function newStack() {
+          if (!(await ensureMeta())) return;
+          // Only backends hatchery can actually author are offered. Listing one it would refuse
+          // turns a menu into a dead end you discover after filling the form in.
+          const authorable = meta.backends.filter(b => b.authorable).map(b => b.name);
+          const blocked = meta.backends.filter(b => !b.authorable);
+          if (!authorable.length) { log('no backend can be created by this build', true); return; }
+
           const ok = await step('New stack', 'Step 1 of 3 — where it lives',
               field('w-name', 'Name', '',
                     'Identifies the stack in hatchery. Lowercase, dashes allowed.')
+            + select('w-backend', 'Backend', authorable,
+                     'What runs the services. '
+                     + (blocked.length
+                        ? blocked.map(b => b.note).join('; ') + '.'
+                        : 'Every backend this build supports is listed.'))
             + field('w-host', 'SSH target', 'dokku@192.168.0.103',
                     'How hatchery reaches the box to create and manage apps. The user must be '
                     + 'dokku — that account is what turns an SSH command into a dokku command — '
@@ -470,6 +497,7 @@ enum Page {
           const host = $('w-host').value.trim();
           const dir = $('w-dir').value.trim();
           const env = $('w-env').value;
+          const backend = $('w-backend').value;
 
           // Check before creating rather than after. These failures otherwise surface halfway
           // through `tofu init`, as a provider error that never mentions the real cause.
@@ -477,7 +505,7 @@ enum Page {
 
           busy = true;
           const res = await send('/api/stacks/new',
-            {name, host, tofuDir: dir, environment: env, confirm: name});
+            {name, host, tofuDir: dir, environment: env, backend, confirm: name});
           busy = false;
           log(res.data.message || res.data.error, !res.ok);
           if (!res.ok) return;
@@ -517,6 +545,9 @@ enum Page {
         }
 
         async function newService(stack) {
+          if (!(await ensureMeta())) return;
+          if (!meta.kinds.length) { log('no service kinds available', true); return; }
+
           const ok = await step('New service in ' + stack, 'Step 3 of 3 — what runs',
               field('s-name', 'Name', '',
                     'Becomes the dokku app name and names its config file.')
