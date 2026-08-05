@@ -192,7 +192,10 @@ public struct Preflight: Sendable {
         text.split(separator: "\n").first.map(String.init) ?? text
     }
 
-    public func dokku(host: String?) async -> [PreflightCheck] {
+    public func dokku(host rawHost: String?) async -> [PreflightCheck] {
+        // Normalised here so a bare address is checked as it will actually be used, rather than
+        // passing and then failing later under a different user.
+        let host = rawHost.map { DokkuProvider.sshTarget($0) }
         var checks: [PreflightCheck] = []
         checks.append(await tofu())
         checks.append(
@@ -211,7 +214,13 @@ public struct Preflight: Sendable {
             return checks
         }
 
-        let reachable = await reachability(host: host)
+        var reachable = await reachability(host: host)
+        // An explicitly wrong user is the likeliest cause, and the generic key advice sends
+        // people to authorize the wrong account.
+        if reachable.status == .failed, let warning = DokkuProvider.userWarning(host) {
+            reachable = PreflightCheck(
+                name: reachable.name, status: .failed, detail: reachable.detail, remedy: warning)
+        }
         checks.append(reachable)
         if reachable.status == .ok {
             checks.append(await dokku(host: host))

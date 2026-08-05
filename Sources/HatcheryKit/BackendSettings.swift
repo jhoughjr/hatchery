@@ -100,9 +100,10 @@ extension BackendSetting {
         key: "host",
         label: "SSH target",
         help: """
-            How hatchery reaches the box to create and manage apps. The user must be `dokku` — \
-            that account turns an SSH command into a dokku command — and your key must already \
-            be authorized for it.
+            How hatchery reaches the box, as user@host. The user must be `dokku` — that account \
+            turns an SSH command into a dokku command, and any other lands in a plain shell. \
+            Given a bare address, hatchery adds `dokku@` for you; given a different user, it \
+            tells you rather than rewriting what you typed.
             """,
         defaultValue: nil)
 

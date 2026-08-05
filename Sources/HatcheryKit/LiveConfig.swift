@@ -140,7 +140,8 @@ public struct LiveConfigReader: Sendable {
             guard let host = stack.host, !host.isEmpty else {
                 throw LiveConfigError.noHost(stack: stack.name)
             }
-            let data = try await run(Self.dokkuCommand(host: host, app: service.name))
+            let data = try await run(
+                Self.dokkuCommand(host: DokkuProvider.sshTarget(host), app: service.name))
             guard let config = try? JSONDecoder().decode([String: String].self, from: data) else {
                 throw LiveConfigError.malformedConfig(service: service.name)
             }
