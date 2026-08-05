@@ -100,21 +100,118 @@ public enum Onboarding {
         ]
     }
 
-    /// App Platform is understood but not authorable, so its guide says so rather than pretending.
+    /// Getting a DigitalOcean account ready for an App Platform app.
+    public static var cloudRunSteps: [SetupStep] {
+        [
+            SetupStep(
+                title: "Install the gcloud SDK and sign in",
+                why: """
+                    hatchery holds no Google credentials. Both tofu and gcloud read the \
+                    application-default credentials you create here, so there is nothing for \
+                    hatchery to store, and revoking access is done in one place rather than two.
+                    """,
+                on: "here",
+                commands: [
+                    "brew install --cask google-cloud-sdk",
+                    "gcloud auth login",
+                    "gcloud auth application-default login   # what tofu actually reads",
+                    "gcloud config set project <project-id>",
+                ],
+                verify: "gcloud auth list --filter=status:ACTIVE"),
+
+            SetupStep(
+                title: "Enable the APIs, once per project",
+                why: """
+                    A fresh project has Cloud Run and Artifact Registry switched off, and the \
+                    first apply fails with a permission error that names an API rather than the \
+                    thing you were doing. Enabling them first turns that into nothing at all.
+                    """,
+                on: "here",
+                commands: [
+                    "gcloud services enable run.googleapis.com",
+                    "gcloud services enable artifactregistry.googleapis.com",
+                ],
+                verify: "gcloud services list --enabled | grep run"),
+
+            SetupStep(
+                title: "Create a repository and push an image",
+                why: """
+                    Cloud Run deploys an image; it does not build one. The full image path is \
+                    what you give hatchery, the same way a dokku stack takes a tag already built \
+                    on the box.
+                    """,
+                on: "here",
+                commands: [
+                    "gcloud artifacts repositories create <repo> --repository-format=docker --location=<region>",
+                    "gcloud auth configure-docker <region>-docker.pkg.dev",
+                    "docker push <region>-docker.pkg.dev/<project>/<repo>/<service>:<tag>",
+                ],
+                verify: "gcloud artifacts docker images list <region>-docker.pkg.dev/<project>/<repo>"),
+
+            SetupStep(
+                title: "Point hatchery at it",
+                why: """
+                    Everything above is the project. This is the part hatchery does: check what \
+                    it needs, write the tofu, and create the stack.
+                    """,
+                on: "here",
+                commands: [
+                    "hatchery doctor --backend cloudRun",
+                    "hatchery stack new <name> --backend cloudRun --tofu-dir ~/infra-state/<name>",
+                ],
+                verify: "hatchery status"),
+        ]
+    }
+
+    /// Getting a DigitalOcean account ready for an App Platform app.
     public static var appPlatformSteps: [SetupStep] {
         [
             SetupStep(
-                title: "hatchery cannot create an App Platform stack",
+                title: "Create an API token",
                 why: """
-                    Its environment contract is understood — `config validate` uses it — but a \
-                    spec is YAML applied through doctl rather than tofu, and every secret reads \
-                    back as EV[...] ciphertext, so reading one is a separate problem. Use dokku \
-                    or aws for a stack hatchery creates, and manage existing App Platform apps \
-                    with doctl.
+                    The tofu provider reads DIGITALOCEAN_TOKEN from the environment; hatchery \
+                    never stores it. It needs write scope, because creating an app is a write. \
+                    A read-only token fails at apply with a permission error that does not \
+                    mention its own scope.
                     """,
                 on: "here",
-                commands: ["brew install doctl", "doctl auth init"],
-                verify: "doctl apps list"),
+                commands: [
+                    "# Create one at cloud.digitalocean.com/account/api/tokens (write scope)",
+                    "export DIGITALOCEAN_TOKEN=dop_v1_...",
+                    "# add it to your shell profile so tofu sees it in new terminals",
+                ],
+                verify: "hatchery doctor --backend appPlatform"),
+
+            SetupStep(
+                title: "Make the image reachable",
+                why: """
+                    App Platform pulls the image itself. A public Docker Hub repository needs \
+                    nothing; a private one or DOCR needs the registry integrated with the \
+                    account first, or the app deploys and then cannot pull.
+                    """,
+                on: "here",
+                commands: [
+                    "# public Docker Hub: nothing to do",
+                    "# DOCR: doctl registry create <name> && doctl registry login",
+                    "# then set <service>_registry_type to DOCR in variables.tf",
+                ],
+                verify: "doctl registry get   # only if using DOCR"),
+
+            SetupStep(
+                title: "Point hatchery at it",
+                why: """
+                    hatchery can create an App Platform app — `digitalocean_app` takes an image, \
+                    an environment, a port and a health check. What it cannot do is read one \
+                    back: every SECRET value returns as EV[...] ciphertext, so `config audit` \
+                    and `config sync` refuse for this backend rather than reporting drift they \
+                    cannot see.
+                    """,
+                on: "here",
+                commands: [
+                    "hatchery doctor --backend appPlatform",
+                    "hatchery stack new <name> --backend appPlatform --tofu-dir ~/infra-state/<name>",
+                ],
+                verify: "hatchery status"),
         ]
     }
 

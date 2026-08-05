@@ -114,11 +114,16 @@ struct StackBootstrapTests {
         }
     }
 
-    @Test("App Platform is refused rather than half-bootstrapped")
-    func refusesAppPlatform() {
-        #expect(throws: BootstrapError.unsupportedBackend(.appPlatform)) {
-            _ = try bootstrapper(Recorder()).plan(
-                name: "cloud", backend: .appPlatform, host: "", tofuDir: "/infra/x")
+    @Test("every backend the registry calls authorable can actually be bootstrapped")
+    func bootstrapsEveryAuthorableBackend() throws {
+        // App Platform used to be refused here on a claim that turned out to be wrong. The
+        // guard still exists — it asks the provider rather than naming backends — but nothing
+        // currently trips it, so this asserts the positive case for all of them instead.
+        for backend in Backend.allCases where Providers.support(for: backend).authorable {
+            let result = try bootstrapper(Recorder()).plan(
+                name: "lab", backend: backend, host: "dokku@h", tofuDir: "/infra/lab")
+            #expect(!result.files.isEmpty, "\(backend.rawValue) planned no files")
+            #expect(result.stack.backend == backend)
         }
     }
 

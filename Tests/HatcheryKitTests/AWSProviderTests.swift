@@ -203,12 +203,19 @@ struct BackendReadinessTests {
         #expect(!dokku.contains { $0.name.contains("region") })
     }
 
-    @Test("App Platform reports that it cannot be created, with the reason")
-    func appPlatformIsHonest() async {
+    @Test("App Platform checks for a token, and never reports its value")
+    func appPlatformChecksToken() async {
         let checks = await preflight({ _ in CommandOutput(status: 0, standardOutput: "doctl 1.0") })
             .run(backend: .appPlatform, host: nil)
-        #expect(!checks.allPassed)
-        #expect(checks.contains { $0.remedy?.contains("EV[...]") == true })
+
+        let token = checks.first { $0.name == "digitalocean token" }
+        #expect(token != nil)
+        // Whatever the environment holds, the check reports presence and a length, never the
+        // value and never a prefix of it.
+        #expect(token?.detail.contains("dop_v1") == false)
+        if token?.status == .failed {
+            #expect(token?.remedy?.contains("DIGITALOCEAN_TOKEN") == true)
+        }
     }
 }
 
@@ -244,5 +251,168 @@ struct BackendSetupTests {
     func neverStoresCredentials() {
         let text = Onboarding.awsSteps.map(\.why).joined(separator: " ").lowercased()
         #expect(text.contains("does not hold aws credentials"))
+    }
+}
+
+private func stack(_ backend: Backend) -> StackSpec {
+    StackSpec(
+        name: "cloud", backend: backend, environment: .dev,
+        tofu: TofuBinding(directory: "/infra/cloud"), services: [])
+}
+
+private func req(_ backend: Backend, name: String = "mwprod", domains: [String] = []) -> ScaffoldRequest {
+    var service = ServiceSpec(
+        name: name, kind: .mwserver, image: "myorg/mwserver:v1",
+        domains: domains, configFile: "\(name).config.json")
+    service.imageVariable = "\(name)_image"
+    return ScaffoldRequest(stack: stack(backend), service: service, containerPort: 8080)
+}
+
+@Suite("App Platform is authorable after all")
+struct AppPlatformProviderTests {
+    @Test("hatchery can create an App Platform app")
+    func isAuthorable() {
+        // This was reported as impossible on the grounds that a spec is YAML applied through
+        // doctl. The provider has a first-class digitalocean_app resource; the claim was wrong.
+        #expect(Providers.support(for: .appPlatform).authorable)
+        #expect((try? Providers.provider(for: .appPlatform)) != nil)
+    }
+
+    @Test("the spec carries the image, port, health check and environment")
+    func declarationShape() throws {
+        let files = try AppPlatformProvider().declaration(for: req(.appPlatform))
+        let tf = try #require(files.first { $0.role == .declaration })
+
+        #expect(tf.contents.contains("resource \"digitalocean_app\" \"mwprod\""))
+        #expect(tf.contents.contains("http_port          = 8080"))
+        #expect(tf.contents.contains("http_path = \"/health\""))
+        // The provider wants repository and tag separately, but a deploy still moves one value.
+        #expect(tf.contents.contains("repository    = split(\":\", var.mwprod_image)[0]"))
+        #expect(tf.contents.contains("try(split(\":\", var.mwprod_image)[1], \"latest\")"))
+        // Environment is repeated blocks here, not a map, so the config file is expanded.
+        #expect(tf.contents.contains("dynamic \"env\""))
+        #expect(tf.contents.contains("for_each = jsondecode(file(\"${path.module}/mwprod.config.json\"))"))
+    }
+
+    @Test("each declared domain becomes its own block")
+    func domains() throws {
+        let files = try AppPlatformProvider().declaration(
+            for: req(.appPlatform, domains: ["a.example.com", "b.example.com"]))
+        let tf = try #require(files.first { $0.role == .declaration })
+        #expect(tf.contents.contains("name = \"a.example.com\""))
+        #expect(tf.contents.contains("name = \"b.example.com\""))
+    }
+
+    @Test("no domain is fine, because App Platform assigns one")
+    func noDomains() throws {
+        let files = try AppPlatformProvider().declaration(for: req(.appPlatform))
+        #expect(files.first { $0.role == .declaration }?.contents.contains("domain {") == false)
+    }
+
+    @Test("reading config back is still refused, which is the part that was actually blocked")
+    func readingIsStillUnsupported() async {
+        let reader = LiveConfigReader(run: { _ in Data() })
+        let service = ServiceSpec(name: "x", kind: .mwserver, image: "i", configFile: "c.json")
+        await #expect(throws: LiveConfigError.unsupportedBackend(.appPlatform)) {
+            _ = try await reader.config(for: service, in: stack(.appPlatform))
+        }
+    }
+
+    @Test("the token is never written into the configuration")
+    func tokenStaysInTheEnvironment() {
+        let files = AppPlatformProvider().bootstrapFiles(host: "", sshKeyPath: "", region: "lon1")
+        for file in files {
+            #expect(!file.contents.contains("dop_v1"))
+            #expect(!file.contents.lowercased().contains("token ="))
+        }
+        #expect(files.first { $0.path == "variables.tf" }?.contents.contains("lon1") == true)
+    }
+}
+
+@Suite("Cloud Run")
+struct CloudRunProviderTests {
+    @Test("the container carries the image, port, environment and a startup probe")
+    func declarationShape() throws {
+        let files = try CloudRunProvider().declaration(for: req(.cloudRun))
+        let tf = try #require(files.first { $0.role == .declaration })
+
+        #expect(tf.contents.contains("resource \"google_cloud_run_v2_service\" \"mwprod\""))
+        #expect(tf.contents.contains("image = var.mwprod_image"))
+        #expect(tf.contents.contains("container_port = 8080"))
+        // Cloud Run names the field `name`, unlike App Platform's `key`.
+        #expect(tf.contents.contains("name  = env.key"))
+        #expect(tf.contents.contains("value = env.value"))
+        #expect(tf.contents.contains("startup_probe"))
+        #expect(tf.contents.contains("path = \"/health\""))
+    }
+
+    @Test("a startup probe rather than a liveness probe")
+    func startupNotLiveness() throws {
+        let files = try CloudRunProvider().declaration(for: req(.cloudRun))
+        let tf = try #require(files.first { $0.role == .declaration })
+        // A slow boot should be waited out, not restarted in a loop.
+        #expect(!tf.contents.contains("liveness_probe"))
+    }
+
+    @Test("the assigned URI is an output, since Google chooses it")
+    func exposesURL() throws {
+        let files = try CloudRunProvider().declaration(for: req(.cloudRun))
+        #expect(
+            files.first { $0.role == .declaration }?.contents
+                .contains("google_cloud_run_v2_service.mwprod.uri") == true)
+    }
+
+    @Test("scaling to zero is the default, because an idle lab service should cost nothing")
+    func scalesToZero() throws {
+        let files = try CloudRunProvider().declaration(for: req(.cloudRun))
+        let variables = try #require(files.first { $0.role == .variableAppend })
+        #expect(variables.contents.contains("min_instances"))
+        #expect(variables.contents.contains("default     = 0"))
+    }
+}
+
+@Suite("Every backend agrees with itself")
+struct BackendConsistencyTests {
+    @Test("an authorable backend can generate a declaration and a bootstrap")
+    func authorableBackendsGenerate() throws {
+        for provider in Providers.all where provider.authorable {
+            let files = provider.bootstrapFiles(
+                host: "dokku@h", sshKeyPath: "~/.ssh/id_rsa", region: "r")
+            #expect(!files.isEmpty, "\(provider.backend.rawValue) generates no bootstrap")
+            #expect(files.contains { $0.path == "versions.tf" })
+
+            // Every authorable backend must produce a declaration for the same request shape.
+            let declaration = try provider.declaration(for: req(provider.backend, domains: ["x.example.com"]))
+            #expect(!declaration.isEmpty)
+        }
+    }
+
+    @Test("no generated configuration ever carries a credential")
+    func noCredentialsInGeneratedFiles() throws {
+        for provider in Providers.all where provider.authorable {
+            // A domain is supplied for every backend because dokku requires one; the others
+            // tolerate it, so one request shape covers them all.
+            let files = provider.bootstrapFiles(host: "dokku@h", sshKeyPath: "~/.ssh/id_rsa", region: "r")
+                + (try provider.declaration(for: req(provider.backend, domains: ["x.example.com"])))
+            for file in files {
+                let lower = file.contents.lowercased()
+                #expect(!lower.contains("secret_key"))
+                #expect(!lower.contains("access_key ="))
+                #expect(!lower.contains("password ="))
+            }
+        }
+    }
+
+    @Test("only dokku keeps the discrete database keys")
+    func contractsSplitOnPlacement() throws {
+        for backend in Backend.allCases {
+            let contract = try #require(EnvContract.contract(for: .mwserver, backend: backend))
+            if backend == .dokku {
+                #expect(!contract.retired.contains("DATABASE_HOST"))
+            } else {
+                // Nothing else has a postgres on the same box to reach that way.
+                #expect(contract.retired.contains("DATABASE_HOST"))
+            }
+        }
     }
 }

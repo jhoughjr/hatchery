@@ -162,7 +162,7 @@ extension EnvContract {
             ignored: dokkuInjected
         )
         switch backend {
-        case .appPlatform, .aws:
+        case .appPlatform, .aws, .cloudRun:
             // Neither has a postgres on the same box to reach with discrete keys; both take a
             // connection string, so the retired set is the same.
             contract.required.insert("DATABASE_URL")
@@ -182,7 +182,7 @@ extension EnvContract {
             ignored: dokkuInjected
         )
         switch backend {
-        case .appPlatform, .aws:
+        case .appPlatform, .aws, .cloudRun:
             // Neither has a postgres on the same box to reach with discrete keys; both take a
             // connection string, so the retired set is the same.
             contract.required.insert("DATABASE_URL")

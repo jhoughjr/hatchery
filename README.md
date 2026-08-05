@@ -300,11 +300,24 @@ config lives, never what it contains.
 
 ### Backends
 
-| Backend | Target | hatchery can create one |
-| --- | --- | --- |
-| `dokku` | Self-hosted — the opi box and the Raspberry Pi fleet, over SSH | yes |
-| `aws` | AWS App Runner — a container, a URL and a health check | yes, untested against a live account |
-| `appPlatform` | DigitalOcean App Platform — the production tenant plane | no |
+| Backend | Target | Create | Read config back |
+| --- | --- | --- | --- |
+| `dokku` | Self-hosted — the opi box and the Pi fleet, over SSH | yes | yes |
+| `appPlatform` | DigitalOcean App Platform — the production tenant plane | yes | no |
+| `aws` | AWS App Runner — a container, a URL, a health check | yes | no |
+| `cloudRun` | Google Cloud Run — App Runner's closest sibling | yes | no |
+
+hatchery once reported that App Platform could not be created, on the grounds that a spec is
+YAML applied through `doctl`. That was wrong: `digitalocean_app` is a first-class resource whose
+`spec.service` block takes an image, an environment, a port and a health check. What is genuinely
+blocked is *reading a spec back* — every SECRET value returns as `EV[...]` ciphertext — so
+`config audit` and `config sync` refuse for the three cloud backends rather than reporting drift
+they cannot see. Creating and reading are separate questions and only the second has a no.
+
+Fly.io was considered and deferred. Its tofu provider is `fly-apps/fly` v0.0.23 and offers
+`fly_app`, `fly_machine` and `fly_ip` with no service abstraction and no health-check block, so a
+service would have to be assembled from machines by hand — a materially worse fit than the three
+above. `flyctl` would be the better route if it is wanted.
 
 Each backend answers for itself. A provider supplies its own readiness check and its own setup
 guide, so `hatchery doctor --backend aws` asks about credentials and a region while

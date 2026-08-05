@@ -71,6 +71,8 @@ public enum Backend: String, Codable, Sendable, CaseIterable {
     case appPlatform
     /// AWS App Runner — a container, a URL and a health check, without a VPC to assemble.
     case aws
+    /// Google Cloud Run — the closest sibling to App Runner.
+    case cloudRun
 }
 
 extension Backend {
