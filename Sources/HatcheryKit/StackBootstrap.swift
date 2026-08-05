@@ -5,6 +5,7 @@ public enum BootstrapError: Error, CustomStringConvertible, Equatable {
     case directoryNotEmpty(String)
     case initFailed(String)
     case unsupportedBackend(Backend)
+    case missingSettings(backend: Backend, keys: [String])
 
     public var description: String {
         switch self {
@@ -14,6 +15,11 @@ public enum BootstrapError: Error, CustomStringConvertible, Equatable {
             return "\(path) already holds a tofu configuration; hatchery will not write over it"
         case .initFailed(let message):
             return "tofu init failed: \(message)"
+        case .missingSettings(let backend, let keys):
+            return """
+                \(backend.rawValue) needs \(keys.joined(separator: ", ")); \
+                pass --set <key>=<value>, or run `hatchery setup --backend \(backend.rawValue)`
+                """
         case .unsupportedBackend(let backend):
             return "hatchery cannot bootstrap a \(backend.rawValue) stack yet"
         }
@@ -55,6 +61,8 @@ public struct StackBootstrapper: Sendable {
     private let writeFile: @Sendable (String, String) throws -> Void
     private let fileExists: @Sendable (String) -> Bool
     private let createDirectory: @Sendable (String) throws -> Void
+    /// Named for what it is, because `plan` already has an `environment` meaning prod/dev.
+    private let processEnvironment: [String: String]
 
     public init(
         execute: @escaping CommandExecutor = ShellRunner.liveExecutor,
@@ -66,12 +74,14 @@ public struct StackBootstrapper: Sendable {
             try FileManager.default.createDirectory(
                 atPath: $0, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
-        }
+        },
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.execute = execute
         self.writeFile = writeFile
         self.fileExists = fileExists
         self.createDirectory = createDirectory
+        self.processEnvironment = environment
     }
 
     static func initCommand() -> [String] {
@@ -90,8 +100,7 @@ public struct StackBootstrapper: Sendable {
         host: String,
         tofuDir: String,
         environment: Environment? = nil,
-        sshKeyPath: String = "~/.ssh/id_rsa",
-        region: String? = nil,
+        settings: [String: String] = [:],
         into existing: StackManifest? = nil,
         manifestPath: String? = nil
     ) throws -> BootstrapResult {
@@ -116,7 +125,15 @@ public struct StackBootstrapper: Sendable {
 
         // The backend supplies its own starting configuration; this type only decides where
         // it goes and refuses to write over anything already there.
-        let files = provider.bootstrapFiles(host: host, sshKeyPath: sshKeyPath, region: region)
+        // Missing settings are refused here rather than surfacing as a provider error later.
+        var values = settings
+        if !host.isEmpty { values["host"] = host }
+        let missing = provider.missingSettings(values, environment: processEnvironment)
+        guard missing.isEmpty else {
+            throw BootstrapError.missingSettings(
+                backend: backend, keys: missing.map(\.key).sorted())
+        }
+        let files = provider.bootstrapFiles(settings: values)
 
         let stack = StackSpec(
             name: name,
@@ -124,6 +141,8 @@ public struct StackBootstrapper: Sendable {
             environment: environment,
             host: host,
             tofu: TofuBinding(directory: tofuDir),
+            // Only the declared, non-secret values: a token never reaches the manifest.
+            settings: provider.settings.storable(values),
             services: [])
         manifest.stacks.append(stack)
 

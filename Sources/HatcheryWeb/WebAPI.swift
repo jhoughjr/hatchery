@@ -108,6 +108,7 @@ enum Wire {
         let backend: String?
         let environment: String?
         let sshKey: String?
+        let settings: [String: String]?
         let confirm: String
     }
 
@@ -186,7 +187,7 @@ enum Wire {
             let label: String
             let authorable: Bool
             /// Whether creating one needs an SSH target. AWS does not; dokku cannot do without.
-            let needsHost: Bool
+            let settings: [BackendSetting]
             let note: String?
         }
 
@@ -281,7 +282,7 @@ public struct HatcheryAPI: Sendable {
                             name: backend.rawValue,
                             label: support.displayName,
                             authorable: authorable,
-                            needsHost: backend == .dokku,
+                            settings: support.settings,
                             note: authorable ? nil : "\(support.displayName) stacks cannot be created by hatchery yet")
                     },
                     environments: [
@@ -437,7 +438,7 @@ public struct HatcheryAPI: Sendable {
             let planned = try bootstrapper.plan(
                 name: body.name, backend: backend, host: body.host, tofuDir: body.tofuDir,
                 environment: body.environment.map { Environment(rawValue: $0) },
-                sshKeyPath: body.sshKey ?? "~/.ssh/id_rsa",
+                settings: body.settings ?? [:],
                 into: existing, manifestPath: path)
             let created = try await bootstrapper.create(planned)
             try saveManifest(created.manifest, created.manifestPath)

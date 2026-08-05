@@ -21,7 +21,12 @@ public struct DokkuProvider: ServiceProvider {
         await Preflight(execute: execute).dokku(host: host)
     }
 
-    public func bootstrapFiles(host: String, sshKeyPath: String, region: String?) -> [GeneratedFile] {
+    public var settings: [BackendSetting] { [.sshHost, .sshKey] }
+
+    public func bootstrapFiles(settings values: [String: String]) -> [GeneratedFile] {
+        let resolved = settings.resolving(values)
+        let host = resolved["host"] ?? ""
+        let sshKeyPath = resolved["ssh_key"] ?? "~/.ssh/id_rsa"
         // The SSH user is stripped: the provider block supplies it separately.
         let address = host.split(separator: "@").last.map(String.init) ?? host
         return [

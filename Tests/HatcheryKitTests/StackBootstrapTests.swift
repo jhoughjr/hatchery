@@ -35,7 +35,9 @@ private func bootstrapper(
         },
         writeFile: { recorder.write($0, $1) },
         fileExists: { recorder.exists($0) },
-        createDirectory: { recorder.makeDirectory($0) }
+        createDirectory: { recorder.makeDirectory($0) },
+        // Fixed rather than ambient, so these do not pass or fail on what the shell exports.
+        environment: ["DIGITALOCEAN_TOKEN": "present-for-tests"]
     )
 }
 
@@ -121,7 +123,8 @@ struct StackBootstrapTests {
         // currently trips it, so this asserts the positive case for all of them instead.
         for backend in Backend.allCases where Providers.support(for: backend).authorable {
             let result = try bootstrapper(Recorder()).plan(
-                name: "lab", backend: backend, host: "dokku@h", tofuDir: "/infra/lab")
+                name: "lab", backend: backend, host: "dokku@h", tofuDir: "/infra/lab",
+                settings: ["project": "a-project"])
             #expect(!result.files.isEmpty, "\(backend.rawValue) planned no files")
             #expect(result.stack.backend == backend)
         }
