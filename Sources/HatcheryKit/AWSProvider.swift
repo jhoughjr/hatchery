@@ -42,13 +42,30 @@ public struct AWSProvider: ServiceProvider {
             """
     }
 
-    public func bootstrapFiles(host: String, sshKeyPath: String, region: String?) -> [GeneratedFile] {
+    public var settings: [BackendSetting] {
         [
+            .region(default: "us-east-1", help: "Region App Runner services are created in."),
+            BackendSetting(
+                key: "access_role_arn", label: "App Runner ECR access role ARN",
+                help: """
+                    The IAM role App Runner assumes to pull from ECR. Create it once per account \
+                    — `hatchery setup --backend aws` has the commands — and reuse it for every \
+                    stack in that account.
+                    """,
+                required: false),
+        ]
+    }
+
+    public func bootstrapFiles(settings values: [String: String]) -> [GeneratedFile] {
+        let resolved = settings.resolving(values)
+        return [
             GeneratedFile(path: "versions.tf", contents: Self.versions, role: .declaration),
             GeneratedFile(path: "providers.tf", contents: Self.providers, role: .declaration),
             GeneratedFile(
                 path: "variables.tf",
-                contents: Self.variables(region: region ?? "us-east-1"),
+                contents: Self.variables(
+                    region: resolved["region"] ?? "us-east-1",
+                    roleARN: resolved["access_role_arn"] ?? ""),
                 role: .declaration),
         ]
     }
@@ -161,7 +178,7 @@ public struct AWSProvider: ServiceProvider {
         }
         """
 
-    static func variables(region: String) -> String {
+    static func variables(region: String, roleARN: String = "") -> String {
         """
         # Written by hatchery. Per-service variables are appended below as services are added,
         # so keep this file rather than regenerating it.
@@ -177,7 +194,7 @@ public struct AWSProvider: ServiceProvider {
         variable "apprunner_access_role_arn" {
           description = "IAM role App Runner assumes to pull images from ECR."
           type        = string
-          default     = ""
+          default     = "\(roleARN)"
         }
         """
     }

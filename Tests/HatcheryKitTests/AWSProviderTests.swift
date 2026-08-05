@@ -74,7 +74,7 @@ struct AWSProviderTests {
 
     @Test("the bootstrap names the aws provider and a region")
     func bootstrapShape() {
-        let files = AWSProvider().bootstrapFiles(host: "", sshKeyPath: "", region: "eu-west-2")
+        let files = AWSProvider().bootstrapFiles(settings: ["region": "eu-west-2"])
         let versions = files.first { $0.path == "versions.tf" }
         let variables = files.first { $0.path == "variables.tf" }
 
@@ -86,7 +86,7 @@ struct AWSProviderTests {
 
     @Test("a missing region falls back rather than generating an empty one")
     func regionFallback() {
-        let files = AWSProvider().bootstrapFiles(host: "", sshKeyPath: "", region: nil)
+        let files = AWSProvider().bootstrapFiles(settings: [:])
         #expect(files.first { $0.path == "variables.tf" }?.contents.contains("us-east-1") == true)
     }
 
@@ -320,7 +320,7 @@ struct AppPlatformProviderTests {
 
     @Test("the token is never written into the configuration")
     func tokenStaysInTheEnvironment() {
-        let files = AppPlatformProvider().bootstrapFiles(host: "", sshKeyPath: "", region: "lon1")
+        let files = AppPlatformProvider().bootstrapFiles(settings: ["region": "lon1"])
         for file in files {
             #expect(!file.contents.contains("dop_v1"))
             #expect(!file.contents.lowercased().contains("token ="))
@@ -377,7 +377,7 @@ struct BackendConsistencyTests {
     func authorableBackendsGenerate() throws {
         for provider in Providers.all where provider.authorable {
             let files = provider.bootstrapFiles(
-                host: "dokku@h", sshKeyPath: "~/.ssh/id_rsa", region: "r")
+                settings: ["host": "dokku@h", "project": "p", "region": "r"])
             #expect(!files.isEmpty, "\(provider.backend.rawValue) generates no bootstrap")
             #expect(files.contains { $0.path == "versions.tf" })
 
@@ -392,7 +392,8 @@ struct BackendConsistencyTests {
         for provider in Providers.all where provider.authorable {
             // A domain is supplied for every backend because dokku requires one; the others
             // tolerate it, so one request shape covers them all.
-            let files = provider.bootstrapFiles(host: "dokku@h", sshKeyPath: "~/.ssh/id_rsa", region: "r")
+            let files = provider.bootstrapFiles(
+                settings: ["host": "dokku@h", "project": "p", "region": "r"])
                 + (try provider.declaration(for: req(provider.backend, domains: ["x.example.com"])))
             for file in files {
                 let lower = file.contents.lowercased()
@@ -414,5 +415,96 @@ struct BackendConsistencyTests {
                 #expect(contract.retired.contains("DATABASE_HOST"))
             }
         }
+    }
+}
+
+@Suite("Backend settings")
+struct BackendSettingsTests {
+    @Test("every backend declares what it needs, with help a person can act on")
+    func everyBackendDeclaresSettings() {
+        for provider in Providers.all where provider.authorable {
+            let settings = provider.settings
+            #expect(!settings.isEmpty, "\(provider.backend.rawValue) declares no settings")
+            for setting in settings {
+                #expect(!setting.key.isEmpty)
+                #expect(setting.help.count > 20, "\(setting.key) does not explain itself")
+                // A secret must never be something the manifest could store.
+                if setting.secret { #expect(setting.source == .environment) }
+            }
+        }
+    }
+
+    @Test("defaults fill in, and what is left is reported as missing")
+    func resolvesDefaults() {
+        let settings = AWSProvider().settings
+        let resolved = settings.resolving([:])
+        #expect(resolved["region"] == "us-east-1")
+        // The role is optional, so nothing is missing without it.
+        #expect(settings.missing(from: [:], environment: [:]).isEmpty)
+    }
+
+    @Test("a required setting with no default is reported until it is given")
+    func reportsMissing() {
+        let dokku = DokkuProvider().settings
+        #expect(dokku.missing(from: [:], environment: [:]).map(\.key) == ["host"])
+        #expect(dokku.missing(from: ["host": "dokku@h"], environment: [:]).isEmpty)
+    }
+
+    @Test("an environment-sourced setting is satisfied by the environment, not by a flag")
+    func environmentSourced() {
+        let settings = AppPlatformProvider().settings
+        let token = settings.setting("token")
+        #expect(token?.source == .environment)
+        #expect(token?.environmentKey == "DIGITALOCEAN_TOKEN")
+
+        #expect(!settings.missing(from: [:], environment: [:]).isEmpty)
+        #expect(settings.missing(from: [:], environment: ["DIGITALOCEAN_TOKEN": "x"]).isEmpty)
+    }
+
+    @Test("a secret is never stored in the manifest")
+    func secretsAreNotStored() {
+        let settings = AppPlatformProvider().settings
+        let storable = settings.storable(["region": "lon1", "token": "dop_v1_secret"])
+        #expect(storable["region"] == "lon1")
+        #expect(storable["token"] == nil)
+    }
+
+    @Test("bootstrapping refuses when a required setting is missing, naming it")
+    func bootstrapRefusesIncomplete() async {
+        let tool = StackBootstrapper(
+            execute: { _, _ in CommandOutput(status: 0, standardOutput: "ok") },
+            writeFile: { _, _ in }, fileExists: { _ in false }, createDirectory: { _ in },
+            environment: [:])
+
+        #expect(throws: BootstrapError.missingSettings(backend: .cloudRun, keys: ["project"])) {
+            _ = try tool.plan(
+                name: "lab", backend: .cloudRun, host: "", tofuDir: "/infra/lab")
+        }
+    }
+
+    @Test("settings reach the generated configuration")
+    func settingsReachTheConfiguration() {
+        let files = CloudRunProvider().bootstrapFiles(
+            settings: ["project": "my-project", "region": "europe-west1"])
+        let variables = files.first { $0.path == "variables.tf" }
+        #expect(variables?.contents.contains("my-project") == true)
+        #expect(variables?.contents.contains("europe-west1") == true)
+    }
+
+    @Test("a stack records its declared settings and no secret")
+    func stackRecordsSettings() throws {
+        let tool = StackBootstrapper(
+            execute: { _, _ in CommandOutput(status: 0, standardOutput: "ok") },
+            writeFile: { _, _ in }, fileExists: { _ in false }, createDirectory: { _ in },
+            environment: ["DIGITALOCEAN_TOKEN": "present-for-this-test"])
+        let result = try tool.plan(
+            name: "lab", backend: .appPlatform, host: "", tofuDir: "/infra/lab",
+            settings: ["region": "lon1", "token": "dop_v1_secret"])
+
+        #expect(result.stack.settings?["region"] == "lon1")
+        #expect(result.stack.settings?["token"] == nil)
+        // And it survives a round trip, so `hatchery status` can show it later.
+        let decoded = try StackManifest.decode(from: try result.manifest.encoded())
+        #expect(decoded.stack(named: "lab")?.settings?["region"] == "lon1")
     }
 }

@@ -168,6 +168,11 @@ public struct StackSpec: Codable, Sendable, Equatable {
     public var host: String?
     /// The OpenTofu configuration that owns this stack, when one does.
     public var tofu: TofuBinding?
+    /// What the backend needed to know, as it declared it.
+    ///
+    /// Only declared, non-secret values live here. A token or a key is read from the environment
+    /// at apply time, so a manifest can be committed without redacting anything.
+    public var settings: [String: String]?
     public var services: [ServiceSpec]
 
     public init(
@@ -176,6 +181,7 @@ public struct StackSpec: Codable, Sendable, Equatable {
         environment: Environment? = nil,
         host: String? = nil,
         tofu: TofuBinding? = nil,
+        settings: [String: String]? = nil,
         services: [ServiceSpec] = []
     ) {
         self.name = name
@@ -183,6 +189,7 @@ public struct StackSpec: Codable, Sendable, Equatable {
         self.environment = environment
         self.host = host
         self.tofu = tofu
+        self.settings = settings
         self.services = services
     }
 

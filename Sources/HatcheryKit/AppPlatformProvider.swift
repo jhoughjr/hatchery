@@ -42,12 +42,27 @@ public struct AppPlatformProvider: ServiceProvider {
             """
     }
 
-    public func bootstrapFiles(host: String, sshKeyPath: String, region: String?) -> [GeneratedFile] {
+    public var settings: [BackendSetting] {
         [
+            .region(default: "nyc3", help: "Region apps are created in."),
+            BackendSetting(
+                key: "token", label: "API token",
+                help: """
+                    A personal access token with write scope. Read from the environment at apply \
+                    time and never written to the manifest or the configuration.
+                    """,
+                secret: true, source: .environment, environmentKey: "DIGITALOCEAN_TOKEN"),
+        ]
+    }
+
+    public func bootstrapFiles(settings values: [String: String]) -> [GeneratedFile] {
+        let resolved = settings.resolving(values)
+        return [
             GeneratedFile(path: "versions.tf", contents: Self.versions, role: .declaration),
             GeneratedFile(path: "providers.tf", contents: Self.providers, role: .declaration),
             GeneratedFile(
-                path: "variables.tf", contents: Self.variables(region: region ?? "nyc3"),
+                path: "variables.tf",
+                contents: Self.variables(region: resolved["region"] ?? "nyc3"),
                 role: .declaration),
         ]
     }

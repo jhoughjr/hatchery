@@ -38,12 +38,25 @@ public struct CloudRunProvider: ServiceProvider {
             """
     }
 
-    public func bootstrapFiles(host: String, sshKeyPath: String, region: String?) -> [GeneratedFile] {
+    public var settings: [BackendSetting] {
         [
+            BackendSetting(
+                key: "project", label: "Project ID",
+                help: "The Google Cloud project services are created in."),
+            .region(default: "us-central1", help: "Region Cloud Run services are created in."),
+        ]
+    }
+
+    public func bootstrapFiles(settings values: [String: String]) -> [GeneratedFile] {
+        let resolved = settings.resolving(values)
+        return [
             GeneratedFile(path: "versions.tf", contents: Self.versions, role: .declaration),
             GeneratedFile(path: "providers.tf", contents: Self.providers, role: .declaration),
             GeneratedFile(
-                path: "variables.tf", contents: Self.variables(region: region ?? "us-central1"),
+                path: "variables.tf",
+                contents: Self.variables(
+                    region: resolved["region"] ?? "us-central1",
+                    project: resolved["project"] ?? ""),
                 role: .declaration),
         ]
     }
@@ -179,14 +192,14 @@ public struct CloudRunProvider: ServiceProvider {
         }
         """
 
-    static func variables(region: String) -> String {
+    static func variables(region: String, project: String = "") -> String {
         """
         # Written by hatchery. Per-service variables are appended below as services are added,
         # so keep this file rather than regenerating it.
         variable "gcp_project" {
           description = "Project the services run in."
           type        = string
-          default     = ""
+          default     = "\(project)"
         }
 
         variable "gcp_region" {

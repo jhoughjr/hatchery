@@ -470,8 +470,9 @@ enum Page {
           // Only backends hatchery can actually author are offered. Listing one it would refuse
           // turns a menu into a dead end you discover after filling the form in.
           const authorable = meta.backends.filter(b => b.authorable).map(b => b.name);
-          const needsHost = {};
-          meta.backends.forEach(b => { needsHost[b.name] = b.needsHost; });
+          // Settings are whatever the backend declares, so a new provider needs no change here.
+          const settingsFor = {};
+          meta.backends.forEach(b => { settingsFor[b.name] = b.settings || []; });
           const blocked = meta.backends.filter(b => !b.authorable);
           if (!authorable.length) { log('no backend can be created by this build', true); return; }
 
@@ -483,10 +484,6 @@ enum Page {
                      + (blocked.length
                         ? blocked.map(b => b.note).join('; ') + '.'
                         : 'Every backend this build supports is listed.'))
-            + field('w-host', 'SSH target', 'dokku@192.168.0.103',
-                    'How hatchery reaches the box to create and manage apps. The user must be '
-                    + 'dokku — that account is what turns an SSH command into a dokku command — '
-                    + 'and your key must already be authorized for it. Checked in the next step.')
             + field('w-dir', 'Tofu directory', '~/infra-state/',
                     'Where the generated tofu configuration and the config file for each service are '
                     + 'written. Must be empty or not exist. Keep it somewhere durable and backed '
@@ -496,18 +493,37 @@ enum Page {
           if (!ok) { log('cancelled'); return; }
 
           const name = $('w-name').value.trim();
-          const host = $('w-host').value.trim();
           const dir = $('w-dir').value.trim();
           const env = $('w-env').value;
           const backend = $('w-backend').value;
 
+          // A second step, because which fields exist depends on the backend just chosen.
+          const declared = (settingsFor[backend] || []).filter(s => s.source === 'declared');
+          const fromEnv = (settingsFor[backend] || []).filter(s => s.source === 'environment');
+          let values = {};
+          if (declared.length || fromEnv.length) {
+            const body = declared.map(s => field('set-' + s.key, s.label,
+                s.defaultValue || '', s.help + (s.required ? '' : ' (optional)'))).join('')
+              + fromEnv.map(s => '<div class="field"><label>' + escapeHTML(s.label) + '</label>'
+                + '<div class="hint">Read from $' + escapeHTML(s.environmentKey || '')
+                + ' at apply time. hatchery never stores it.</div></div>').join('');
+            if (!(await step('Settings for ' + backend, 'what this backend needs to know', body))) {
+              log('cancelled'); return;
+            }
+            declared.forEach(s => {
+              const v = $('set-' + s.key).value.trim();
+              if (v) values[s.key] = v;
+            });
+          }
+          const host = values.host || '';
+
           // Check before creating rather than after. These failures otherwise surface halfway
           // through `tofu init`, as a provider error that never mentions the real cause.
-          if (!(await preflight(backend, needsHost[backend] ? host : null))) return;
+          if (!(await preflight(backend, host || null))) return;
 
           busy = true;
           const res = await send('/api/stacks/new',
-            {name, host, tofuDir: dir, environment: env, backend, confirm: name});
+            {name, host, tofuDir: dir, environment: env, backend, settings: values, confirm: name});
           busy = false;
           log(res.data.message || res.data.error, !res.ok);
           if (!res.ok) return;

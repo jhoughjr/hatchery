@@ -257,8 +257,25 @@ struct Setup: ParsableCommand {
         let support = Providers.support(for: kind)
         print("Setting up \(support.displayName)")
         print("")
+
+        if !support.settings.isEmpty {
+            print("Settings this backend takes:")
+            for setting in support.settings {
+                let origin: String
+                switch setting.source {
+                case .declared:
+                    origin = setting.defaultValue.map { "default \($0)" } ?? "no default"
+                case .environment:
+                    origin = "from $\(setting.environmentKey ?? "")"
+                }
+                print("  --set \(setting.key)=<value>")
+                print("      \(setting.label) · \(setting.required ? "required" : "optional") · \(origin)")
+            }
+            print("")
+        }
         for (index, step) in support.setupSteps.enumerated() {
-            print("\(index + 1). \(step.title)   [on the \(step.on)]")
+            let where_ = step.on == "box" ? "on the box" : "on this machine"
+            print("\(index + 1). \(step.title)   [\(where_)]")
             print("")
             for line in step.why.split(separator: "\n") {
                 print("   \(line)")
@@ -865,8 +882,8 @@ struct Stack: ParsableCommand {
         @Argument(help: "Name for the new stack.")
         var name: String
 
-        @Option(name: .long, help: "SSH target for the box, e.g. dokku@192.168.0.103.")
-        var host: String
+        @Option(name: .long, help: "SSH target for the box. Shorthand for --set host=<value>.")
+        var host: String = ""
 
         @Option(name: .long, help: "Directory to write the tofu configuration into.")
         var tofuDir: String
@@ -877,8 +894,10 @@ struct Stack: ParsableCommand {
         @Option(name: .shortAndLong, help: "Environment this stack is for: prod, staging, or dev.")
         var environment: String = Environment.dev.rawValue
 
-        @Option(name: .long, help: "Private key authorized for the dokku user.")
-        var sshKey: String = "~/.ssh/id_rsa"
+        @Option(
+            name: .long,
+            help: "Backend setting as key=value. Repeat for more than one; `hatchery setup --backend <name>` lists them.")
+        var set: [String] = []
 
         @Option(name: .shortAndLong, help: "Manifest to add the stack to. Defaults to one beside the tofu directory.")
         var manifest: String?
@@ -895,9 +914,26 @@ struct Stack: ParsableCommand {
                 from: Data(contentsOf: URL(fileURLWithPath: Paths.expanded(path))))
 
             let bootstrapper = StackBootstrapper()
+            var values: [String: String] = [:]
+            for pair in set {
+                let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard parts.count == 2, !parts[0].isEmpty else {
+                    throw ValidationError("expected key=value, got '\(pair)'")
+                }
+                values[String(parts[0])] = String(parts[1])
+            }
+            // Unknown keys are refused rather than silently ignored, so a typo does not look
+            // like a setting that did nothing.
+            let declared = Set(Providers.support(for: kind).settings.map(\.key))
+            for key in values.keys where !declared.contains(key) {
+                throw ValidationError(
+                    "\(kind.rawValue) has no setting '\(key)'; it declares: "
+                        + declared.sorted().joined(separator: ", "))
+            }
+
             let planned = try bootstrapper.plan(
                 name: name, backend: kind, host: host, tofuDir: tofuDir,
-                environment: Environment(rawValue: environment), sshKeyPath: sshKey,
+                environment: Environment(rawValue: environment), settings: values,
                 into: existing, manifestPath: Paths.expanded(path))
 
             for file in planned.files {

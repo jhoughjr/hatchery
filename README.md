@@ -319,10 +319,10 @@ Fly.io was considered and deferred. Its tofu provider is `fly-apps/fly` v0.0.23 
 service would have to be assembled from machines by hand — a materially worse fit than the three
 above. `flyctl` would be the better route if it is wanted.
 
-Each backend answers for itself. A provider supplies its own readiness check and its own setup
-guide, so `hatchery doctor --backend aws` asks about credentials and a region while
-`--backend dokku` asks about a reachable box and an authorized key — and neither has to know the
-other exists:
+Each backend answers for itself. A provider supplies its own **settings**, its own readiness
+check and its own setup guide, so `hatchery doctor --backend aws` asks about credentials and a
+region while `--backend dokku` asks about a reachable box and an authorized key — and neither
+has to know the other exists:
 
 ```
 $ hatchery doctor --backend aws
@@ -334,8 +334,45 @@ $ hatchery doctor --backend aws
   --   aws region: the aws cli is not installed
 ```
 
-`hatchery setup --backend <name>` prints what that backend needs from nothing. The dashboard
-shows the same guide behind **Set up a backend**, with a picker for each one.
+`hatchery setup --backend <name>` prints what that backend needs from nothing, including the
+settings it takes. The dashboard shows the same guide behind **Set up a backend**, with a picker
+for each one.
+
+### Backend settings
+
+What a backend needs is declared by the backend, not asked for separately by the CLI, the API
+and the wizard:
+
+| Backend | Settings |
+| --- | --- |
+| `dokku` | `host`, `ssh_key` |
+| `appPlatform` | `region`, `token`* |
+| `aws` | `region`, `access_role_arn` |
+| `cloudRun` | `project`, `region` |
+
+\* secret: read from the environment at apply time, never written to the manifest.
+
+```sh
+hatchery stack new crlab --backend cloudRun --tofu-dir ~/infra-state/crlab \
+  --set project=my-proj --set region=europe-west1
+```
+
+Before this, `--host` was a dokku concept every other backend ignored, a region was a bare
+parameter threaded through three call sites, and the page carried a `needsHost` flag so it could
+special-case one backend. Adding a provider meant editing all of them; now it means declaring an
+array. A missing required setting is refused by name, and so is a key the backend does not have:
+
+```
+$ hatchery stack new crlab --backend cloudRun --tofu-dir …
+Error: cloudRun needs project; pass --set <key>=<value>, or run `hatchery setup --backend cloudRun`
+
+$ hatchery stack new crlab --backend cloudRun --tofu-dir … --set projekt=typo
+Error: cloudRun has no setting 'projekt'; it declares: project, region
+```
+
+Nothing here assumes a particular box. Which settings exist, whether one of them is an SSH
+target at all, and whether a value is stored or read from the environment are all the backend's
+answer to give.
 
 App Runner rather than ECS or Fargate for the first AWS target, because hatchery's model of a
 service is *an image, some environment, a domain and a health path* — which is what App Runner

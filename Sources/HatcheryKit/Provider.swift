@@ -99,12 +99,27 @@ public protocol ServiceProvider: Sendable {
     /// The name of the variable above, so the manifest can record it.
     func imageVariableName(for request: ScaffoldRequest) -> String?
 
+    /// What this backend needs to know before it can be used.
+    var settings: [BackendSetting] { get }
+
     /// The tofu configuration a stack on this backend starts from.
-    func bootstrapFiles(host: String, sshKeyPath: String, region: String?) -> [GeneratedFile]
+    func bootstrapFiles(settings: [String: String]) -> [GeneratedFile]
 }
 
 extension ServiceProvider {
     public var displayName: String { backend.rawValue }
+    public var settings: [BackendSetting] { [] }
+
+    /// Whether this machine has everything the backend's declared settings ask for.
+    ///
+    /// The environment is a parameter rather than read here, so a caller can be tested without
+    /// depending on whichever variables happen to be set on the machine running the tests.
+    public func missingSettings(
+        _ values: [String: String],
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [BackendSetting] {
+        settings.missing(from: values, environment: environment)
+    }
 }
 
 public enum Providers {
