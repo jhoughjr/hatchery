@@ -205,15 +205,35 @@ struct Serve: AsyncParsableCommand {
     func run() async throws {
         // Resolved once, at boot: the server should keep reading the same file it started with
         // rather than follow the working directory somewhere else mid-session.
-        let path = try ManifestLocator.resolve(manifest)
-        // Read per request rather than held in memory, so editing the manifest or running
-        // `service new` shows up without a restart.
-        let load: @Sendable () throws -> StackManifest = {
-            try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
-        }
-        _ = try load()  // Fail now with a clear message rather than on the first request.
+        //
+        // A missing manifest is not fatal here. Refusing to start without one would mean the
+        // wizard that creates the first stack could never be reached — you would need a manifest
+        // to get the tool that writes your first manifest.
+        let resolved = (try? ManifestLocator.resolve(manifest))
+            ?? Paths.join(NSHomeDirectory(), ".config/hatchery/\(ManifestLocator.defaultName)")
+        let existed = FileManager.default.fileExists(atPath: resolved)
 
-        let api = HatcheryAPI(loadManifest: load, token: token)
+        // Read per request rather than held in memory, so editing the manifest or creating a
+        // service shows up without a restart. An absent file reads as an empty manifest, which
+        // is what the page renders its empty state from.
+        let load: @Sendable () throws -> StackManifest = {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: resolved)) else {
+                return StackManifest()
+            }
+            return try StackManifest.decode(from: data)
+        }
+        _ = try load()  // Fail now on a malformed file rather than on the first request.
+
+        let save: @Sendable (StackManifest, String) throws -> Void = { manifest, path in
+            let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            try manifest.encoded().write(to: URL(fileURLWithPath: path))
+        }
+
+        let api = HatcheryAPI(
+            loadManifest: load, saveManifest: save, manifestPath: { resolved }, token: token)
         let server = try WebServer(api: api, host: bind, port: port, hasToken: token != nil)
 
         print("hatchery serving http://\(bind):\(port)")
@@ -223,7 +243,12 @@ struct Serve: AsyncParsableCommand {
         } else {
             print("  reachable from the network — token required on every API request")
         }
-        print("  manifest: \(path)")
+        if existed {
+            print("  manifest: \(resolved)")
+        } else {
+            print("  no manifest yet — open the page to create your first stack")
+            print("  one will be written to \(resolved)")
+        }
         try await server.run()
     }
 }
@@ -472,8 +497,74 @@ struct ServiceKindArgument: ExpressibleByArgument {
 struct Config: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Inspect and check service configuration.",
-        subcommands: [Validate.self, Audit.self, Sync.self]
+        subcommands: [Validate.self, Audit.self, Sync.self, Set.self]
     )
+
+    /// Fill in a value hatchery could not invent.
+    struct Set: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "set",
+            abstract: "Set config values on a service, merging rather than replacing.",
+            discussion: """
+                This is how a key reported as needing a value gets one. Other keys are left \
+                alone, so the minted and composed values written when the service was created \
+                survive. Passing KEY= with no value removes the key.
+                """
+        )
+
+        @Argument(help: "Stack the service belongs to.")
+        var stack: String
+
+        @Argument(help: "Service to set values on.")
+        var service: String
+
+        @Argument(help: "One or more KEY=VALUE pairs.")
+        var values: [String]
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        func run() async throws {
+            let manifestPath = try ManifestLocator.resolve(manifest)
+            let parsed = try StackManifest.decode(
+                from: Data(contentsOf: URL(fileURLWithPath: manifestPath)))
+            guard let spec = parsed.stack(named: stack) else {
+                throw ValidationError("no stack named '\(stack)' in \(manifestPath)")
+            }
+            guard let target = spec.service(named: service) else {
+                throw ValidationError("stack '\(stack)' declares no service named '\(service)'")
+            }
+
+            var updates: [String: String] = [:]
+            for pair in values {
+                let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard parts.count == 2, !parts[0].isEmpty else {
+                    throw ValidationError("expected KEY=VALUE, got '\(pair)'")
+                }
+                updates[String(parts[0])] = String(parts[1])
+            }
+
+            let url = ConfigSync.configURL(for: target, in: spec, manifestPath: manifestPath)
+            let declared = (try? ConfigSync.readDeclared(at: url)) ?? [:]
+            let merged = ConfigSync.applying(updates, to: declared)
+            try ConfigSync.encoded(merged).write(to: url)
+
+            // Names only. The values are the reason this file is gitignored.
+            for key in updates.keys.sorted() {
+                print("  \(key): \(updates[key]!.isEmpty ? "removed" : "set")")
+            }
+            print("  wrote \(url.path)")
+
+            if let contract = EnvContract.contract(for: target.kind, backend: spec.backend) {
+                let missing = contract.required.filter { (merged[$0] ?? "").isEmpty }.sorted()
+                if missing.isEmpty {
+                    print("  every required key now has a value")
+                } else {
+                    print("  still needs: \(missing.joined(separator: ", "))")
+                }
+            }
+        }
+    }
 
     /// Write what a service is running with into the file that declares it.
     struct Sync: AsyncParsableCommand {
@@ -518,7 +609,7 @@ struct Config: ParsableCommand {
             for service in services {
                 do {
                     let live = try await reader.config(for: service, in: spec)
-                    let url = ConfigSync.configURL(for: service, manifestPath: manifest)
+                    let url = ConfigSync.configURL(for: service, in: spec, manifestPath: manifest)
                     let declared = try ConfigSync.readDeclared(at: url)
                     let difference = ConfigSync.diff(live: live, declared: declared)
                     let needsWrite = ConfigSync.needsWrite(live: live, declared: declared)
@@ -655,8 +746,71 @@ struct Config: ParsableCommand {
 struct Stack: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Work with declared stacks.",
-        subcommands: [List.self]
+        subcommands: [New.self, List.self]
     )
+
+    struct New: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Create a stack where there was nothing.",
+            discussion: """
+                Writes a tofu configuration into an empty directory, runs `tofu init`, and \
+                records the stack in a manifest beside it. This is the step that used to need \
+                hand-written HCL.
+
+                An existing configuration is never written over.
+                """
+        )
+
+        @Argument(help: "Name for the new stack.")
+        var name: String
+
+        @Option(name: .long, help: "SSH target for the box, e.g. dokku@192.168.0.103.")
+        var host: String
+
+        @Option(name: .long, help: "Directory to write the tofu configuration into.")
+        var tofuDir: String
+
+        @Option(name: .shortAndLong, help: "Backend. One of: \(Backend.allCases.map(\.rawValue).joined(separator: ", ")).")
+        var backend: String = Backend.dokku.rawValue
+
+        @Option(name: .shortAndLong, help: "Environment this stack is for: prod, staging, or dev.")
+        var environment: String = Environment.dev.rawValue
+
+        @Option(name: .long, help: "Private key authorized for the dokku user.")
+        var sshKey: String = "~/.ssh/id_rsa"
+
+        @Option(name: .shortAndLong, help: "Manifest to add the stack to. Defaults to one beside the tofu directory.")
+        var manifest: String?
+
+        func run() async throws {
+            guard let kind = Backend(rawValue: backend) else {
+                throw ValidationError("unknown backend '\(backend)'")
+            }
+
+            // An existing manifest is extended rather than replaced, so a second stack does not
+            // wipe out the first.
+            let path = manifest ?? StackBootstrapper.manifestPath(inTofuDirectory: tofuDir)
+            let existing = try? StackManifest.decode(
+                from: Data(contentsOf: URL(fileURLWithPath: Paths.expanded(path))))
+
+            let bootstrapper = StackBootstrapper()
+            let planned = try bootstrapper.plan(
+                name: name, backend: kind, host: host, tofuDir: tofuDir,
+                environment: Environment(rawValue: environment), sshKeyPath: sshKey,
+                into: existing, manifestPath: Paths.expanded(path))
+
+            for file in planned.files {
+                print("  write \(Paths.join(planned.stack.tofu?.directory ?? "", file.path))")
+            }
+
+            let created = try await bootstrapper.create(planned)
+            try created.manifest.encoded().write(to: URL(fileURLWithPath: created.manifestPath))
+            print("  wrote \(created.manifestPath)")
+            print("  tofu init: ok")
+            print("")
+            print("  next: hatchery service new \(name) <service> --kind <kind> --domain <d> --image <ref>")
+        }
+    }
 
     struct List: ParsableCommand {
         static let configuration = CommandConfiguration(

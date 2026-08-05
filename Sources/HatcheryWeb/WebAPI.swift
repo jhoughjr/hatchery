@@ -100,6 +100,67 @@ enum Wire {
         let message: String
         let detail: String?
     }
+
+    struct NewStackBody: Decodable {
+        let name: String
+        let host: String
+        let tofuDir: String
+        let backend: String?
+        let environment: String?
+        let sshKey: String?
+        let confirm: String
+    }
+
+    struct NewServiceBody: Decodable {
+        let stack: String
+        let name: String
+        let kind: String
+        let domains: [String]
+        let image: String
+        let network: String?
+        let port: Int?
+        let gated: Bool?
+        let mintKeypair: Bool?
+        let confirm: String
+    }
+
+    struct SetConfigBody: Decodable {
+        let stack: String
+        let service: String
+        let values: [String: String]
+        let confirm: String
+    }
+
+    struct ApplyBody: Decodable {
+        let stack: String
+        let confirm: String
+    }
+
+    /// A key that still needs a person, and why hatchery could not supply it.
+    struct MissingKey: Encodable {
+        let key: String
+        let reason: String
+        let secret: Bool
+    }
+
+    struct ServiceCreated: Encodable {
+        let ok: Bool
+        let message: String
+        let files: [String]
+        let origins: [Origin]
+        let missing: [MissingKey]
+
+        struct Origin: Encodable {
+            let key: String
+            let origin: String
+        }
+    }
+
+    struct Kinds: Encodable {
+        let kinds: [String]
+        let backends: [String]
+        let environments: [String]
+    }
 }
 
 /// Serves the dashboard and the small API behind it.
@@ -109,22 +170,46 @@ enum Wire {
 /// request carries the name of what it is about to change, and a mismatch is refused.
 public struct HatcheryAPI: Sendable {
     private let loadManifest: @Sendable () throws -> StackManifest
+    private let saveManifest: @Sendable (StackManifest, String) throws -> Void
+    private let manifestPath: @Sendable () -> String
     private let reporter: StatusReporter
     private let lifecycle: LifecycleRunner
     private let deployer: Deployer
+    private let scaffolder: Scaffolder
+    private let bootstrapper: StackBootstrapper
+    private let readConfig: @Sendable (URL) throws -> [String: String]
+    private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
     private let token: String?
 
     public init(
         loadManifest: @escaping @Sendable () throws -> StackManifest,
+        saveManifest: @escaping @Sendable (StackManifest, String) throws -> Void = { manifest, path in
+            try manifest.encoded().write(to: URL(fileURLWithPath: path))
+        },
+        manifestPath: @escaping @Sendable () -> String = { ManifestLocator.defaultName },
         reporter: StatusReporter = StatusReporter(),
         lifecycle: LifecycleRunner = LifecycleRunner(),
         deployer: Deployer = Deployer(),
+        scaffolder: Scaffolder = Scaffolder(),
+        bootstrapper: StackBootstrapper = StackBootstrapper(),
+        readConfig: @escaping @Sendable (URL) throws -> [String: String] = {
+            (try? ConfigSync.readDeclared(at: $0)) ?? [:]
+        },
+        writeConfig: @escaping @Sendable (URL, [String: String]) throws -> Void = { url, config in
+            try ConfigSync.encoded(config).write(to: url)
+        },
         token: String? = nil
     ) {
         self.loadManifest = loadManifest
+        self.saveManifest = saveManifest
+        self.manifestPath = manifestPath
         self.reporter = reporter
         self.lifecycle = lifecycle
         self.deployer = deployer
+        self.scaffolder = scaffolder
+        self.bootstrapper = bootstrapper
+        self.readConfig = readConfig
+        self.writeConfig = writeConfig
         self.token = token
     }
 
@@ -144,6 +229,23 @@ public struct HatcheryAPI: Sendable {
             return await runLifecycle(request)
         case ("POST", "/api/deploy"):
             return await runDeploy(request)
+        case ("GET", "/api/kinds"):
+            return .json(
+                Wire.Kinds(
+                    kinds: ServiceKind.known.map(\.rawValue),
+                    backends: Backend.allCases.map(\.rawValue),
+                    environments: [
+                        Environment.dev.rawValue, Environment.staging.rawValue,
+                        Environment.prod.rawValue,
+                    ]))
+        case ("POST", "/api/stacks/new"):
+            return await createStack(request)
+        case ("POST", "/api/services/new"):
+            return await createService(request)
+        case ("POST", "/api/config/set"):
+            return setConfig(request)
+        case ("POST", "/api/apply"):
+            return await runApply(request)
         default:
             return .failure(404, "no route for \(request.method) \(request.path)")
         }
@@ -169,6 +271,185 @@ public struct HatcheryAPI: Sendable {
             difference |= left[index] ^ right[index]
         }
         return difference == 0
+    }
+
+    // MARK: - From nothing to something
+
+    private func createStack(_ request: WebRequest) async -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.NewStackBody.self, from: request.body) else {
+            return .failure(400, "expected {name, host, tofuDir, confirm}")
+        }
+        guard body.confirm == body.name else {
+            return .failure(400, "confirmation did not match; expected '\(body.name)'")
+        }
+        guard let backend = Backend(rawValue: body.backend ?? Backend.dokku.rawValue) else {
+            return .failure(400, "unknown backend '\(body.backend ?? "")'")
+        }
+
+        // A manifest that does not exist yet is not an error here: that is the whole point.
+        // Where it lives does not constrain anything, because a service's config resolves
+        // against its own stack's tofu directory rather than against the manifest.
+        let existing = try? loadManifest()
+        let path = manifestPath()
+
+        do {
+            let planned = try bootstrapper.plan(
+                name: body.name, backend: backend, host: body.host, tofuDir: body.tofuDir,
+                environment: body.environment.map { Environment(rawValue: $0) },
+                sshKeyPath: body.sshKey ?? "~/.ssh/id_rsa",
+                into: existing, manifestPath: path)
+            let created = try await bootstrapper.create(planned)
+            try saveManifest(created.manifest, created.manifestPath)
+
+            return .json(
+                Wire.ActionResult(
+                    ok: true,
+                    message: "created '\(body.name)' in \(body.tofuDir), tofu init ok",
+                    detail: created.manifestPath))
+        } catch {
+            return .failure(400, "\(error)")
+        }
+    }
+
+    private func createService(_ request: WebRequest) async -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.NewServiceBody.self, from: request.body) else {
+            return .failure(400, "expected {stack, name, kind, domains, image, confirm}")
+        }
+        guard body.confirm == body.name else {
+            return .failure(400, "confirmation did not match; expected '\(body.name)'")
+        }
+        guard !body.domains.filter({ !$0.isEmpty }).isEmpty else {
+            return .failure(400, "at least one domain is required")
+        }
+
+        let manifest: StackManifest
+        do {
+            manifest = try loadManifest()
+        } catch {
+            return .failure(500, "\(error)")
+        }
+        guard let stack = manifest.stack(named: body.stack) else {
+            return .failure(404, "no stack named '\(body.stack)'")
+        }
+
+        // Siblings are read from the running services, because sharing a signing key means
+        // sharing the value the other service actually has.
+        var siblings: [String: [String: String]] = [:]
+        let reader = LiveConfigReader()
+        for existing in stack.services {
+            if let config = try? await reader.config(for: existing, in: stack) {
+                siblings[existing.name] = config
+            }
+        }
+
+        let service = ServiceSpec(
+            name: body.name,
+            kind: ServiceKind(rawValue: body.kind),
+            image: body.image,
+            domains: body.domains.filter { !$0.isEmpty },
+            configFile: "\(body.name).config.json")
+
+        do {
+            let result = try await scaffolder.plan(
+                service: service, into: body.stack, manifest: manifest,
+                containerPort: body.port ?? 8080, network: body.network,
+                gated: body.gated ?? false, siblings: siblings,
+                mintKeypair: body.mintKeypair ?? false)
+            try scaffolder.write(result, in: stack)
+            try saveManifest(result.manifest, manifestPath())
+
+            let secret = EnvContract.contract(for: service.kind, backend: stack.backend)?.secret ?? []
+            return .json(
+                Wire.ServiceCreated(
+                    ok: true,
+                    message: "created '\(body.name)'",
+                    files: result.files.map(\.path),
+                    // Names and where each value came from. Never the values.
+                    origins: result.secrets.map {
+                        Wire.ServiceCreated.Origin(key: $0.key, origin: $0.origin.label)
+                    },
+                    missing: result.unresolved.map {
+                        if case .supplied(let reason) = $0.origin {
+                            return Wire.MissingKey(
+                                key: $0.key, reason: reason, secret: secret.contains($0.key))
+                        }
+                        return Wire.MissingKey(key: $0.key, reason: "", secret: secret.contains($0.key))
+                    }))
+        } catch {
+            return .failure(400, "\(error)")
+        }
+    }
+
+    private func setConfig(_ request: WebRequest) -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.SetConfigBody.self, from: request.body) else {
+            return .failure(400, "expected {stack, service, values, confirm}")
+        }
+        guard body.confirm == body.service else {
+            return .failure(400, "confirmation did not match; expected '\(body.service)'")
+        }
+
+        let manifest: StackManifest
+        do {
+            manifest = try loadManifest()
+        } catch {
+            return .failure(500, "\(error)")
+        }
+        guard let stack = manifest.stack(named: body.stack),
+            let service = stack.service(named: body.service)
+        else {
+            return .failure(404, "no service '\(body.service)' in stack '\(body.stack)'")
+        }
+
+        do {
+            let url = ConfigSync.configURL(for: service, in: stack, manifestPath: manifestPath())
+            let merged = ConfigSync.applying(body.values, to: try readConfig(url))
+            try writeConfig(url, merged)
+
+            let contract = EnvContract.contract(for: service.kind, backend: stack.backend)
+            let missing = (contract?.required ?? []).filter { (merged[$0] ?? "").isEmpty }.sorted()
+            return .json(
+                Wire.ActionResult(
+                    ok: missing.isEmpty,
+                    // Key names only; the values are why this file is gitignored.
+                    message: missing.isEmpty
+                        ? "every required key now has a value"
+                        : "still needs: \(missing.joined(separator: ", "))",
+                    detail: "set \(body.values.keys.sorted().joined(separator: ", "))"))
+        } catch {
+            return .failure(500, "\(error)")
+        }
+    }
+
+    private func runApply(_ request: WebRequest) async -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.ApplyBody.self, from: request.body) else {
+            return .failure(400, "expected {stack, confirm}")
+        }
+        guard body.confirm == body.stack else {
+            return .failure(400, "confirmation did not match; expected '\(body.stack)'")
+        }
+
+        let manifest: StackManifest
+        do {
+            manifest = try loadManifest()
+        } catch {
+            return .failure(500, "\(error)")
+        }
+        guard let stack = manifest.stack(named: body.stack) else {
+            return .failure(404, "no stack named '\(body.stack)'")
+        }
+        // The same line the deploy route draws: production applies stay on the CLI.
+        if stack.resolvedEnvironment.isProduction {
+            return .failure(
+                403, "'\(stack.name)' is \(stack.resolvedEnvironment.rawValue); apply it from the CLI")
+        }
+
+        do {
+            let output = try await deployer.tofuApply(in: stack)
+            return .json(Wire.ActionResult(ok: true, message: "applied \(stack.name)", detail: output))
+        } catch {
+            return .json(
+                Wire.ActionResult(ok: false, message: "apply failed", detail: "\(error)"), status: 500)
+        }
     }
 
     private func stacks() -> WebResponse {
