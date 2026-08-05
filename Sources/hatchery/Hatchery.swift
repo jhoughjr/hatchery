@@ -30,6 +30,8 @@ struct LifecycleOptions: ParsableArguments {
     var yes: Bool = false
 
     func resolve() throws -> (StackSpec, [ServiceSpec]) {
+        // Resolve before reading, so a bare invocation finds the manifest from anywhere.
+        let manifest = try ManifestLocator.resolve(self.manifest)
         let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
         let parsed = try StackManifest.decode(from: data)
 
@@ -102,6 +104,8 @@ struct Deploy: AsyncParsableCommand {
     var dryRun: Bool = false
 
     func run() async throws {
+        // Resolve before reading, so a bare invocation finds the manifest from anywhere.
+        let manifest = try ManifestLocator.resolve(self.manifest)
         let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
         let parsed = try StackManifest.decode(from: data)
         guard let spec = parsed.stack(named: stack) else {
@@ -199,8 +203,10 @@ struct Serve: AsyncParsableCommand {
     var token: String?
 
     func run() async throws {
-        let path = manifest
-        // Read per request rather than once at boot, so editing the manifest or running
+        // Resolved once, at boot: the server should keep reading the same file it started with
+        // rather than follow the working directory somewhere else mid-session.
+        let path = try ManifestLocator.resolve(manifest)
+        // Read per request rather than held in memory, so editing the manifest or running
         // `service new` shows up without a restart.
         let load: @Sendable () throws -> StackManifest = {
             try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
@@ -282,6 +288,8 @@ struct Service: AsyncParsableCommand {
         var yes: Bool = false
 
         func run() async throws {
+            // Resolve before reading, so a bare invocation finds the manifest from anywhere.
+            let manifest = try ManifestLocator.resolve(self.manifest)
             let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
             let parsed = try StackManifest.decode(from: data)
             guard let spec = parsed.stack(named: stack) else {
@@ -400,6 +408,8 @@ struct Status: AsyncParsableCommand {
     var timeout: Int = 5
 
     func run() async throws {
+        // Resolve before reading, so a bare invocation finds the manifest from anywhere.
+        let manifest = try ManifestLocator.resolve(self.manifest)
         let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
         let parsed = try StackManifest.decode(from: data)
 
@@ -484,6 +494,8 @@ struct Config: ParsableCommand {
         var dryRun: Bool = false
 
         func run() async throws {
+            // Resolve before reading, so a bare invocation finds the manifest from anywhere.
+            let manifest = try ManifestLocator.resolve(self.manifest)
             let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
             let parsed = try StackManifest.decode(from: data)
 
@@ -548,6 +560,8 @@ struct Config: ParsableCommand {
         var stack: String?
 
         func run() async throws {
+            // Resolve before reading, so a bare invocation finds the manifest from anywhere.
+            let manifest = try ManifestLocator.resolve(self.manifest)
             let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
             let parsed = try StackManifest.decode(from: data)
 
@@ -653,6 +667,8 @@ struct Stack: ParsableCommand {
         var manifest: String = "hatchery.json"
 
         func run() throws {
+            // Resolve before reading, so a bare invocation finds the manifest from anywhere.
+            let manifest = try ManifestLocator.resolve(self.manifest)
             let data = try Data(contentsOf: URL(fileURLWithPath: manifest))
             let parsed = try StackManifest.decode(from: data)
 
