@@ -156,6 +156,29 @@ enum Wire {
         }
     }
 
+    struct LogsView: Encodable {
+        let service: String
+        let lines: [LogLine]
+    }
+
+    struct ConfigView: Encodable {
+        let service: String
+        let kind: String
+        let image: String
+        let domains: [String]
+        /// Declared values, with secrets replaced by a fingerprint. Never the value.
+        let declared: [String: String]
+        let secretKeys: [String]
+        let issues: [ValidationIssue]
+        let source: String
+    }
+
+    struct PlanView: Encodable {
+        let ok: Bool
+        let message: String
+        let summary: PlanSummary
+    }
+
     struct Kinds: Encodable {
         let kinds: [String]
         let backends: [String]
@@ -177,6 +200,8 @@ public struct HatcheryAPI: Sendable {
     private let deployer: Deployer
     private let scaffolder: Scaffolder
     private let bootstrapper: StackBootstrapper
+    private let logReader: LogReader
+    private let liveConfig: LiveConfigReader
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
     private let token: String?
@@ -192,6 +217,8 @@ public struct HatcheryAPI: Sendable {
         deployer: Deployer = Deployer(),
         scaffolder: Scaffolder = Scaffolder(),
         bootstrapper: StackBootstrapper = StackBootstrapper(),
+        logReader: LogReader = LogReader(),
+        liveConfig: LiveConfigReader = LiveConfigReader(),
         readConfig: @escaping @Sendable (URL) throws -> [String: String] = {
             (try? ConfigSync.readDeclared(at: $0)) ?? [:]
         },
@@ -208,6 +235,8 @@ public struct HatcheryAPI: Sendable {
         self.deployer = deployer
         self.scaffolder = scaffolder
         self.bootstrapper = bootstrapper
+        self.logReader = logReader
+        self.liveConfig = liveConfig
         self.readConfig = readConfig
         self.writeConfig = writeConfig
         self.token = token
@@ -246,6 +275,12 @@ public struct HatcheryAPI: Sendable {
             return setConfig(request)
         case ("POST", "/api/apply"):
             return await runApply(request)
+        case ("GET", "/api/logs"):
+            return await logs(request)
+        case ("GET", "/api/config"):
+            return await config(request)
+        case ("GET", "/api/preflight"):
+            return .json(await Preflight().run(host: request.query["host"]))
         default:
             return .failure(404, "no route for \(request.method) \(request.path)")
         }
@@ -271,6 +306,87 @@ public struct HatcheryAPI: Sendable {
             difference |= left[index] ^ right[index]
         }
         return difference == 0
+    }
+
+    // MARK: - Looking at one service
+
+    /// Either the pair a request names, or the response explaining why it could not be found.
+    enum Target {
+        case found(StackSpec, ServiceSpec)
+        case problem(WebResponse)
+    }
+
+    /// Resolves `?stack=&service=`.
+    private func target(_ request: WebRequest) -> Target {
+        guard let stackName = request.query["stack"], let serviceName = request.query["service"] else {
+            return .problem(.failure(400, "expected ?stack=&service="))
+        }
+        let manifest: StackManifest
+        do {
+            manifest = try loadManifest()
+        } catch {
+            return .problem(.failure(500, "\(error)"))
+        }
+        guard let stack = manifest.stack(named: stackName) else {
+            return .problem(.failure(404, "no stack named '\(stackName)'"))
+        }
+        guard let service = stack.service(named: serviceName) else {
+            return .problem(.failure(404, "stack '\(stackName)' declares no service '\(serviceName)'"))
+        }
+        return .found(stack, service)
+    }
+
+    private func logs(_ request: WebRequest) async -> WebResponse {
+        let stack: StackSpec
+        let service: ServiceSpec
+        switch target(request) {
+        case .problem(let response): return response
+        case .found(let s, let v): stack = s; service = v
+        }
+        let lines = request.query["lines"].flatMap { Int($0) } ?? 200
+        do {
+            return .json(
+                Wire.LogsView(service: service.name, lines: try await logReader.logs(
+                    for: service, in: stack, lines: lines)))
+        } catch {
+            return .failure(502, "\(error)")
+        }
+    }
+
+    private func config(_ request: WebRequest) async -> WebResponse {
+        let stack: StackSpec
+        let service: ServiceSpec
+        switch target(request) {
+        case .problem(let response): return response
+        case .found(let s, let v): stack = s; service = v
+        }
+        guard let contract = EnvContract.contract(for: service.kind, backend: stack.backend) else {
+            return .failure(400, "no contract for \(service.kind.rawValue)")
+        }
+
+        // Prefer what the service is actually running with. The declared file answers a
+        // different question, and `config audit` exists because the two drift apart.
+        var source = "live"
+        var values: [String: String]
+        do {
+            values = try await liveConfig.config(for: service, in: stack)
+        } catch {
+            source = "declared"
+            let url = ConfigSync.configURL(for: service, in: stack, manifestPath: manifestPath())
+            values = (try? readConfig(url)) ?? [:]
+        }
+
+        return .json(
+            Wire.ConfigView(
+                service: service.name,
+                kind: service.kind.rawValue,
+                image: service.image,
+                domains: service.domains,
+                // Redacted before it leaves the process, not in the browser.
+                declared: ConfigValidator.redact(values, contract: contract),
+                secretKeys: contract.secret.sorted(),
+                issues: ConfigValidator.validate(values, against: contract),
+                source: source))
     }
 
     // MARK: - From nothing to something
@@ -608,11 +724,14 @@ public struct HatcheryAPI: Sendable {
             case .changes: verdict = "changes pending"
             case .failed: verdict = "plan failed"
             }
+            // The plan comes back structured so the page can render a diff rather than a wall
+            // of text. Anything the parser does not recognise is still carried verbatim.
+            let summary = PlanSummary.parse(result.applied ?? result.outcome.output)
             return .json(
-                Wire.ActionResult(
+                Wire.PlanView(
                     ok: result.outcome.verdict != .failed,
                     message: "\(body.service): \(result.plan.current) -> \(result.plan.target), tofu plan: \(verdict)",
-                    detail: result.applied ?? result.outcome.output),
+                    summary: summary),
                 status: result.outcome.verdict == .failed ? 500 : 200)
         } catch {
             return .failure(500, "\(error)")

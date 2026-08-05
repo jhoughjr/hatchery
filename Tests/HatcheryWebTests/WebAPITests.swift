@@ -361,6 +361,76 @@ struct PageWiringTests {
         #expect(dispatched == handled)
     }
 
+    /// Walks the script tracking string state and reports any line that ends inside one.
+    ///
+    /// A JavaScript string cannot span a newline. So an unterminated string at end-of-line is
+    /// always a bug, and it is *this* bug: an apostrophe inside a single-quoted string closes
+    /// it early, and everything after becomes a parse error that kills the whole script. It has
+    /// happened twice — once from a bad escape, once from the word "service\'s" in help text.
+    /// Neither was visible to a test that only looked for patterns.
+    ///
+    /// Comments are skipped. Regex literals are *not* understood, so a character class holding
+    /// a quote would read as an unterminated string — `escapeHTML` is written with split/join
+    /// rather than a regex for exactly that reason.
+    @Test("no line of the script ends inside an unterminated string")
+    func stringsAreTerminated() {
+        let markup = Page.markup
+        guard let start = markup.range(of: "<script>"), let end = markup.range(of: "</script>") else {
+            Issue.record("the page has no script block")
+            return
+        }
+        let script = markup[start.upperBound..<end.lowerBound]
+
+        var quote: Character? = nil
+        var escaped = false
+        var inLineComment = false
+        var inBlockComment = false
+        var previous: Character? = nil
+        var line = 1
+        var openedAt = 0
+
+        for character in script {
+            if character == "\n" {
+                if let quote {
+                    Issue.record(
+                        "line \(line) ends inside a \(quote) string opened on line \(openedAt)")
+                    return
+                }
+                line += 1
+                escaped = false
+                inLineComment = false
+                previous = nil
+                continue
+            }
+
+            // Comments are skipped: an apostrophe in prose is not an unterminated string, and
+            // that false positive is how this check earns a reputation for crying wolf.
+            if inLineComment { continue }
+            if inBlockComment {
+                if previous == "*" && character == "/" { inBlockComment = false; previous = nil }
+                else { previous = character }
+                continue
+            }
+
+            if quote == nil, previous == "/" {
+                if character == "/" { inLineComment = true; previous = nil; continue }
+                if character == "*" { inBlockComment = true; previous = nil; continue }
+            }
+
+            if escaped { escaped = false; previous = character; continue }
+            if character == "\\" { escaped = true; previous = character; continue }
+
+            if let open = quote {
+                if character == open { quote = nil }
+            } else if character == "\"" || character == "\u{27}" || character == "`" {
+                quote = character
+                openedAt = line
+            }
+            previous = character
+        }
+        #expect(quote == nil)
+    }
+
     @Test("the script is served whole, so a truncated page is visible rather than silent")
     func scriptIsClosed() {
         #expect(Page.markup.contains("<script>"))
