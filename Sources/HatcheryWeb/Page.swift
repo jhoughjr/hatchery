@@ -140,6 +140,25 @@ enum Page {
           .d-header { color: var(--fg); font-weight: 600; }
           dialog.wide { max-width: 52rem; width: 90vw; }
           .tally { margin: 0.25rem 0 0.75rem; font-size: 0.8rem; }
+          .backends { margin-bottom: 1.5rem; }
+          .backends > h2 {
+            font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;
+            color: var(--dim); margin: 0 0 0.5rem; font-weight: 600;
+          }
+          .bk {
+            display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 1rem;
+            background: var(--card); border: 1px solid var(--line);
+            border-radius: 8px; margin-bottom: 0.5rem;
+          }
+          .bk .nm { font-weight: 600; min-width: 12rem; }
+          .bk .rd { font-size: 0.8rem; min-width: 10rem; }
+          .bk .ct { color: var(--dim); font-size: 0.8rem; }
+          .bk .btns { margin-left: auto; white-space: nowrap; }
+          .dot { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%;
+                 margin-right: 0.4rem; vertical-align: baseline; }
+          .dot.ok { background: var(--ready); }
+          .dot.no { background: var(--unreachable); }
+          .dot.pend { background: var(--line); }
           .stack-actions {
             padding: 0.6rem 1rem; border-top: 1px solid var(--line);
             display: flex; gap: 0.5rem;
@@ -162,6 +181,7 @@ enum Page {
             <span class="sib">roost owns machines · hatchery owns stacks</span>
           </div>
           <div class="sub" id="sub">loading…</div>
+          <div class="backends" id="backends"></div>
           <div id="stacks"></div>
           <div id="log"></div>
         </main>
@@ -243,6 +263,7 @@ enum Page {
           } finally {
             busy = false;
             refresh();
+            loadBackends();
           }
         }
 
@@ -252,12 +273,62 @@ enum Page {
         // listener below. An inline onclick would mean a JS string inside an HTML attribute
         // inside a Swift string literal, and getting a quote wrong there is a *parse* error —
         // which kills the whole script, not just the button. That is exactly what happened.
-        function button(action, label, stack, service, extraClass) {
+        function button(action, label, stack, service, extraClass, backend) {
           return '<button data-action="' + action + '"'
             + (stack ? ' data-stack="' + escapeHTML(stack) + '"' : '')
             + (service ? ' data-service="' + escapeHTML(service) + '"' : '')
+            + (backend ? ' data-backend="' + escapeHTML(backend) + '"' : '')
             + (extraClass ? ' class="' + extraClass + '"' : '')
             + (busy ? ' disabled' : '') + '>' + escapeHTML(label) + '</button>';
+        }
+
+        // ---- providers, as the top level ------------------------------------
+        // Which backends exist and whether this machine can use them is the first question, and
+        // it is asked before anything defaults to one. Readiness is fetched per provider after
+        // the rows are drawn, because each check shells out and one slow box should not hold up
+        // the rest of the page.
+        let backends = [];
+
+        async function loadBackends() {
+          const res = await get('/api/backends');
+          if (!res.ok) { $('backends').innerHTML = ''; return; }
+          backends = res.data;
+          renderBackends();
+          backends.forEach(b => checkBackend(b.name));
+        }
+
+        function renderBackends() {
+          $('backends').innerHTML = '<h2>Providers</h2>' + backends.map(b => {
+            const r = b.readiness;
+            const dot = r === undefined ? 'pend' : (r.ok ? 'ok' : 'no');
+            const text = r === undefined ? 'checking…'
+              : (r.ok ? 'configured here'
+                      : r.failing + ' of ' + r.total + ' checks failing');
+            const stacks = b.stackCount === 1 ? '1 stack' : b.stackCount + ' stacks';
+            return '<div class="bk">'
+              + '<span class="nm">' + escapeHTML(b.label) + '</span>'
+              + '<span class="rd"><span class="dot ' + dot + '"></span>' + escapeHTML(text) + '</span>'
+              + '<span class="ct">' + stacks + '</span>'
+              + '<span class="btns">'
+              +   button('setup', 'set up', null, null, 'add', b.name)
+              +   ' '
+              +   (b.authorable
+                    ? button('new-stack-on', '+ stack', null, null, 'add', b.name)
+                    : '<span class="ct">' + escapeHTML(b.note || '') + '</span>')
+              + '</span></div>';
+          }).join('');
+        }
+
+        async function checkBackend(name) {
+          const b = backends.find(x => x.name === name);
+          if (!b) return;
+          const res = await get('/api/preflight?backend=' + encodeURIComponent(name)
+            + (b.knownHost ? '&host=' + encodeURIComponent(b.knownHost) : ''));
+          const checks = res.ok ? res.data : [];
+          // Skipped is not failure: it means something it depends on was not asked.
+          const failing = checks.filter(c => c.status === 'failed').length;
+          b.readiness = {ok: failing === 0 && checks.length > 0, failing, total: checks.length};
+          renderBackends();
         }
 
         document.addEventListener('click', event => {
@@ -274,7 +345,8 @@ enum Page {
             case 'logs': showLogs(stack, service); break;
             case 'config': showConfig(stack, service); break;
             case 'edit-config': editConfig(stack, service); break;
-            case 'setup': showSetup(null); break;
+            case 'setup': showSetup(target.dataset.backend || null); break;
+            case 'new-stack-on': newStack(target.dataset.backend); break;
           }
         });
 
@@ -310,10 +382,8 @@ enum Page {
           if (!stacks.length) {
             $('stacks').innerHTML = '<div class="empty">' + MARK
               + '<h2>Nothing declared yet</h2>'
-              + '<p>Create a stack, add a service, and hatchery will write the tofu,'
-              + ' mint what it can, and tell you what it cannot.</p>'
-              + button('new-stack', 'Create a stack', null, null, 'primary')
-              + ' ' + button('setup', 'Set up a backend', null, null, 'add') + '</div>';
+              + '<p>Pick a provider above to create a stack on it. hatchery will write the'
+              + ' tofu, mint what it can, and tell you what it cannot.</p></div>';
             return;
           }
 
@@ -465,7 +535,7 @@ enum Page {
           return {ok: res.ok, data};
         }
 
-        async function newStack() {
+        async function newStack(chosenBackend) {
           if (!(await ensureMeta())) return;
           // Only backends hatchery can actually author are offered. Listing one it would refuse
           // turns a menu into a dead end you discover after filling the form in.
@@ -476,14 +546,24 @@ enum Page {
           const blocked = meta.backends.filter(b => !b.authorable);
           if (!authorable.length) { log('no backend can be created by this build', true); return; }
 
-          const ok = await step('New stack', 'Step 1 of 3 — where it lives',
-              field('w-name', 'Name', '',
-                    'Identifies the stack in hatchery. Lowercase, dashes allowed.')
-            + select('w-backend', 'Backend', authorable,
+          // When a provider was chosen from the list above, it is shown rather than re-asked.
+          // Nothing defaults to one backend: without a choice, every option is offered.
+          const backendField = chosenBackend
+            ? '<div class="field"><label>Backend</label><div>'
+              + escapeHTML((meta.backends.find(b => b.name === chosenBackend) || {}).label
+                           || chosenBackend)
+              + '</div><input type="hidden" id="w-backend" value="'
+              + escapeHTML(chosenBackend) + '"></div>'
+            : select('w-backend', 'Backend', authorable,
                      'What runs the services. '
                      + (blocked.length
                         ? blocked.map(b => b.note).join('; ') + '.'
-                        : 'Every backend this build supports is listed.'))
+                        : 'Every backend this build supports is listed.'));
+
+          const ok = await step('New stack', 'Step 1 of 3 — where it lives',
+              field('w-name', 'Name', '',
+                    'Identifies the stack in hatchery. Lowercase, dashes allowed.')
+            + backendField
             + field('w-dir', 'Tofu directory', '~/infra-state/',
                     'Where the generated tofu configuration and the config file for each service are '
                     + 'written. Must be empty or not exist. Keep it somewhere durable and backed '
@@ -788,6 +868,7 @@ enum Page {
           return document.querySelector('dialog[open]') !== null;
         }
 
+        loadBackends();
         refresh();
         setInterval(() => { if (!busy && !anyDialogOpen()) refresh(); }, 10000);
         </script>
