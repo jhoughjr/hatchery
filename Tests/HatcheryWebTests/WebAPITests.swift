@@ -502,3 +502,50 @@ struct KindsRouteTests {
         #expect(staging.lowerBound < prod.lowerBound)
     }
 }
+
+@Suite("Providers as the top level")
+struct BackendsRouteTests {
+    @Test("every backend is listed, whether or not it can be authored")
+    func listsEveryBackend() async {
+        let response = await api().handle(WebRequest(method: "GET", path: "/api/backends"))
+        #expect(response.status == 200)
+        for backend in Backend.allCases {
+            #expect(response.text.contains("\"name\":\"\(backend.rawValue)\""))
+            #expect(response.text.contains(Providers.support(for: backend).displayName))
+        }
+    }
+
+    @Test("each carries the settings it declares, so the page needs no table of its own")
+    func carriesSettings() async {
+        let response = await api().handle(WebRequest(method: "GET", path: "/api/backends"))
+        // dokku's host and Cloud Run's project both come from the provider, not the page.
+        #expect(response.text.contains("\"key\":\"host\""))
+        #expect(response.text.contains("\"key\":\"project\""))
+    }
+
+    @Test("stack counts are reported per provider")
+    func countsStacks() async {
+        let response = await api().handle(WebRequest(method: "GET", path: "/api/backends"))
+        // The fixture manifest has one dokku stack and nothing else.
+        #expect(response.text.contains("\"stackCount\":1"))
+        #expect(response.text.contains("\"stackCount\":0"))
+    }
+
+    @Test("a known host is offered so readiness is checked against something real")
+    func offersKnownHost() async {
+        let response = await api().handle(WebRequest(method: "GET", path: "/api/backends"))
+        // Without this, dokku would report "no host given" on a machine that plainly has one.
+        #expect(response.text.contains("\"knownHost\":\"dokku@192.168.0.103\""))
+    }
+
+    @Test("the route works with no manifest at all, which is the first-run case")
+    func worksWithoutAManifest() async {
+        let empty = HatcheryAPI(loadManifest: { throw CocoaError(.fileNoSuchFile) })
+        let response = await empty.handle(WebRequest(method: "GET", path: "/api/backends"))
+
+        #expect(response.status == 200)
+        #expect(response.text.contains("\"stackCount\":0"))
+        // Nothing is assumed about a backend before one has been chosen.
+        #expect(response.text.contains("\"knownHost\":null") || !response.text.contains("knownHost\":\""))
+    }
+}

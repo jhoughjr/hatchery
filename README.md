@@ -64,6 +64,22 @@ The dokku provider rejects a zero-length config value outright (`string length m
 
 ## The dashboard
 
+Providers are the top level. The page opens on which backends exist, whether *this machine* is
+configured for each, and how many stacks use them — before anything is defaulted to one:
+
+```
+PROVIDERS
+  Dokku (self-hosted)        ● configured here          1 stack    [set up] [+ stack]
+  DigitalOcean App Platform  ● 1 of 3 checks failing    0 stacks   [set up] [+ stack]
+  AWS App Runner             ● 1 of 4 checks failing    0 stacks   [set up] [+ stack]
+  Google Cloud Run           ● 2 of 3 checks failing    0 stacks   [set up] [+ stack]
+```
+
+Readiness is fetched per provider after the rows are drawn, so one slow box does not hold up the
+rest of the page, and dokku is checked against a host taken from an existing stack rather than
+reported as "no host given" on a machine that plainly has one. Starting a stack from a provider
+row carries that choice into the wizard instead of asking again.
+
 The mark is a cracked egg on the same perch [roost](https://github.com/jhoughjr/roost) draws its
 rooster on — same 64×64 field, same flat geometry, same `#C4602A`. roost owns machines; hatchery
 owns the stacks that hatch on them, and the two marks are meant to read as siblings.

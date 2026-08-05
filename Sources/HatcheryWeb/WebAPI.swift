@@ -180,6 +180,20 @@ enum Wire {
         let summary: PlanSummary
     }
 
+    /// A provider as the dashboard lists it, before any readiness check has run.
+    struct BackendView: Encodable {
+        let name: String
+        let label: String
+        let authorable: Bool
+        let settings: [BackendSetting]
+        /// How many declared stacks use it.
+        let stackCount: Int
+        /// A host from an existing stack, so readiness can be checked against something real
+        /// rather than reported as "no host given" for a backend that plainly has one.
+        let knownHost: String?
+        let note: String?
+    }
+
     struct Kinds: Encodable {
         /// Backends, each saying whether hatchery can author into it today.
         struct BackendOption: Encodable {
@@ -269,6 +283,8 @@ public struct HatcheryAPI: Sendable {
             return await runLifecycle(request)
         case ("POST", "/api/deploy"):
             return await runDeploy(request)
+        case ("GET", "/api/backends"):
+            return backends()
         case ("GET", "/api/kinds"):
             return .json(
                 Wire.Kinds(
@@ -592,6 +608,24 @@ public struct HatcheryAPI: Sendable {
             return .json(
                 Wire.ActionResult(ok: false, message: "apply failed", detail: "\(error)"), status: 500)
         }
+    }
+
+    private func backends() -> WebResponse {
+        let manifest = (try? loadManifest()) ?? StackManifest()
+        let views = Backend.allCases.map { backend -> Wire.BackendView in
+            let support = Providers.support(for: backend)
+            let using = manifest.stacks.filter { $0.backend == backend }
+            return Wire.BackendView(
+                name: backend.rawValue,
+                label: support.displayName,
+                authorable: support.authorable,
+                settings: support.settings,
+                stackCount: using.count,
+                knownHost: using.compactMap(\.host).first { !$0.isEmpty },
+                note: support.authorable
+                    ? nil : "\(support.displayName) stacks cannot be created by hatchery yet")
+        }
+        return .json(views)
     }
 
     private func stacks() -> WebResponse {
