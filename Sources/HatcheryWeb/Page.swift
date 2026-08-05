@@ -12,18 +12,21 @@ enum Page {
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>hatchery</title>
+        <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%2064%2064%27%20fill%3D%27%23C4602A%27%3E%20%20%3Cpath%20d%3D%27M46%2022%20L42%2026%20L38%2022%20L34%2026%20L30%2022%20L26%2026%20L22%2022%20L20%2024%20C20%2014%2025%204%2033%204%20C41%204%2047%2014%2047%2024%20Z%27/%3E%20%20%3Ccircle%20cx%3D%2733%27%20cy%3D%2731%27%20r%3D%274.4%27/%3E%20%20%3Cpath%20d%3D%27M37%2030%20L43%2032%20L37%2034%20Z%27/%3E%20%20%3Cpath%20d%3D%27M18%2034%20L22%2030%20L26%2034%20L30%2030%20L34%2034%20L38%2030%20L42%2034%20L46%2030%20C46%2042%2040%2050%2032%2050%20C24%2050%2018%2042%2018%2034%20Z%27/%3E%20%20%3Crect%20x%3D%2724.6%27%20y%3D%2749%27%20width%3D%272.6%27%20height%3D%276%27%20rx%3D%271.3%27/%3E%20%20%3Crect%20x%3D%2736.8%27%20y%3D%2749%27%20width%3D%272.6%27%20height%3D%276%27%20rx%3D%271.3%27/%3E%20%20%3Crect%20x%3D%277%27%20y%3D%2754.5%27%20width%3D%2750%27%20height%3D%273%27%20rx%3D%271.5%27/%3E%3C/svg%3E">
         <style>
           :root {
             color-scheme: light dark;
             --bg: #fbfbfa; --fg: #1a1a18; --dim: #6b6b66; --line: #e3e3df;
             --card: #ffffff; --ready: #2f7a48; --responding: #7a6a2f;
-            --degraded: #9a5a1f; --unreachable: #9a2f2f; --accent: #3a5a9a;
+            --degraded: #9a5a1f; --unreachable: #9a2f2f; --accent: #C4602A;
+            --brand: #C4602A;
           }
           @media (prefers-color-scheme: dark) {
             :root {
               --bg: #16161a; --fg: #e8e8e4; --dim: #9a9a94; --line: #2c2c32;
               --card: #1e1e23; --ready: #6ec48a; --responding: #cbb46a;
-              --degraded: #d99a5a; --unreachable: #e07a7a; --accent: #8aa8e0;
+              --degraded: #d99a5a; --unreachable: #e07a7a; --accent: #E08A4F;
+              --brand: #E08A4F;
             }
           }
           * { box-sizing: border-box; }
@@ -32,7 +35,11 @@ enum Page {
             font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
           }
           main { max-width: 60rem; margin: 0 auto; }
-          h1 { font-size: 1.1rem; margin: 0 0 0.25rem; font-weight: 600; }
+          h1 { font-size: 1.1rem; margin: 0; font-weight: 600; letter-spacing: 0.02em; }
+          .brandbar { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.15rem; }
+          .mark { width: 28px; height: 28px; color: var(--brand); flex: none; }
+          .brandbar .sib { margin-left: auto; font-size: 0.7rem; color: var(--dim); }
+          .empty .mark { width: 56px; height: 56px; opacity: 0.55; margin-bottom: 0.75rem; }
           .sub { color: var(--dim); font-size: 0.85rem; margin-bottom: 1.5rem; }
           .stack {
             background: var(--card); border: 1px solid var(--line);
@@ -141,7 +148,19 @@ enum Page {
         </head>
         <body>
         <main>
-          <h1>hatchery</h1>
+          <div class="brandbar">
+            <svg class="mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="currentColor" aria-hidden="true">
+            <path d="M46 22 L42 26 L38 22 L34 26 L30 22 L26 26 L22 22 L20 24 C20 14 25 4 33 4 C41 4 47 14 47 24 Z"/>
+            <circle cx="33" cy="31" r="4.4"/>
+            <path d="M37 30 L43 32 L37 34 Z"/>
+            <path d="M18 34 L22 30 L26 34 L30 30 L34 34 L38 30 L42 34 L46 30 C46 42 40 50 32 50 C24 50 18 42 18 34 Z"/>
+            <rect x="24.6" y="49" width="2.6" height="6" rx="1.3"/>
+            <rect x="36.8" y="49" width="2.6" height="6" rx="1.3"/>
+            <rect x="7" y="54.5" width="50" height="3" rx="1.5"/>
+            </svg>
+            <h1>hatchery</h1>
+            <span class="sib">roost owns machines · hatchery owns stacks</span>
+          </div>
           <div class="sub" id="sub">loading…</div>
           <div id="stacks"></div>
           <div id="log"></div>
@@ -174,6 +193,7 @@ enum Page {
         const headers = token ? {'X-Hatchery-Token': token, 'Content-Type': 'application/json'}
                               : {'Content-Type': 'application/json'};
         const $ = (id) => document.getElementById(id);
+        const MARK = document.querySelector('.brandbar .mark').outerHTML;
         let busy = false;
 
         function log(message, isError) {
@@ -254,19 +274,49 @@ enum Page {
             case 'logs': showLogs(stack, service); break;
             case 'config': showConfig(stack, service); break;
             case 'edit-config': editConfig(stack, service); break;
+            case 'setup': showSetup(); break;
           }
         });
 
+        // A refresh rebuilds the stack markup, which would throw away any panel you had open —
+        // and a log panel that vanishes every ten seconds is worse than no log panel. So the
+        // open ones are captured first and put back afterwards, scroll position included.
+        function capturePanels() {
+          const open = {};
+          document.querySelectorAll('.detail').forEach(box => {
+            if (box.hidden) return;
+            const pre = box.querySelector('pre.out');
+            open[box.id] = {html: box.innerHTML, kind: box.dataset.kind || '',
+                            scroll: pre ? pre.scrollTop : 0};
+          });
+          return open;
+        }
+
+        function restorePanels(open) {
+          Object.keys(open).forEach(id => {
+            const box = $(id);
+            if (!box) return;   // the service is gone from the manifest; nothing to restore into
+            box.innerHTML = open[id].html;
+            box.dataset.kind = open[id].kind;
+            box.hidden = false;
+            const pre = box.querySelector('pre.out');
+            if (pre) pre.scrollTop = open[id].scroll;
+          });
+        }
+
         function render(stacks) {
+          const open = capturePanels();
           lastStacks = stacks;
           if (!stacks.length) {
-            $('stacks').innerHTML = '<div class="empty">'
+            $('stacks').innerHTML = '<div class="empty">' + MARK
               + '<h2>Nothing declared yet</h2>'
               + '<p>Create a stack, add a service, and hatchery will write the tofu,'
               + ' mint what it can, and tell you what it cannot.</p>'
-              + button('new-stack', 'Create a stack', null, null, 'primary') + '</div>';
+              + button('new-stack', 'Create a stack', null, null, 'primary')
+              + ' ' + button('setup', 'No box yet?', null, null, 'add') + '</div>';
             return;
           }
+
           $('stacks').innerHTML = stacks.map(stack => {
             const rows = stack.services.map(svc => {
               const state = svc.state || 'unknown';
@@ -307,6 +357,7 @@ enum Page {
               +   button('new-stack', '+ stack', null, null, 'add last')
               + '</div></section>';
           }).join('');
+          restorePanels(open);
         }
 
         function restart(stack, service) {
@@ -456,7 +507,8 @@ enum Page {
           }).join('');
           if (failed) {
             $('pf').innerHTML += '<div class="hint" style="margin-top:0.6rem">'
-              + 'Fix these and try again — creating the stack now would fail partway through.</div>';
+              + 'Fix these and try again — creating the stack now would fail partway through. '
+              + 'If the box has no dokku on it yet, close this and use "No box yet?".</div>';
             $('wiz-ok').textContent = 'create anyway';
           }
           const proceed = await done;
@@ -538,6 +590,22 @@ enum Page {
           refresh();
         }
 
+        // The half `doctor` cannot do for you: getting dokku onto a box in the first place.
+        // Shown rather than run — these steps touch a package manager and an SSH config.
+        async function showSetup() {
+          const res = await get('/api/setup');
+          if (!res.ok) { log('could not load the setup guide', true); return; }
+          const body = res.data.map((step, i) =>
+            '<div class="field"><label>' + (i + 1) + '. ' + escapeHTML(step.title)
+            + '  · on the ' + escapeHTML(step.on) + '</label>'
+            + '<div class="hint">' + escapeHTML(step.why) + '</div>'
+            + '<pre class="out">' + step.commands.map(escapeHTML).join('\\n') + '</pre>'
+            + (step.verify ? '<div class="hint">check: ' + escapeHTML(step.verify) + '</div>' : '')
+            + '</div>').join('');
+          await step('Getting a box ready', 'hatchery manages stacks; this puts dokku under them',
+                     body, 'done');
+        }
+
         // ---- detail, logs, config, diffs ------------------------------------
         // The detail panel lives under its service row and toggles, so opening one does not
         // navigate away from everything else that is currently degraded.
@@ -570,10 +638,14 @@ enum Page {
           const res = await get('/api/logs' + query(stack, service, '&lines=200'));
           if (!res.ok) { box.innerHTML = '<span class="err">' + escapeHTML(res.data.error) + '</span>'; return; }
           const lines = res.data.lines || [];
+          // Stamped because the panel survives a refresh but its contents do not update with
+          // it — without this you cannot tell a quiet service from a stale panel.
+          const stamp = '<div class="hint">' + lines.length + ' line(s), read '
+            + new Date().toLocaleTimeString() + ' — click logs again to re-read</div>';
           box.innerHTML = lines.length
-            ? '<pre class="out">' + lines.map(l =>
+            ? stamp + '<pre class="out">' + lines.map(l =>
                 '<div class="l-' + l.level + '">' + escapeHTML(l.text) + '</div>').join('') + '</pre>'
-            : '<span class="hint">no output</span>';
+            : stamp + '<span class="hint">no output</span>';
         }
 
         async function showConfig(stack, service) {
@@ -652,8 +724,13 @@ enum Page {
           return tally + '<pre class="out">' + lines + '</pre>';
         }
 
+        // A poll that fires while a dialog is open steals focus and re-renders under you.
+        function anyDialogOpen() {
+          return document.querySelector('dialog[open]') !== null;
+        }
+
         refresh();
-        setInterval(() => { if (!busy) refresh(); }, 10000);
+        setInterval(() => { if (!busy && !anyDialogOpen()) refresh(); }, 10000);
         </script>
         </body>
         </html>

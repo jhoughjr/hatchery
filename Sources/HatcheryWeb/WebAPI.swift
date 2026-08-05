@@ -279,6 +279,8 @@ public struct HatcheryAPI: Sendable {
             return await logs(request)
         case ("GET", "/api/config"):
             return await config(request)
+        case ("GET", "/api/setup"):
+            return .json(Onboarding.dokkuSteps)
         case ("GET", "/api/preflight"):
             return .json(await Preflight().run(host: request.query["host"]))
         default:

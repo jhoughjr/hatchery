@@ -9,8 +9,8 @@ struct Hatchery: AsyncParsableCommand {
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
-            Config.self, Deploy.self, Doctor.self, Serve.self, Service.self, Stack.self,
-            Status.self,
+            Config.self, Deploy.self, Doctor.self, Serve.self, Service.self, Setup.self,
+            Stack.self, Status.self,
             Up.self, Down.self, Restart.self,
         ]
     )
@@ -220,6 +220,39 @@ struct Doctor: AsyncParsableCommand {
             }
         }
         if !checks.allPassed { throw ExitCode.failure }
+    }
+}
+
+struct Setup: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "How to get a box to the point hatchery can manage it.",
+        discussion: """
+            `hatchery doctor` tells you dokku is not answering. It cannot tell you how to put \
+            dokku there. This is that half.
+
+            A checklist rather than a script on purpose: these steps touch a machine package \
+            manager, its firewall and its SSH configuration, and running that blind is not \
+            something hatchery should do on your behalf.
+            """
+    )
+
+    func run() throws {
+        for (index, step) in Onboarding.dokkuSteps.enumerated() {
+            print("\(index + 1). \(step.title)   [on the \(step.on)]")
+            print("")
+            for line in step.why.split(separator: "\n") {
+                print("   \(line)")
+            }
+            print("")
+            for command in step.commands {
+                print("     \(command)")
+            }
+            if let verify = step.verify {
+                print("")
+                print("   check: \(verify)")
+            }
+            print("")
+        }
     }
 }
 
