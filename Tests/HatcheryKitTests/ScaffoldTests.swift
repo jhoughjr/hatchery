@@ -269,10 +269,14 @@ struct DokkuProviderTests {
         #expect(DokkuProvider.identifier("2fast") == "app_2fast")
     }
 
-    @Test("App Platform is refused outright rather than half-authored")
-    func appPlatformUnsupported() {
-        #expect(throws: ProviderError.noProvider(.appPlatform)) {
-            _ = try Providers.provider(for: .appPlatform)
+    @Test("the provider registry answers for every backend, and each names itself")
+    func registryCoversEveryBackend() {
+        // This previously asserted App Platform had no provider, which encoded a claim that
+        // turned out to be wrong: `digitalocean_app` takes everything hatchery needs.
+        for backend in Backend.allCases {
+            let support = Providers.support(for: backend)
+            #expect(support.backend == backend)
+            #expect(!support.displayName.isEmpty)
         }
     }
 }

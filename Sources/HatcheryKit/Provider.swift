@@ -116,6 +116,7 @@ public enum Providers {
         switch backend {
         case .dokku: return DokkuProvider()
         case .aws: return AWSProvider()
+        case .cloudRun: return CloudRunProvider()
         case .appPlatform: return AppPlatformProvider()
         }
     }

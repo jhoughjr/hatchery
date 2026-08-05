@@ -146,6 +146,11 @@ public struct LiveConfigReader: Sendable {
             }
             return config
 
+        case .cloudRun:
+            // `gcloud run services describe` returns the environment, but anything sourced from
+            // Secret Manager is a reference rather than a value, same as App Runner.
+            throw LiveConfigError.unsupportedBackend(.cloudRun)
+
         case .aws:
             // `aws apprunner describe-service` returns the plain environment, but anything
             // pulled from Secrets Manager comes back as a reference rather than a value. Half a
@@ -153,7 +158,9 @@ public struct LiveConfigReader: Sendable {
             throw LiveConfigError.unsupportedBackend(.aws)
 
         case .appPlatform:
-            // `doctl apps spec get` returns the whole spec, and the env block carries
+            // Authoring one works — `digitalocean_app` takes an image, an environment, a port
+            // and a health check. Reading one back does not: `doctl apps spec get` returns the
+            // whole spec, and the env block carries
             // `EV[...]` ciphertext for every key typed SECRET. Reading it needs a decision
             // about what a value we cannot see means, so it is deliberately not guessed here.
             throw LiveConfigError.unsupportedBackend(.appPlatform)

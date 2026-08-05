@@ -454,11 +454,14 @@ struct KindsRouteTests {
     func reportsAuthorable() async {
         let response = await api().handle(WebRequest(method: "GET", path: "/api/kinds"))
 
-        // dokku can be created; App Platform cannot yet, and says so rather than being offered
-        // as a menu entry that fails after the form is filled in.
+        // Every backend now reports a flag and a label. Nothing is currently unauthorable, so
+        // this checks the shape rather than asserting a particular one is unavailable — the
+        // previous version of this test encoded a claim about App Platform that was wrong.
         #expect(response.text.contains("\"authorable\":true"))
-        #expect(response.text.contains("\"authorable\":false"))
-        #expect(response.text.contains("cannot be created by hatchery yet"))
+        for backend in Backend.allCases {
+            #expect(response.text.contains("\"name\":\"\(backend.rawValue)\""))
+            #expect(response.text.contains(Providers.support(for: backend).displayName))
+        }
     }
 
     @Test("authorability is asked of the provider registry, not restated here")

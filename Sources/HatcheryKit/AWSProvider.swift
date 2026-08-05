@@ -190,34 +190,3 @@ public struct AWSProvider: ServiceProvider {
         return folded.first?.isNumber == true ? "svc_" + folded : folded
     }
 }
-
-/// DigitalOcean App Platform: understood, but not authorable.
-///
-/// Its environment contract is real and `config validate` uses it. What is missing is a way to
-/// create one — the spec is YAML applied through `doctl` rather than tofu, and every secret in
-/// it comes back as `EV[...]` ciphertext, so reading one back is a different problem too.
-public struct AppPlatformProvider: ServiceProvider {
-    public init() {}
-
-    public var backend: Backend { .appPlatform }
-    public var displayName: String { "DigitalOcean App Platform" }
-    public var authorable: Bool { false }
-
-    public var setupSteps: [SetupStep] { Onboarding.appPlatformSteps }
-
-    public func readiness(
-        host: String?, execute: @escaping CommandExecutor
-    ) async -> [PreflightCheck] {
-        await Preflight(execute: execute).appPlatform()
-    }
-
-    public func declaration(for request: ScaffoldRequest) throws -> [GeneratedFile] {
-        throw ProviderError.noProvider(.appPlatform)
-    }
-
-    public func imageVariable(for request: ScaffoldRequest) -> String? { nil }
-    public func imageVariableName(for request: ScaffoldRequest) -> String? { nil }
-    public func bootstrapFiles(host: String, sshKeyPath: String, region: String?) -> [GeneratedFile] {
-        []
-    }
-}

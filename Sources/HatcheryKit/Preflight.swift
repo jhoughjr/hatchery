@@ -78,22 +78,79 @@ public struct Preflight: Sendable {
         return checks
     }
 
-    /// App Platform is understood but not authorable, so its readiness is about reading it.
-    public func appPlatform() async -> [PreflightCheck] {
-        [
+    /// App Platform needs a token; `doctl` is convenient but the provider reads the environment.
+    public func digitalOcean() async -> [PreflightCheck] {
+        var checks = [await tofu()]
+
+        let token = ProcessInfo.processInfo.environment["DIGITALOCEAN_TOKEN"]
+            ?? ProcessInfo.processInfo.environment["DIGITALOCEAN_ACCESS_TOKEN"]
+        if let token, !token.isEmpty {
+            // Never the value, and never a prefix of it — only that one is present.
+            checks.append(
+                PreflightCheck(
+                    name: "digitalocean token", status: .ok,
+                    detail: "DIGITALOCEAN_TOKEN is set (\(token.count) chars)"))
+        } else {
+            checks.append(
+                PreflightCheck(
+                    name: "digitalocean token", status: .failed,
+                    detail: "DIGITALOCEAN_TOKEN is not set",
+                    remedy: "export DIGITALOCEAN_TOKEN=<a personal access token with write scope>"))
+        }
+
+        checks.append(
             await binary(
-                "doctl", arguments: ["version"], label: "doctl", remedy: "brew install doctl"),
-            PreflightCheck(
-                name: "hatchery can create one", status: .failed,
-                detail: "not implemented for App Platform",
-                remedy: Self.appPlatformReason),
-        ]
+                "doctl", arguments: ["version"], label: "doctl (optional)",
+                remedy: "brew install doctl — only needed to inspect apps outside hatchery"))
+        return checks
     }
 
-    static let appPlatformReason = """
-        Its spec is YAML applied through doctl rather than tofu, and its secrets read back as \
-        EV[...] ciphertext. Use dokku or aws for a stack hatchery creates.
-        """
+    /// Cloud Run needs gcloud credentials and a project.
+    public func google() async -> [PreflightCheck] {
+        var checks = [await tofu()]
+
+        let cli = await binary(
+            "gcloud", arguments: ["version"], label: "gcloud",
+            remedy: "brew install --cask google-cloud-sdk")
+        checks.append(cli)
+        guard cli.status == .ok else {
+            for name in ["google credentials", "google project"] {
+                checks.append(
+                    PreflightCheck(
+                        name: name, status: .skipped, detail: "gcloud is not installed"))
+            }
+            return checks
+        }
+
+        checks.append(
+            await value(
+                ["gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"],
+                name: "google credentials", missing: "no active account",
+                remedy: "run `gcloud auth application-default login`"))
+        checks.append(
+            await value(
+                ["gcloud", "config", "get-value", "project"],
+                name: "google project", missing: "no project configured",
+                remedy: "run `gcloud config set project <id>`"))
+        return checks
+    }
+
+    /// Runs a command whose stdout *is* the answer, and fails when there is not one.
+    private func value(
+        _ argv: [String], name: String, missing: String, remedy: String
+    ) async -> PreflightCheck {
+        do {
+            let result = try await execute(argv, nil)
+            let answer = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            // gcloud prints "(unset)" rather than nothing when a value is missing.
+            guard result.status == 0, !answer.isEmpty, answer != "(unset)" else {
+                return PreflightCheck(name: name, status: .failed, detail: missing, remedy: remedy)
+            }
+            return PreflightCheck(name: name, status: .ok, detail: Self.firstLine(answer))
+        } catch {
+            return PreflightCheck(name: name, status: .failed, detail: "\(error)", remedy: remedy)
+        }
+    }
 
     private func credentials() async -> PreflightCheck {
         do {
