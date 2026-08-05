@@ -106,12 +106,51 @@ public enum ConfigSync {
         merged(live: live, declared: declared) != declared
     }
 
-    /// Where a service's declared config lives, resolved against the manifest's own directory.
+    /// Where a service's declared config lives.
     ///
-    /// The manifest names the sidecar by a relative path, so the pair travels together.
-    public static func configURL(for service: ServiceSpec, manifestPath: String) -> URL {
+    /// Resolved against the stack's own tofu directory when it has one, because that is where
+    /// the declaration reading the file lives: `jsondecode(file("${path.module}/x.config.json"))`
+    /// is relative to the module, not to wherever the manifest happens to sit. Falling back to
+    /// the manifest's directory keeps a single-stack layout — where the two are the same place —
+    /// working exactly as before.
+    public static func configURL(
+        for service: ServiceSpec,
+        in stack: StackSpec? = nil,
+        manifestPath: String
+    ) -> URL {
+        if let directory = stack?.tofu?.directory {
+            return URL(
+                fileURLWithPath: service.configFile,
+                relativeTo: URL(fileURLWithPath: Paths.expanded(directory), isDirectory: true)
+            ).standardizedFileURL
+        }
         let manifestURL = URL(fileURLWithPath: manifestPath)
         let directory = manifestURL.deletingLastPathComponent()
         return URL(fileURLWithPath: service.configFile, relativeTo: directory).standardizedFileURL
+    }
+
+    /// Merges values into a service's declared config, leaving every other key alone.
+    ///
+    /// This is how a key reported as needing a value gets one. It is a merge rather than a
+    /// replace because the file already holds everything hatchery minted, and rewriting it
+    /// wholesale from a form would drop whatever the form did not know about.
+    public static func applying(_ values: [String: String], to declared: [String: String]) -> [String: String] {
+        var result = declared
+        for (key, value) in values {
+            // An empty value clears the key rather than writing "", so a mistake can be undone
+            // and a key never sits there looking answered when it is not.
+            if value.isEmpty {
+                result.removeValue(forKey: key)
+            } else {
+                result[key] = value
+            }
+        }
+        return result
+    }
+
+    public static func encoded(_ config: [String: String]) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(config)
     }
 }

@@ -37,6 +37,31 @@ with no `--manifest` looks in three places, in order:
 An explicitly passed `--manifest` is used exactly as given and never falls back, because
 second-guessing it would hide a typo. Finding nothing lists everywhere it looked.
 
+## From nothing to something
+
+There was no path from an empty directory to a running service without writing HCL yourself —
+`service new` could only add to a configuration that already existed, and the lab's own was
+written by hand. `stack new` closes that:
+
+```sh
+hatchery stack new newlab --host dokku@192.168.0.103 --tofu-dir ~/infra-state/newlab
+hatchery service new newlab paylab2 --kind payment-gateway \
+  --domain paylab2.opi --image payment-gateway:arm64-6be9967
+hatchery config set newlab paylab2 DATABASE_HOST=... DATABASE_USER=... DATABASE_PASSWORD=...
+```
+
+It writes `versions.tf`, `providers.tf` and `variables.tf`, runs `tofu init`, and records the
+stack in a manifest beside them. An existing configuration is never written over.
+
+The same three steps are a wizard in the browser, which is the point: the dashboard now starts
+from an empty state offering to create a stack, and walks through service and secrets without
+you touching a file. `hatchery serve` no longer needs a manifest to start — requiring one would
+mean needing a manifest to reach the tool that writes your first manifest.
+
+A key hatchery cannot supply is **left out of the config entirely** rather than written as `""`.
+The dokku provider rejects a zero-length config value outright (`string length must be at least
+1`), so an empty placeholder makes a brand-new stack fail to plan at the worst possible moment.
+
 ## The dashboard
 
 `hatchery serve` puts the same operations behind a browser:

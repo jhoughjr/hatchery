@@ -368,6 +368,23 @@ struct ScaffolderTests {
         #expect(!files.exists("/infra/mwserver-tf/paylab2.config.json"))
     }
 
+    @Test("a key with no value is omitted from the config, never written as an empty string")
+    func omitsEmptyValues() async throws {
+        let result = try await scaffolder(Files()).plan(
+            service: gateway("paylab2"), into: "mwlab", manifest: manifest)
+        let config = try #require(result.files.first { $0.role == .config })
+        let parsed = try JSONSerialization.jsonObject(with: Data(config.contents.utf8))
+            as? [String: String]
+
+        // The dokku provider rejects a zero-length config value, so an empty placeholder makes
+        // a freshly created service fail to plan.
+        #expect(parsed?["DATABASE_PASSWORD"] == nil)
+        #expect(parsed?.values.contains("") == false)
+        // What hatchery could supply is still there.
+        #expect(parsed?["KEYPAIR_JWKS"] != nil)
+        #expect(parsed?["APP_URL"] == "http://paylab2.opi")
+    }
+
     @Test("the keys needing values are reported rather than left as convincing blanks")
     func reportsUnresolved() async throws {
         let result = try await scaffolder(Files()).plan(

@@ -111,8 +111,12 @@ public struct Scaffolder: Sendable {
         let secrets = try await planner.resolve(
             for: resolved, in: stack, siblings: siblings, mintKeypair: mintKeypair)
 
+        // A key with no value is left out rather than written as "". The dokku provider rejects
+        // a zero-length config value outright — `string length must be at least 1` — so an empty
+        // placeholder makes the stack fail to plan the moment it is created, which is the worst
+        // possible time to discover it.
         var config: [String: String] = [:]
-        for secret in secrets {
+        for secret in secrets where !secret.value.isEmpty {
             config[secret.key] = secret.value
         }
         let encoder = JSONEncoder()
