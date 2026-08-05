@@ -300,10 +300,40 @@ config lives, never what it contains.
 
 ### Backends
 
-| Backend | Target |
-| --- | --- |
-| `dokku` | Self-hosted — the opi box and the Raspberry Pi fleet, over SSH |
-| `appPlatform` | DigitalOcean App Platform — the production tenant plane |
+| Backend | Target | hatchery can create one |
+| --- | --- | --- |
+| `dokku` | Self-hosted — the opi box and the Raspberry Pi fleet, over SSH | yes |
+| `aws` | AWS App Runner — a container, a URL and a health check | yes, untested against a live account |
+| `appPlatform` | DigitalOcean App Platform — the production tenant plane | no |
+
+Each backend answers for itself. A provider supplies its own readiness check and its own setup
+guide, so `hatchery doctor --backend aws` asks about credentials and a region while
+`--backend dokku` asks about a reachable box and an authorized key — and neither has to know the
+other exists:
+
+```
+$ hatchery doctor --backend aws
+  AWS App Runner
+  ok   tofu installed: OpenTofu v1.12.5
+  FAIL aws cli: not found on PATH
+       -> brew install awscli
+  --   aws credentials: the aws cli is not installed
+  --   aws region: the aws cli is not installed
+```
+
+`hatchery setup --backend <name>` prints what that backend needs from nothing. The dashboard
+shows the same guide behind **Set up a backend**, with a picker for each one.
+
+App Runner rather than ECS or Fargate for the first AWS target, because hatchery's model of a
+service is *an image, some environment, a domain and a health path* — which is what App Runner
+takes. Fargate would need a VPC, subnets, a load balancer and target groups generated alongside
+every service, none of which hatchery has an opinion about. ECS can arrive as its own backend
+rather than as a flag on this one.
+
+**The AWS backend has not been applied against a live account.** The generated configuration
+passes `tofu validate` against the real `hashicorp/aws` provider schema and `tofu fmt -check`,
+which means the resource shape and attribute names are right — not that a deploy succeeds. Treat
+the first real apply as the test.
 
 The two are not interchangeable. App Platform dropped discrete `DATABASE_*` keys in the
 connection-string cutover; the lab still runs pre-cutover images, so the same keys remain

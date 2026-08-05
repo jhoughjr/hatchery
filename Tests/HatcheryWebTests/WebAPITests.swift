@@ -463,11 +463,25 @@ struct KindsRouteTests {
 
     @Test("authorability is asked of the provider registry, not restated here")
     func matchesProviderRegistry() {
-        // If a provider is added, the menu picks it up by existing. This test fails if the two
-        // ever disagree, which is the only way the menu can start lying.
+        // Deliberately not a hardcoded list: a provider added to the registry shows up in the
+        // menu by existing. This fails only if the two disagree, which is the one way the menu
+        // can start lying about what it can create.
         for backend in Backend.allCases {
-            let hasProvider = (try? Providers.provider(for: backend)) != nil
-            #expect(hasProvider == (backend == .dokku))
+            let authorable = (try? Providers.provider(for: backend)) != nil
+            #expect(authorable == Providers.support(for: backend).authorable)
+        }
+        // At least one can be authored, or the wizard has nothing to offer at all.
+        #expect(Providers.all.contains { $0.authorable })
+    }
+
+    @Test("every backend has a support type, whether or not it can be authored")
+    func everyBackendIsRepresented() {
+        #expect(Providers.all.count == Backend.allCases.count)
+        for provider in Providers.all {
+            #expect(!provider.displayName.isEmpty)
+            // A backend that cannot be authored still has to say how to set it up, or the
+            // dashboard has nothing to show when someone picks it.
+            #expect(!provider.setupSteps.isEmpty)
         }
     }
 

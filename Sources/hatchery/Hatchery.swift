@@ -186,6 +186,9 @@ struct Doctor: AsyncParsableCommand {
             """
     )
 
+    @Option(name: .shortAndLong, help: "Backend to check. One of: \(Backend.allCases.map(\.rawValue).joined(separator: ", ")).")
+    var backend: String = Backend.dokku.rawValue
+
     @Option(name: .long, help: "SSH target to test, e.g. dokku@192.168.0.103.")
     var host: String?
 
@@ -196,7 +199,11 @@ struct Doctor: AsyncParsableCommand {
     var manifest: String = "hatchery.json"
 
     func run() async throws {
+        guard let kind = Backend(rawValue: backend) else {
+            throw ValidationError("unknown backend '\(backend)'")
+        }
         var target = host
+        var resolved = kind
         if target == nil, let name = stack {
             let path = try ManifestLocator.resolve(manifest)
             let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
@@ -204,9 +211,13 @@ struct Doctor: AsyncParsableCommand {
                 throw ValidationError("no stack named '\(name)' in \(path)")
             }
             target = spec.host
+            // The stack knows its own backend; asking for one on the command line as well
+            // would let the two disagree silently.
+            resolved = spec.backend
         }
 
-        let checks = await Preflight().run(host: target)
+        print("  \(Providers.support(for: resolved).displayName)")
+        let checks = await Preflight().run(backend: resolved, host: target)
         for check in checks {
             let mark: String
             switch check.status {
@@ -236,8 +247,17 @@ struct Setup: ParsableCommand {
             """
     )
 
+    @Option(name: .shortAndLong, help: "Backend to explain. One of: \(Backend.allCases.map(\.rawValue).joined(separator: ", ")).")
+    var backend: String = Backend.dokku.rawValue
+
     func run() throws {
-        for (index, step) in Onboarding.dokkuSteps.enumerated() {
+        guard let kind = Backend(rawValue: backend) else {
+            throw ValidationError("unknown backend '\(backend)'")
+        }
+        let support = Providers.support(for: kind)
+        print("Setting up \(support.displayName)")
+        print("")
+        for (index, step) in support.setupSteps.enumerated() {
             print("\(index + 1). \(step.title)   [on the \(step.on)]")
             print("")
             for line in step.why.split(separator: "\n") {

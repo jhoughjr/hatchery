@@ -274,7 +274,7 @@ enum Page {
             case 'logs': showLogs(stack, service); break;
             case 'config': showConfig(stack, service); break;
             case 'edit-config': editConfig(stack, service); break;
-            case 'setup': showSetup(); break;
+            case 'setup': showSetup(null); break;
           }
         });
 
@@ -313,7 +313,7 @@ enum Page {
               + '<p>Create a stack, add a service, and hatchery will write the tofu,'
               + ' mint what it can, and tell you what it cannot.</p>'
               + button('new-stack', 'Create a stack', null, null, 'primary')
-              + ' ' + button('setup', 'No box yet?', null, null, 'add') + '</div>';
+              + ' ' + button('setup', 'Set up a backend', null, null, 'add') + '</div>';
             return;
           }
 
@@ -470,6 +470,8 @@ enum Page {
           // Only backends hatchery can actually author are offered. Listing one it would refuse
           // turns a menu into a dead end you discover after filling the form in.
           const authorable = meta.backends.filter(b => b.authorable).map(b => b.name);
+          const needsHost = {};
+          meta.backends.forEach(b => { needsHost[b.name] = b.needsHost; });
           const blocked = meta.backends.filter(b => !b.authorable);
           if (!authorable.length) { log('no backend can be created by this build', true); return; }
 
@@ -501,7 +503,7 @@ enum Page {
 
           // Check before creating rather than after. These failures otherwise surface halfway
           // through `tofu init`, as a provider error that never mentions the real cause.
-          if (!(await preflight(host))) return;
+          if (!(await preflight(backend, needsHost[backend] ? host : null))) return;
 
           busy = true;
           const res = await send('/api/stacks/new',
@@ -513,16 +515,18 @@ enum Page {
           newService(name);
         }
 
-        async function preflight(host) {
+        async function preflight(backend, host) {
           $('wiz-title').textContent = 'Checking prerequisites';
-          $('wiz-body').innerHTML = '<div class="steps">Step 2 of 3 — can we reach it?</div>'
-            + '<div id="pf">checking ' + escapeHTML(host) + '…</div>';
+          $('wiz-body').innerHTML = '<div class="steps">Step 2 of 3 — is ' + escapeHTML(backend)
+            + ' configured here?</div>'
+            + '<div id="pf">checking ' + escapeHTML(host || backend) + '…</div>';
           $('wiz-ok').textContent = 'continue';
           const dialog = $('wizard');
           const done = new Promise(resolve => { dialog.onclose = () => resolve(dialog.returnValue === 'ok'); });
           dialog.showModal();
 
-          const res = await get('/api/preflight?host=' + encodeURIComponent(host));
+          const res = await get('/api/preflight?backend=' + encodeURIComponent(backend)
+            + (host ? '&host=' + encodeURIComponent(host) : ''));
           const checks = res.ok ? res.data : [];
           const failed = checks.some(c => c.status === 'failed');
           $('pf').innerHTML = checks.map(c => {
@@ -536,7 +540,7 @@ enum Page {
           if (failed) {
             $('pf').innerHTML += '<div class="hint" style="margin-top:0.6rem">'
               + 'Fix these and try again — creating the stack now would fail partway through. '
-              + 'If the box has no dokku on it yet, close this and use "No box yet?".</div>';
+              + 'If it is not set up yet, close this and use "Set up a backend".</div>';
             $('wiz-ok').textContent = 'create anyway';
           }
           const proceed = await done;
@@ -623,8 +627,9 @@ enum Page {
 
         // The half `doctor` cannot do for you: getting dokku onto a box in the first place.
         // Shown rather than run — these steps touch a package manager and an SSH config.
-        async function showSetup() {
-          const res = await get('/api/setup');
+        async function showSetup(backend) {
+          const chosen = backend || (meta && meta.backends.length ? meta.backends[0].name : 'dokku');
+          const res = await get('/api/setup?backend=' + encodeURIComponent(chosen));
           if (!res.ok) { log('could not load the setup guide', true); return; }
           const body = res.data.map((step, i) =>
             '<div class="field"><label>' + (i + 1) + '. ' + escapeHTML(step.title)
@@ -633,8 +638,15 @@ enum Page {
             + '<pre class="out">' + step.commands.map(escapeHTML).join('\\n') + '</pre>'
             + (step.verify ? '<div class="hint">check: ' + escapeHTML(step.verify) + '</div>' : '')
             + '</div>').join('');
-          await step('Getting a box ready', 'hatchery manages stacks; this puts dokku under them',
-                     body, 'done');
+          // A picker inside the dialog, so you can read any backend's guide without restarting.
+          const picker = meta ? '<div class="field"><label>Backend</label><select id="setup-backend">'
+            + meta.backends.map(b => '<option value="' + escapeHTML(b.name) + '"'
+                + (b.name === chosen ? ' selected' : '') + '>' + escapeHTML(b.label) + '</option>').join('')
+            + '</select><div class="hint">Pick another to read its guide.</div></div>' : '';
+          const ok = await step('Setting up ' + chosen,
+                     'what this backend needs before hatchery can use it', picker + body, 'done');
+          const next = $('setup-backend') && $('setup-backend').value;
+          if (ok && next && next !== chosen) { return showSetup(next); }
         }
 
         // ---- detail, logs, config, diffs ------------------------------------

@@ -183,7 +183,10 @@ enum Wire {
         /// Backends, each saying whether hatchery can author into it today.
         struct BackendOption: Encodable {
             let name: String
+            let label: String
             let authorable: Bool
+            /// Whether creating one needs an SSH target. AWS does not; dokku cannot do without.
+            let needsHost: Bool
             let note: String?
         }
 
@@ -273,10 +276,13 @@ public struct HatcheryAPI: Sendable {
                     // than hardcoded here, so a new provider shows up in the menu by existing.
                     backends: Backend.allCases.map { backend in
                         let authorable = (try? Providers.provider(for: backend)) != nil
+                        let support = Providers.support(for: backend)
                         return Wire.Kinds.BackendOption(
                             name: backend.rawValue,
+                            label: support.displayName,
                             authorable: authorable,
-                            note: authorable ? nil : "\(backend.rawValue) stacks cannot be created by hatchery yet")
+                            needsHost: backend == .dokku,
+                            note: authorable ? nil : "\(support.displayName) stacks cannot be created by hatchery yet")
                     },
                     environments: [
                         Environment.dev.rawValue, Environment.staging.rawValue,
@@ -295,9 +301,11 @@ public struct HatcheryAPI: Sendable {
         case ("GET", "/api/config"):
             return await config(request)
         case ("GET", "/api/setup"):
-            return .json(Onboarding.dokkuSteps)
+            let backend = Backend(rawValue: request.query["backend"] ?? "") ?? .dokku
+            return .json(Providers.support(for: backend).setupSteps)
         case ("GET", "/api/preflight"):
-            return .json(await Preflight().run(host: request.query["host"]))
+            let backend = Backend(rawValue: request.query["backend"] ?? "") ?? .dokku
+            return .json(await Preflight().run(backend: backend, host: request.query["host"]))
         default:
             return .failure(404, "no route for \(request.method) \(request.path)")
         }

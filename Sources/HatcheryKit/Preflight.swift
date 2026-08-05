@@ -41,10 +41,106 @@ public struct Preflight: Sendable {
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host] + remote
     }
 
+    /// Whatever the named backend needs, asked of the backend itself.
+    public func run(backend: Backend, host: String?) async -> [PreflightCheck] {
+        await Providers.support(for: backend).readiness(host: host, execute: execute)
+    }
+
+    /// Kept for callers that only ever meant dokku.
     public func run(host: String?) async -> [PreflightCheck] {
+        await dokku(host: host)
+    }
+
+    /// AWS needs a CLI, credentials that actually resolve, and a region.
+    ///
+    /// Credentials are checked by asking who they belong to rather than by looking for a file.
+    /// They can come from a profile, the environment, SSO or an instance role, and only the
+    /// answer matters.
+    public func aws() async -> [PreflightCheck] {
+        var checks = [await tofu()]
+
+        let cli = await binary(
+            "aws", arguments: ["--version"], label: "aws cli", remedy: "brew install awscli")
+        checks.append(cli)
+        guard cli.status == .ok else {
+            // One cause, one failure: without the CLI the other two cannot be asked.
+            for name in ["aws credentials", "aws region"] {
+                checks.append(
+                    PreflightCheck(
+                        name: name, status: .skipped,
+                        detail: "the aws cli is not installed", remedy: nil))
+            }
+            return checks
+        }
+
+        checks.append(await credentials())
+        checks.append(await region())
+        return checks
+    }
+
+    /// App Platform is understood but not authorable, so its readiness is about reading it.
+    public func appPlatform() async -> [PreflightCheck] {
+        [
+            await binary(
+                "doctl", arguments: ["version"], label: "doctl", remedy: "brew install doctl"),
+            PreflightCheck(
+                name: "hatchery can create one", status: .failed,
+                detail: "not implemented for App Platform",
+                remedy: Self.appPlatformReason),
+        ]
+    }
+
+    static let appPlatformReason = """
+        Its spec is YAML applied through doctl rather than tofu, and its secrets read back as \
+        EV[...] ciphertext. Use dokku or aws for a stack hatchery creates.
+        """
+
+    private func credentials() async -> PreflightCheck {
+        do {
+            let result = try await execute(
+                ["aws", "sts", "get-caller-identity", "--output", "text", "--query", "Arn"], nil)
+            let arn = result.combined.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard result.status == 0, !arn.isEmpty else {
+                return PreflightCheck(
+                    name: "aws credentials", status: .failed,
+                    detail: arn.isEmpty ? "no identity returned" : Self.firstLine(arn),
+                    remedy: "run `aws configure`, or `aws sso login` if the account uses SSO")
+            }
+            return PreflightCheck(name: "aws credentials", status: .ok, detail: arn)
+        } catch {
+            return PreflightCheck(
+                name: "aws credentials", status: .failed, detail: "\(error)",
+                remedy: "run `aws configure`")
+        }
+    }
+
+    private func region() async -> PreflightCheck {
+        do {
+            let result = try await execute(["aws", "configure", "get", "region"], nil)
+            let name = result.combined.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard result.status == 0, !name.isEmpty else {
+                return PreflightCheck(
+                    name: "aws region", status: .failed, detail: "no default region configured",
+                    remedy: "run `aws configure set region <region>`, or set AWS_REGION")
+            }
+            return PreflightCheck(name: "aws region", status: .ok, detail: name)
+        } catch {
+            return PreflightCheck(
+                name: "aws region", status: .failed, detail: "\(error)",
+                remedy: "run `aws configure set region <region>`")
+        }
+    }
+
+    static func firstLine(_ text: String) -> String {
+        text.split(separator: "\n").first.map(String.init) ?? text
+    }
+
+    public func dokku(host: String?) async -> [PreflightCheck] {
         var checks: [PreflightCheck] = []
         checks.append(await tofu())
-        checks.append(await binary("ssh", arguments: ["-V"], label: "ssh client"))
+        checks.append(
+            await binary(
+                "ssh", arguments: ["-V"], label: "ssh client", remedy: "install an ssh client"))
 
         guard let host, !host.isEmpty else {
             checks.append(
@@ -74,7 +170,7 @@ public struct Preflight: Sendable {
     private func tofu() async -> PreflightCheck {
         do {
             let result = try await execute(["tofu", "version"], nil)
-            guard result.status == 0 else {
+            guard result.status == 0, !Self.isMissing(result) else {
                 return PreflightCheck(
                     name: "tofu installed", status: .failed,
                     detail: result.combined.isEmpty ? "exited \(result.status)" : result.combined,
@@ -91,18 +187,39 @@ public struct Preflight: Sendable {
         }
     }
 
-    private func binary(_ name: String, arguments: [String], label: String) async -> PreflightCheck {
+    /// Whether a command exists and runs.
+    ///
+    /// Exit status alone will not do: `ssh -V` writes its version to stderr and exits non-zero
+    /// on some builds, so a strict check would call a working ssh broken. But a *missing*
+    /// binary is not an error either — `env` exits 127 and says so rather than throwing, and
+    /// treating that as success reported "ok: aws: No such file or directory", which is how a
+    /// missing CLI passed its own check.
+    private func binary(
+        _ name: String, arguments: [String], label: String, remedy: String? = nil
+    ) async -> PreflightCheck {
         do {
             let result = try await execute([name] + arguments, nil)
-            // `ssh -V` writes its version to stderr and exits non-zero on some builds, so the
-            // test is whether it ran at all rather than what it returned.
-            let detail = result.combined.split(separator: "\n").first.map(String.init) ?? "present"
-            return PreflightCheck(name: label, status: .ok, detail: detail)
+            if Self.isMissing(result) {
+                return PreflightCheck(
+                    name: label, status: .failed, detail: "not found on PATH",
+                    remedy: remedy ?? "install \(name)")
+            }
+            let detail = Self.firstLine(result.combined)
+            return PreflightCheck(
+                name: label, status: .ok, detail: detail.isEmpty ? "present" : detail)
         } catch {
             return PreflightCheck(
                 name: label, status: .failed, detail: "not found on PATH",
-                remedy: "install an ssh client")
+                remedy: remedy ?? "install \(name)")
         }
+    }
+
+    /// 127 is the shell's "command not found"; the message is checked too because `env` reports
+    /// it on stderr and not every platform agrees on the status.
+    static func isMissing(_ result: CommandOutput) -> Bool {
+        if result.status == 127 { return true }
+        let text = result.combined.lowercased()
+        return text.contains("no such file or directory") || text.contains("command not found")
     }
 
     private func reachability(host: String) async -> PreflightCheck {

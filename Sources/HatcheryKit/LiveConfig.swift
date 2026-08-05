@@ -146,6 +146,12 @@ public struct LiveConfigReader: Sendable {
             }
             return config
 
+        case .aws:
+            // `aws apprunner describe-service` returns the plain environment, but anything
+            // pulled from Secrets Manager comes back as a reference rather than a value. Half a
+            // config would make `config audit` report drift that is not there.
+            throw LiveConfigError.unsupportedBackend(.aws)
+
         case .appPlatform:
             // `doctl apps spec get` returns the whole spec, and the env block carries
             // `EV[...]` ciphertext for every key typed SECRET. Reading it needs a decision

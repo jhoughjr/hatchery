@@ -91,10 +91,12 @@ public struct StackBootstrapper: Sendable {
         tofuDir: String,
         environment: Environment? = nil,
         sshKeyPath: String = "~/.ssh/id_rsa",
+        region: String? = nil,
         into existing: StackManifest? = nil,
         manifestPath: String? = nil
     ) throws -> BootstrapResult {
-        guard backend == .dokku else {
+        let provider = Providers.support(for: backend)
+        guard provider.authorable else {
             throw BootstrapError.unsupportedBackend(backend)
         }
         guard StackName.isValid(name) else {
@@ -112,16 +114,9 @@ public struct StackBootstrapper: Sendable {
             throw BootstrapError.directoryNotEmpty(directory)
         }
 
-        let address = host.split(separator: "@").last.map(String.init) ?? host
-        let files = [
-            GeneratedFile(path: "versions.tf", contents: Self.versions, role: .declaration),
-            GeneratedFile(
-                path: "providers.tf", contents: Self.providers, role: .declaration),
-            GeneratedFile(
-                path: "variables.tf",
-                contents: Self.variables(host: address, sshKeyPath: sshKeyPath),
-                role: .declaration),
-        ]
+        // The backend supplies its own starting configuration; this type only decides where
+        // it goes and refuses to write over anything already there.
+        let files = provider.bootstrapFiles(host: host, sshKeyPath: sshKeyPath, region: region)
 
         let stack = StackSpec(
             name: name,
@@ -161,49 +156,4 @@ public struct StackBootstrapper: Sendable {
             manifestPath: result.manifestPath, initOutput: output.combined)
     }
 
-    static let versions = """
-        # Written by hatchery.
-        terraform {
-          required_version = ">= 1.5"
-
-          required_providers {
-            dokku = {
-              source  = "aliksend/dokku"
-              version = "~> 1.0"
-            }
-          }
-        }
-        """
-
-    static let providers = """
-        # Written by hatchery.
-        provider "dokku" {
-          ssh_host = var.dokku_host
-          ssh_user = "dokku"
-          ssh_port = 22
-          ssh_cert = var.ssh_key_path
-
-          # The host key is not pinned. Pin it with ssh_host_key before this runs anywhere
-          # but a network you control.
-          ssh_skip_host_key_check = true
-        }
-        """
-
-    static func variables(host: String, sshKeyPath: String) -> String {
-        """
-        # Written by hatchery. Per-service image variables are appended below as services
-        # are added, so keep this file rather than regenerating it.
-        variable "dokku_host" {
-          description = "Dokku host to manage."
-          type        = string
-          default     = "\(host)"
-        }
-
-        variable "ssh_key_path" {
-          description = "Private key authorized for the dokku user on the host."
-          type        = string
-          default     = "\(sshKeyPath)"
-        }
-        """
-    }
 }
