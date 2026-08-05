@@ -251,3 +251,49 @@ struct PreflightTests {
         #expect(argv.last == "version")
     }
 }
+
+@Suite("Onboarding")
+struct OnboardingTests {
+    @Test("every step says where it runs and why it exists")
+    func stepsAreComplete() {
+        let steps = Onboarding.dokkuSteps
+        #expect(!steps.isEmpty)
+        for step in steps {
+            #expect(!step.title.isEmpty)
+            // The why is the point. A command with no reason is a command you cannot adapt.
+            #expect(step.why.count > 40, "step '\(step.title)' does not explain itself")
+            #expect(["box", "here"].contains(step.on))
+            #expect(!step.commands.isEmpty)
+        }
+    }
+
+    @Test("the guide covers the prerequisites doctor checks for")
+    func coversWhatDoctorChecks() {
+        let all = Onboarding.dokkuSteps
+            .map { $0.title + " " + $0.why + " " + $0.commands.joined(separator: " ") }
+            .joined(separator: "\n")
+            .lowercased()
+
+        // doctor reports these as failures; the guide has to say what to do about each.
+        #expect(all.contains("dokku"))
+        #expect(all.contains("ssh-keys:add"))
+        #expect(all.contains("network"))
+        #expect(all.contains("hatchery doctor"))
+    }
+
+    @Test("the dokku version is stated as a reference rather than silently pinned")
+    func versionIsCalledOut() {
+        let install = Onboarding.dokkuSteps.first { $0.title.contains("Install dokku") }
+        #expect(install?.commands.contains { $0.contains(Onboarding.knownGoodDokku) } == true)
+        // Saying where to check beats claiming this tag is current forever.
+        #expect(install?.why.contains("dokku.com") == true)
+    }
+
+    @Test("the database step refuses to invent credentials, matching what the planner does")
+    func databaseStepMatchesSecretPolicy() {
+        // Matched on the whole phrase: the network step's title also ends "…need a database".
+        let step = Onboarding.dokkuSteps.first { $0.title.contains("Provision the database") }
+        #expect(step != nil)
+        #expect(step?.why.contains("before the service does") == true)
+    }
+}

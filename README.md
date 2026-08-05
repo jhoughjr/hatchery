@@ -64,6 +64,10 @@ The dokku provider rejects a zero-length config value outright (`string length m
 
 ## The dashboard
 
+The mark is a cracked egg on the same perch [roost](https://github.com/jhoughjr/roost) draws its
+rooster on — same 64×64 field, same flat geometry, same `#C4602A`. roost owns machines; hatchery
+owns the stacks that hatch on them, and the two marks are meant to read as siblings.
+
 `hatchery serve` puts the same operations behind a browser:
 
 ```
@@ -83,6 +87,17 @@ hatchery manages deployments, so it deliberately is not one. Running it as an ap
 administers means a restart of that stack kills the tool mid-action, and the moment you most
 need it — box wedged, apps down — is exactly when it would not be there. It is a local process.
 There is no Dockerfile here on purpose.
+
+### Getting a box ready in the first place
+
+`hatchery doctor` tells you dokku is not answering; it cannot tell you how to put dokku there.
+`hatchery setup` is that half — installing dokku, authorizing your key for the `dokku` user,
+creating the shared docker network, provisioning the database role hatchery refuses to invent.
+The dashboard shows the same list behind **No box yet?**.
+
+It is a checklist rather than a script on purpose. These steps touch a machine's package
+manager, its firewall and its SSH configuration, and running that blind from a dashboard is not
+something hatchery should do on your behalf.
 
 ### Prerequisites, checked before anything is written
 
