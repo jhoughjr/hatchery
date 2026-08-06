@@ -1,8 +1,38 @@
 name: build
-on: [push, pull_request]
+
+# Builds and tests run on the self-hosted runners, not on a laptop.
+#
+# A release build of this package is a full optimisation pass over four hundred modules. Doing
+# that repeatedly on the MacBook — while the dashboard server and a polling browser are also up
+# — is enough to take the machine down, which is exactly what happened.
+on: [push, pull_request, workflow_dispatch]
+
 jobs:
   build:
-    runs-on: [self-hosted, arm64]
+    # opi specifically, rather than the [self-hosted, arm64] pair roost uses. Those labels match
+    # both runners, and the mini is carrying Phoenix builds — Linux and ARM64 are applied
+    # automatically by the runner, so this pins to opi without anyone adding a label.
+    #
+    # It also gets this package compiled on Linux for the first time. `Platform.current` has a
+    # `#if os(Linux)` branch that no macOS build has ever put through a compiler, so the install
+    # hints Linux users are handed are, to date, unverified.
+    runs-on: [self-hosted, Linux, ARM64]
     steps:
       - uses: actions/checkout@v4
-      - run: echo hello
+
+      - name: toolchain
+        # Reports rather than assumes. If swift is absent this says so in one line instead of
+        # failing several minutes later inside a build step.
+        run: |
+          set -euo pipefail
+          if ! command -v swift >/dev/null 2>&1; then
+            echo "::error::no swift toolchain on this runner — install Swift 6.0 for aarch64 from swift.org/install/linux"
+            exit 1
+          fi
+          swift --version
+
+      - name: build
+        run: swift build --build-tests
+
+      - name: test
+        run: swift test --skip-build
