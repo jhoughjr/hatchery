@@ -9,8 +9,8 @@ struct Hatchery: AsyncParsableCommand {
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
-            Config.self, Deploy.self, Doctor.self, Serve.self, Service.self, Setup.self,
-            Stack.self, Status.self,
+            Config.self, Deploy.self, Doctor.self, Host.self, Serve.self, Service.self,
+            Setup.self, Stack.self, Status.self,
             Up.self, Down.self, Restart.self,
         ]
     )
@@ -289,6 +289,90 @@ struct Setup: ParsableCommand {
                 print("   check: \(verify)")
             }
             print("")
+        }
+    }
+}
+
+struct Host: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Save SSH targets by name, so a box is written once.",
+        discussion: """
+            An address is the same thing in six places — the stack that runs on it, the preflight \
+            check, every logs and restart call — and retyping it is how 192.168.0.103 becomes \
+            192.168.0.130 in exactly one of them.
+
+            Refer to a saved host anywhere a target is taken, with a leading @.
+            """,
+        subcommands: [Add.self, List.self, Remove.self]
+    )
+
+    struct Add: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Save a target under a name.")
+
+        @Argument(help: "Name to save it as.")
+        var name: String
+
+        @Argument(help: "SSH target, e.g. dokku@192.168.0.103.")
+        var target: String
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        func run() throws {
+            let path = try ManifestLocator.resolve(manifest)
+            let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
+            // Normalised on the way in, so `@opi` cannot resolve to something that fails auth.
+            let normalised = DokkuProvider.sshTarget(target)
+            let updated = try parsed.savingHost(name, target: normalised)
+            try updated.encoded().write(to: URL(fileURLWithPath: path))
+
+            print("  @\(name) -> \(normalised)")
+            if let warning = DokkuProvider.userWarning(normalised) {
+                print("  note: \(warning)")
+            }
+        }
+    }
+
+    struct List: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Show saved and in-use targets.")
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        func run() throws {
+            let path = try ManifestLocator.resolve(manifest)
+            let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
+            let known = HostRegistry.known(saved: parsed.savedHosts, stacks: parsed.stacks)
+
+            guard !known.isEmpty else {
+                print("  no hosts saved, and no stack declares one")
+                return
+            }
+            for entry in known {
+                // Targets already in use are shown too: they are known whether or not anyone
+                // saved them, and leaving them out hides the box you are most likely to pick.
+                let label = entry.name.map { "@\($0)" } ?? "(in use)"
+                print("  \(label.padding(toLength: max(14, label.count), withPad: " ", startingAt: 0)) \(entry.target)")
+            }
+        }
+    }
+
+    struct Remove: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "rm", abstract: "Forget a saved target.")
+
+        @Argument(help: "Name to forget.")
+        var name: String
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        func run() throws {
+            let path = try ManifestLocator.resolve(manifest)
+            let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
+            let updated = try parsed.removingHost(name)
+            try updated.encoded().write(to: URL(fileURLWithPath: path))
+            print("  forgot @\(name)")
         }
     }
 }
@@ -864,7 +948,7 @@ struct Config: ParsableCommand {
 struct Stack: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Work with declared stacks.",
-        subcommands: [New.self, List.self]
+        subcommands: [New.self, List.self, Destroy.self]
     )
 
     struct New: AsyncParsableCommand {
@@ -931,8 +1015,9 @@ struct Stack: ParsableCommand {
                         + declared.sorted().joined(separator: ", "))
             }
 
+            let resolvedHost = try HostRegistry.resolve(host, in: existing?.savedHosts ?? [:])
             let planned = try bootstrapper.plan(
-                name: name, backend: kind, host: host, tofuDir: tofuDir,
+                name: name, backend: kind, host: resolvedHost, tofuDir: tofuDir,
                 environment: Environment(rawValue: environment), settings: values,
                 into: existing, manifestPath: Paths.expanded(path))
 
@@ -946,6 +1031,67 @@ struct Stack: ParsableCommand {
             print("  tofu init: ok")
             print("")
             print("  next: hatchery service new \(name) <service> --kind <kind> --domain <d> --image <ref>")
+        }
+    }
+
+    struct Destroy: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "rm",
+            abstract: "Destroy a stack's infrastructure and forget it.",
+            discussion: """
+                Shows what `tofu destroy` would remove, and does nothing without --yes. This is \
+                the one action with no undo, so the stack name has to be repeated back with \
+                --confirm before anything is destroyed.
+
+                The tofu directory and the config files are left on disk. They hold the state \
+                file and real secrets, and forgetting a declaration should not also delete the \
+                only record of what was there.
+                """
+        )
+
+        @Argument(help: "Stack to destroy.")
+        var stack: String
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        @Option(name: .long, help: "Repeat the stack name to confirm.")
+        var confirm: String?
+
+        @Flag(name: .long, help: "Actually destroy. Without it, only the plan is shown.")
+        var yes: Bool = false
+
+        func run() async throws {
+            let path = try ManifestLocator.resolve(manifest)
+            let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
+            guard let spec = parsed.stack(named: stack) else {
+                throw ValidationError("no stack named '\(stack)' in \(path)")
+            }
+
+            let deployer = Deployer()
+            let summary = try await deployer.destroyPlan(in: spec)
+            print("\(spec.name)  [\(spec.backend.rawValue) · \(spec.resolvedEnvironment.rawValue)]")
+            print("  would destroy: \(summary.headline)")
+            for service in spec.services {
+                print("    \(service.name)  \(service.image)")
+            }
+
+            guard yes else {
+                print("")
+                print("  nothing destroyed; re-run with --yes --confirm \(spec.name)")
+                return
+            }
+            guard confirm == spec.name else {
+                throw ValidationError(
+                    "confirmation did not match; pass --confirm \(spec.name) to destroy it")
+            }
+
+            let output = try await deployer.tofuDestroy(in: spec)
+            print(output)
+            try parsed.removing(stack: spec.name).encoded()
+                .write(to: URL(fileURLWithPath: path))
+            print("  removed '\(spec.name)' from \(path)")
+            print("  left in place: \(spec.tofu?.directory ?? "the tofu directory") (state and config)")
         }
     }
 

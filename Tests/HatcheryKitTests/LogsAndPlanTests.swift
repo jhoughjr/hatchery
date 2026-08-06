@@ -391,3 +391,219 @@ struct DokkuSSHUserTests {
         #expect(box?.remedy?.contains("ssh-keys:add") != true)
     }
 }
+
+@Suite("Config completeness")
+struct ConfigCompletenessTests {
+    private let stack = StackSpec(
+        name: "lab", backend: .dokku, host: "dokku@h",
+        tofu: TofuBinding(directory: "/infra/lab"),
+        services: [
+            ServiceSpec(
+                name: "svc", kind: .paymentGateway, image: "i", configFile: "svc.config.json")
+        ])
+
+    @Test("a config missing required keys is incomplete, and names them")
+    func reportsMissing() {
+        let status = ConfigCompleteness.check(
+            service: stack.services[0], in: stack, manifestPath: "/infra/lab/hatchery.json",
+            read: { _ in ["APP_URL": "http://x"] })
+
+        #expect(!status.complete)
+        #expect(status.missing.contains("DATABASE_PASSWORD"))
+        #expect(status.summary?.contains("required keys missing") == true)
+    }
+
+    @Test("a complete config reports nothing to show")
+    func completeIsSilent() {
+        let contract = EnvContract.contract(for: .paymentGateway, backend: .dokku)!
+        var full: [String: String] = [:]
+        for key in contract.required { full[key] = "value" }
+
+        let status = ConfigCompleteness.check(
+            service: stack.services[0], in: stack, manifestPath: "/m.json", read: { _ in full })
+        #expect(status.complete)
+        #expect(status.summary == nil)
+    }
+
+    @Test("an empty value counts as missing, not as present")
+    func emptyIsMissing() {
+        let status = ConfigCompleteness.check(
+            service: stack.services[0], in: stack, manifestPath: "/m.json",
+            read: { _ in ["DATABASE_PASSWORD": ""] })
+        #expect(status.missing.contains("DATABASE_PASSWORD"))
+    }
+
+    @Test("a config file that cannot be read is reported as absent rather than complete")
+    func missingFileIsNotComplete() {
+        let status = ConfigCompleteness.check(
+            service: stack.services[0], in: stack, manifestPath: "/m.json",
+            read: { _ in throw CocoaError(.fileNoSuchFile) })
+
+        #expect(!status.found)
+        #expect(!status.complete)
+        #expect(status.summary == "no config file")
+    }
+
+    @Test("the browser is sent complete and summary, not left to recompute them")
+    func encodesDerivedFields() throws {
+        // Both are computed, and a computed property is not encoded by default — so the page
+        // received neither and read every service as incomplete.
+        let status = ConfigStatus(service: "s", missing: ["A"], unexpected: [], found: true)
+        let json = try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(status)) as? [String: Any]
+
+        #expect(json?["complete"] as? Bool == false)
+        #expect(json?["summary"] as? String == "1 required key missing")
+
+        let ok = ConfigStatus(service: "s", missing: [], unexpected: [], found: true)
+        let okJSON = try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(ok)) as? [String: Any]
+        #expect(okJSON?["complete"] as? Bool == true)
+        // Nothing to say means the key is absent rather than an empty string.
+        #expect(okJSON?["summary"] == nil)
+    }
+
+    @Test("singular and plural read correctly, because a dashboard shows this constantly")
+    func summaryGrammar() {
+        let one = ConfigStatus(service: "s", missing: ["A"], unexpected: [], found: true)
+        let two = ConfigStatus(service: "s", missing: ["A", "B"], unexpected: [], found: true)
+        #expect(one.summary == "1 required key missing")
+        #expect(two.summary == "2 required keys missing")
+    }
+}
+
+@Suite("Saved hosts")
+struct HostRegistryTests {
+    @Test("a reference resolves, and a literal target passes through untouched")
+    func resolves() throws {
+        let saved = ["opi": "dokku@192.168.0.103"]
+        #expect(try HostRegistry.resolve("@opi", in: saved) == "dokku@192.168.0.103")
+        // Nothing has to be saved before it can be used; the registry is a convenience.
+        #expect(try HostRegistry.resolve("dokku@other", in: saved) == "dokku@other")
+        #expect(try HostRegistry.resolve("", in: saved) == "")
+    }
+
+    @Test("an unknown reference lists what is saved rather than failing blankly")
+    func unknownReference() {
+        #expect(throws: HostError.unknown("nope", known: ["opi", "pi2"])) {
+            _ = try HostRegistry.resolve("@nope", in: ["opi": "a", "pi2": "b"])
+        }
+    }
+
+    @Test("hosts already in use are known even if nobody saved them")
+    func includesHostsInUse() {
+        let stacks = [
+            StackSpec(name: "a", backend: .dokku, host: "dokku@192.168.0.103"),
+            StackSpec(name: "b", backend: .dokku, host: "dokku@10.0.0.9"),
+        ]
+        let known = HostRegistry.known(saved: ["opi": "dokku@192.168.0.103"], stacks: stacks)
+
+        #expect(known.count == 2)
+        // The saved one keeps its name; the other is listed without one rather than omitted.
+        #expect(known.first?.name == "opi")
+        #expect(known.contains { $0.name == nil && $0.target == "dokku@10.0.0.9" })
+    }
+
+    @Test("saving and forgetting round-trips through the manifest")
+    func savesAndForgets() throws {
+        let manifest = StackManifest()
+        let saved = try manifest.savingHost("opi", target: "dokku@192.168.0.103")
+        #expect(saved.savedHosts["opi"] == "dokku@192.168.0.103")
+
+        let decoded = try StackManifest.decode(from: try saved.encoded())
+        #expect(decoded.savedHosts["opi"] == "dokku@192.168.0.103")
+
+        #expect(try saved.removingHost("opi").savedHosts.isEmpty)
+        #expect(throws: HostError.self) { _ = try manifest.removingHost("ghost") }
+    }
+
+    @Test("a name that would not round-trip is refused")
+    func rejectsBadNames() {
+        #expect(!HostRegistry.isValidName(""))
+        #expect(!HostRegistry.isValidName("has space"))
+        #expect(HostRegistry.isValidName("opi-2"))
+        #expect(throws: HostError.invalidName("has space")) {
+            _ = try StackManifest().savingHost("has space", target: "dokku@h")
+        }
+    }
+}
+
+@Suite("Tearing a stack down")
+struct DestroyTests {
+    @Test("the destroy plan is asked for with -destroy, not inferred")
+    func destroyPlanCommand() {
+        #expect(Deployer.destroyPlanCommand().contains("-destroy"))
+        #expect(Deployer.destroyCommand() == ["tofu", "destroy", "-auto-approve", "-no-color", "-input=false"])
+    }
+
+    @Test("removing a stack leaves the others alone")
+    func removesOnlyTheNamed() {
+        let manifest = StackManifest(stacks: [
+            StackSpec(name: "a", backend: .dokku, host: "h"),
+            StackSpec(name: "b", backend: .dokku, host: "h"),
+        ])
+        let after = manifest.removing(stack: "a")
+        #expect(after.stacks.map(\.name) == ["b"])
+        // Removing something absent is not an error; the end state is what was asked for.
+        #expect(after.removing(stack: "ghost").stacks.count == 1)
+    }
+}
+
+@Suite("Hosts roost advertises")
+struct RoostHostsTests {
+    private let rc = """
+        # roost config
+        ROOST_DOKKU_HOST=dokku@192.168.0.103
+        ROOST_DOMAIN=jimmyhoughjr.net
+        ROOST_STATUS_SITE=/Users/x/status-site
+        """
+
+    @Test("only the host-shaped variables are taken, not every setting")
+    func readsOnlyHosts() {
+        let hosts = RoostHosts.hosts(read: { _ in rc })
+        #expect(hosts.count == 1)
+        #expect(hosts.first?.target == "dokku@192.168.0.103")
+        // A domain and a path are not places to ssh to.
+        #expect(!hosts.contains { $0.target.contains("jimmyhoughjr.net") })
+    }
+
+    @Test("the file is read rather than sourced")
+    func doesNotExecute() {
+        // Sourcing an rc file to learn one variable would run whatever else is in it.
+        let hostile = "ROOST_DOKKU_HOST=dokku@h\nrm -rf /\n"
+        #expect(RoostHosts.hosts(read: { _ in hostile }).first?.target == "dokku@h")
+    }
+
+    @Test("placeholders and unexpanded variables are skipped")
+    func skipsPlaceholders() {
+        #expect(RoostHosts.hosts(read: { _ in "ROOST_DOKKU_HOST=dokku@YOUR_HOST_IP" }).isEmpty)
+        #expect(RoostHosts.hosts(read: { _ in "ROOST_DOKKU_HOST=$SOMETHING" }).isEmpty)
+        #expect(RoostHosts.hosts(read: { _ in "ROOST_DOKKU_HOST=" }).isEmpty)
+    }
+
+    @Test("no roostrc is not an error; hatchery works without roost")
+    func absentFileIsFine() {
+        #expect(RoostHosts.hosts(read: { _ in throw CocoaError(.fileNoSuchFile) }).isEmpty)
+    }
+
+    @Test("an advertised host appears in the list, named for where it came from")
+    func appearsInKnownHosts() {
+        let known = HostRegistry.known(
+            saved: [:], stacks: [],
+            advertised: [(name: "roost dokku host", target: "dokku@10.0.0.5")])
+        #expect(known.count == 1)
+        #expect(known.first?.name == "roost dokku host")
+    }
+
+    @Test("a host already saved or in use is not listed twice")
+    func dedupesAgainstWhatIsKnown() {
+        let known = HostRegistry.known(
+            saved: ["opi": "dokku@192.168.0.103"],
+            stacks: [StackSpec(name: "a", backend: .dokku, host: "dokku@192.168.0.103")],
+            advertised: [(name: "roost dokku host", target: "dokku@192.168.0.103")])
+
+        #expect(known.count == 1)
+        // The name someone chose wins over the one derived from roost's variable.
+        #expect(known.first?.name == "opi")
+    }
+}

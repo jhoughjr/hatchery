@@ -212,14 +212,28 @@ public struct StackSpec: Codable, Sendable, Equatable {
 public struct StackManifest: Codable, Sendable, Equatable {
     public var version: Int
     public var stacks: [StackSpec]
+    /// SSH targets saved by name, so a box is written once and referred to afterwards.
+    public var hosts: [String: String]?
 
-    public init(version: Int = 1, stacks: [StackSpec] = []) {
+    public init(version: Int = 1, stacks: [StackSpec] = [], hosts: [String: String]? = nil) {
         self.version = version
         self.stacks = stacks
+        self.hosts = hosts
     }
 
     public func stack(named name: String) -> StackSpec? {
         stacks.first { $0.name == name }
+    }
+
+    /// The same manifest without the named stack.
+    ///
+    /// The tofu directory and the config files are deliberately left on disk: they hold the
+    /// state file and real secrets, and a command that removes a declaration should not also
+    /// delete the only record of what was there.
+    public func removing(stack name: String) -> StackManifest {
+        var copy = self
+        copy.stacks.removeAll { $0.name == name }
+        return copy
     }
 
     /// The same manifest with one service's declared image changed.

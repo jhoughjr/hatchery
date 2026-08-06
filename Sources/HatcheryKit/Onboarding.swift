@@ -287,6 +287,19 @@ public enum Onboarding {
                 verify: nil),
 
             SetupStep(
+                title: "Optional: install roost's telemetry collector",
+                why: """
+                    roost configures boxes and already ships a per-node reporter — load, memory, \
+                    disk, power — with launchd and systemd installers. hatchery does not collect \
+                    host telemetry and should not: a second set of reporters on the same box \
+                    would be two answers to one question. Install roost's, and its boards have \
+                    the machine while hatchery has the stacks on it.
+                    """,
+                on: "here",
+                commands: ["roost doctor", "bin/install-node-report.sh   # from the roost repo"],
+                verify: "roost fleet"),
+
+            SetupStep(
                 title: "Point hatchery at it",
                 why: """
                     Everything above is the box. This is the part hatchery does: check the \
