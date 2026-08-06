@@ -51,8 +51,19 @@ public struct PlanSummary: Sendable, Equatable, Codable {
     }
 
     /// A one-line description in the words tofu itself uses.
+    /// tofu understood the plan and it would do nothing.
+    ///
+    /// Distinct from `!parsed`, which means the output was not understood at all. Reading one as
+    /// the other is how a destroy that would remove nothing came to be announced as though it
+    /// would remove something.
+    public var isNoop: Bool {
+        parsed && add == 0 && change == 0 && destroy == 0
+    }
+
     public var headline: String {
-        parsed ? "\(add) to add, \(change) to change, \(destroy) to destroy" : "plan output"
+        guard parsed else { return "plan output" }
+        if isNoop { return "nothing to change" }
+        return "\(add) to add, \(change) to change, \(destroy) to destroy"
     }
 
     public static func parse(_ output: String) -> PlanSummary {
@@ -70,6 +81,13 @@ public struct PlanSummary: Sendable, Equatable, Codable {
                 add = counts.add
                 change = counts.change
                 destroy = counts.destroy
+                parsed = true
+            }
+
+            // tofu prints a `Plan:` line only when something would change. With nothing to do it
+            // says "No changes." instead, which left the summary unparsed and reported as though
+            // it were unreadable output rather than an empty plan.
+            if trimmed.hasPrefix("No changes.") {
                 parsed = true
             }
 

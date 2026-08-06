@@ -11,13 +11,19 @@ public enum SealedState {
     public static let archiveName = "secrets.tar.age"
     public static let scriptName = "seal.sh"
 
-    /// Walks up from `path` looking for the marker, so a stack nested a level down
-    /// (`infra-state/mwserver-tf`) still finds the root that seals it.
+    /// Walks up from `path` looking for the marker, resolving symlinks first, so a stack nested
+    /// a level down (`infra-state/mwserver-tf`) still finds the root that seals it.
+    ///
+    /// The resolution is not a nicety. The manifest is commonly symlinked in from
+    /// `~/.config/hatchery/hatchery.json`, and walking up from the link's own location climbs
+    /// out of `~/.config` and finds nothing — so every automatic seal reported "not a sealed
+    /// directory" and did nothing, silently, which is the exact failure this all exists to stop.
     public static func root(
         containing path: String,
         exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> String? {
-        var directory = URL(fileURLWithPath: Paths.expanded(path)).standardizedFileURL
+        var directory = URL(fileURLWithPath: Paths.expanded(path))
+            .resolvingSymlinksInPath().standardizedFileURL
         while !directory.path.isEmpty && directory.path != "/" {
             if exists(directory.appendingPathComponent(marker).path) { return directory.path }
             let parent = directory.deletingLastPathComponent().standardizedFileURL

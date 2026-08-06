@@ -1091,9 +1091,16 @@ struct Stack: ParsableCommand {
             let deployer = Deployer()
             let summary = try await deployer.destroyPlan(in: spec)
             print("\(spec.name)  [\(spec.backend.rawValue) · \(spec.resolvedEnvironment.rawValue)]")
-            print("  would destroy: \(summary.headline)")
-            for service in spec.services {
-                print("    \(service.name)  \(service.image)")
+            if summary.isNoop {
+                // Declared but never applied. Listing the services here would read as though
+                // they were about to be torn off a box that has never heard of them.
+                print("  nothing to destroy — this stack owns no infrastructure")
+                print("  removing it drops the declaration only")
+            } else {
+                print("  would destroy: \(summary.headline)")
+                for service in spec.services {
+                    print("    \(service.name)  \(service.image)")
+                }
             }
 
             guard yes else {
