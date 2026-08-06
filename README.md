@@ -80,6 +80,20 @@ rest of the page, and dokku is checked against a host taken from an existing sta
 reported as "no host given" on a machine that plainly has one. Starting a stack from a provider
 row carries that choice into the wizard instead of asking again.
 
+A failing provider names the thing to fix rather than counting them — `aws cli` beats `2 of 4
+checks failing` — and **checks** expands the row into every check with its remedy, the same
+detail `hatchery doctor` prints:
+
+```
+  AWS App Runner   * aws cli +2 more    0 stacks   [checks] [set up] [+ stack]
+
+    ok    tofu installed    OpenTofu v1.12.5
+    FAIL  aws cli           not found on PATH
+          -> brew install awscli
+    --    aws credentials   the aws cli is not installed
+    --    aws region        the aws cli is not installed
+```
+
 The mark is a cracked egg on the same perch [roost](https://github.com/jhoughjr/roost) draws its
 rooster on — same 64×64 field, same flat geometry, same `#C4602A`. roost owns machines; hatchery
 owns the stacks that hatch on them, and the two marks are meant to read as siblings.

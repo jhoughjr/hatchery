@@ -168,7 +168,17 @@ enum Page {
           .ico.goog { color: #4a9a6a; }
           .bk .rd { font-size: 0.8rem; min-width: 10rem; }
           .bk .ct { color: var(--dim); font-size: 0.8rem; }
+          .bk { flex-wrap: wrap; }
           .bk .btns { margin-left: auto; white-space: nowrap; }
+          .bk-checks {
+            flex-basis: 100%; margin-top: 0.6rem; padding-top: 0.6rem;
+            border-top: 1px solid var(--line); font-size: 0.8rem;
+          }
+          .bk-checks .row2 { display: grid; grid-template-columns: 4rem 12rem 1fr; gap: 0.15rem 0.6rem; }
+          .bk-checks .fix { grid-column: 2 / -1; color: var(--dim); margin-bottom: 0.3rem; }
+          .st-ok { color: var(--ready); }
+          .st-failed { color: var(--unreachable); }
+          .st-skipped { color: var(--dim); }
           .dot { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%;
                  margin-right: 0.4rem; vertical-align: baseline; }
           .dot.ok { background: var(--ready); }
@@ -302,6 +312,7 @@ enum Page {
           'new-stack': 'Create a stack on a provider, from nothing',
           'new-stack-on': 'Create a stack on this provider',
           setup: 'What this provider needs before hatchery can use it',
+          checks: 'Show each prerequisite check and how to fix the ones failing',
         };
 
         function button(action, label, stack, service, extraClass, backend) {
@@ -361,9 +372,11 @@ enum Page {
           $('backends').innerHTML = '<h2>Providers</h2>' + backends.map(b => {
             const r = b.readiness;
             const dot = r === undefined ? 'pend' : (r.ok ? 'ok' : 'no');
+            // Name the first thing that failed. "2 of 4 failing" is a number; "aws cli" is a
+            // thing to go and fix.
             const text = r === undefined ? 'checking…'
               : (r.ok ? 'configured here'
-                      : r.failing + ' of ' + r.total + ' checks failing');
+                      : r.first + (r.failing > 1 ? ' +' + (r.failing - 1) + ' more' : ''));
             const stacks = b.stackCount === 1 ? '1 stack' : b.stackCount + ' stacks';
             return '<div class="bk">'
               + icon(b.name)
@@ -371,13 +384,30 @@ enum Page {
               + '<span class="rd"><span class="dot ' + dot + '"></span>' + escapeHTML(text) + '</span>'
               + '<span class="ct">' + stacks + '</span>'
               + '<span class="btns">'
+              +   button('checks', b.open ? 'hide checks' : 'checks', null, null, 'add', b.name)
+              +   ' '
               +   button('setup', 'set up', null, null, 'add', b.name)
               +   ' '
               +   (b.authorable
                     ? button('new-stack-on', '+ stack', null, null, 'add', b.name)
                     : '<span class="ct">' + escapeHTML(b.note || '') + '</span>')
-              + '</span></div>';
+              + '</span>'
+              + (b.open ? checksPanel(b) : '')
+              + '</div>';
           }).join('');
+        }
+
+        function checksPanel(b) {
+          if (!b.checks) return '<div class="bk-checks">checking…</div>';
+          return '<div class="bk-checks"><div class="row2">'
+            + b.checks.map(c =>
+                '<span class="st-' + c.status + '">'
+                + (c.status === 'ok' ? 'ok' : (c.status === 'failed' ? 'FAIL' : '--')) + '</span>'
+                + '<span>' + escapeHTML(c.name) + '</span>'
+                + '<span>' + escapeHTML(c.detail) + '</span>'
+                + (c.remedy ? '<span class="fix">&rarr; ' + escapeHTML(c.remedy) + '</span>' : '')
+              ).join('')
+            + '</div></div>';
         }
 
         async function checkBackend(name) {
@@ -387,8 +417,15 @@ enum Page {
             + (b.knownHost ? '&host=' + encodeURIComponent(b.knownHost) : ''));
           const checks = res.ok ? res.data : [];
           // Skipped is not failure: it means something it depends on was not asked.
-          const failing = checks.filter(c => c.status === 'failed').length;
-          b.readiness = {ok: failing === 0 && checks.length > 0, failing, total: checks.length};
+          const failed = checks.filter(c => c.status === 'failed');
+          // The whole list is kept, not just a count — "2 of 3 failing" says there is a problem
+          // and not which, and the remedy is the useful half of a failed check.
+          b.checks = checks;
+          b.readiness = {
+            ok: failed.length === 0 && checks.length > 0,
+            failing: failed.length, total: checks.length,
+            first: failed.length ? failed[0].name : null,
+          };
           renderBackends();
         }
 
@@ -417,6 +454,11 @@ enum Page {
             case 'edit-config': editConfig(stack, service); break;
             case 'setup': showSetup(target.dataset.backend || null); break;
             case 'new-stack-on': newStack(target.dataset.backend); break;
+            case 'checks': {
+              const b = backends.find(x => x.name === target.dataset.backend);
+              if (b) { b.open = !b.open; renderBackends(); if (!b.checks) checkBackend(b.name); }
+              break;
+            }
           }
         });
 
