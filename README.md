@@ -136,6 +136,23 @@ The SSH target is the field worth explaining, and the wizard now does: it is how
 reaches the box to create and manage apps, the user must be `dokku` — that account is what turns
 an SSH command into a dokku command — and your key must already be authorized for it.
 
+### Stacks carry their provider
+
+Every stack header shows its provider's glyph, and once more than one provider is in use the
+list groups under them:
+
+```
+▣ Dokku (self-hosted)  2
+    ▣ mwlab                    dokku · dev        degraded
+    ▣ mwlab-2 ▲                dokku · staging    responding
+
+☁ Google Cloud Run  1
+    ☁ mwprod                   cloudRun · prod    ready
+```
+
+Grouping only when it earns its place: with a single provider a heading over every stack is a
+level of nesting that says nothing, and the glyph on each header already carries it.
+
 ### Incomplete configuration
 
 A service whose declared config is missing required keys gets a ▲ next to its name, and the

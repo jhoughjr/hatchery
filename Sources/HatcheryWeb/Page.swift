@@ -153,6 +153,14 @@ enum Page {
             border-radius: 8px; margin-bottom: 0.5rem;
           }
           .bk .ico { width: 22px; height: 22px; flex: none; }
+          .stack > header .ico { width: 18px; height: 18px; flex: none; }
+          .group > h3 {
+            display: flex; align-items: center; gap: 0.5rem;
+            font-size: 0.8rem; color: var(--dim); font-weight: 600;
+            margin: 1rem 0 0.5rem;
+          }
+          .group > h3 .ico { width: 16px; height: 16px; }
+          .group:first-child > h3 { margin-top: 0; }
           .bk .nm { font-weight: 600; min-width: 11rem; }
           .ico.self { color: var(--ready); }
           .ico.ocean { color: #3a7ad9; }
@@ -451,7 +459,15 @@ enum Page {
             return;
           }
 
-          $('stacks').innerHTML = stacks.map(stack => {
+          // Grouped by provider only when more than one is in use. With a single provider a
+          // heading over every stack is a level of nesting that says nothing, and the icon on
+          // each header already carries it.
+          const used = [...new Set(stacks.map(s => s.backend))];
+          const label = (b) => {
+            const found = (meta && meta.backends || []).find(x => x.name === b);
+            return found ? found.label : b;
+          };
+          const drawStack = (stack) => {
             const rows = stack.services.map(svc => {
               const state = svc.state || 'unknown';
               const reasons = (svc.reasons || []).map(r =>
@@ -492,6 +508,7 @@ enum Page {
               ? '<span class="warn" title="' + incomplete + ' service(s) cannot boot as declared">'
                 + '&#9650;</span>' : '';
             return '<section class="stack"><header>'
+              + icon(stack.backend)
               + '<h2>' + escapeHTML(stack.name) + stackWarn + '</h2>'
               + '<span class="meta">' + escapeHTML(stack.backend) + ' · '
               + escapeHTML(stack.environment) + '</span>' + badge
@@ -503,7 +520,16 @@ enum Page {
               +   button('apply', 'apply', stack.name, null, 'add')
               +   button('new-stack', '+ stack', null, null, 'add last')
               + '</div></section>';
-          }).join('');
+          };
+
+          $('stacks').innerHTML = used.length > 1
+            ? used.map(b =>
+                '<section class="group"><h3>' + icon(b) + escapeHTML(label(b))
+                + ' <span class="ct">' + stacks.filter(s => s.backend === b).length
+                + '</span></h3>'
+                + stacks.filter(s => s.backend === b).map(drawStack).join('')
+                + '</section>').join('')
+            : stacks.map(drawStack).join('');
           restorePanels(open);
         }
 
