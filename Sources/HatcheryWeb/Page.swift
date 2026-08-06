@@ -179,6 +179,16 @@ enum Page {
           .st-ok { color: var(--ready); }
           .st-failed { color: var(--unreachable); }
           .st-skipped { color: var(--dim); }
+          .state-card { padding: 0.7rem 1rem; }
+          .state-line { display: flex; align-items: center; gap: 0.4rem; }
+          .state-line button { margin-left: auto; }
+          .state-card .checks { margin-top: 0.5rem; font-size: 0.75rem; }
+          .state-card .why { color: var(--dim); }
+          .cmd {
+            margin: 0.4rem 0; padding: 0.45rem 0.6rem; background: var(--bg);
+            border: 1px solid var(--line); border-radius: 4px; font-size: 0.72rem;
+            overflow-x: auto; white-space: pre;
+          }
           .dot { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%;
                  margin-right: 0.4rem; vertical-align: baseline; }
           .dot.ok { background: var(--ready); }
@@ -207,6 +217,7 @@ enum Page {
           </div>
           <div class="sub" id="sub">loading…</div>
           <div class="backends" id="backends"></div>
+          <div id="state"></div>
           <div class="section"><h2 id="stacks-heading">Stacks</h2></div>
           <div id="stacks"></div>
           <div id="log"></div>
@@ -313,6 +324,7 @@ enum Page {
           'new-stack-on': 'Create a stack on this provider',
           setup: 'What this provider needs before hatchery can use it',
           checks: 'Show each prerequisite check and how to fix the ones failing',
+          seal: 'Re-encrypt the backup so it matches the secrets on disk. Only ever adds a backup',
         };
 
         function button(action, label, stack, service, extraClass, backend) {
@@ -366,6 +378,64 @@ enum Page {
           if (!spec) return '<span class="ico"></span>';
           return '<svg class="ico ' + spec[0] + '" viewBox="0 0 64 64" fill="currentColor"'
             + ' aria-hidden="true">' + spec[1] + '</svg>';
+        }
+
+        // The encrypted backup of the state directory. Shown whether or not it is healthy: a
+        // backup nobody looks at is how a minted key spent a day existing on one disk.
+        function renderState(s) {
+          const box = $('state');
+          if (!s || s.configured === false) {
+            box.innerHTML = '<div class="section"><h2>State backup</h2></div>'
+              + '<div class="card state-card">'
+              + '<div class="state-line"><span class="dot pend"></span>'
+              + '<span>not set up — secrets here are stored in plaintext only</span></div>'
+              + '<div class="hint">Set one up, then this panel tracks it:</div>'
+              + '<pre class="cmd">hatchery state init --directory &lt;dir&gt; --remote &lt;owner/name&gt;</pre>'
+              + '<div class="hint">Generating the key stays on the command line on purpose. '
+              + 'It is the one step where clicking past a warning loses everything the archive '
+              + 'holds, and it must be copied to a password manager before anything depends on it.'
+              + '</div></div>';
+            return;
+          }
+          const ok = s.sealed === true;
+          const when = s.sealedAt ? escapeHTML(s.sealedAt) : 'never';
+          let detail = '';
+          if (!ok) {
+            const rows = (s.unsealed || []).map(p =>
+              '<div class="st-failed"><code>' + escapeHTML(p) + '</code>'
+              + ' <span class="why">only on this machine</span></div>').join('')
+              + (s.stale || []).map(p =>
+                '<div class="st-skipped"><code>' + escapeHTML(p) + '</code>'
+                + ' <span class="why">in the backup, gone from disk</span></div>').join('');
+            detail = '<div class="checks">' + rows + '</div>';
+          }
+          box.innerHTML = '<div class="section"><h2>State backup</h2></div>'
+            + '<div class="card state-card">'
+            + '<div class="state-line"><span class="dot ' + (ok ? 'ok' : 'no') + '"></span>'
+            + '<span>' + (ok ? 'every secret is in the encrypted backup'
+                             : escapeHTML(s.summary || 'not fully backed up')) + '</span>'
+            + button('seal', 'seal now') + '</div>'
+            + '<div class="hint"><code>' + escapeHTML(s.root || '') + '</code> · last sealed '
+            + when + '</div>'
+            + detail
+            + '<div class="hint">Committing and pushing the archive is still a git operation on '
+            + 'your own repository.</div></div>';
+        }
+
+        // Not confirmed, unlike the other mutations. Sealing only ever writes a backup of what
+        // is already on disk — there is no state it can destroy, so a dialog would be friction
+        // in front of the one action that is always safe to take.
+        function sealState() {
+          log('sealing…');
+          fetch('/api/state/seal', {method: 'POST', headers, body: '{}'})
+            .then(r => r.json())
+            .then(r => { log(r.message || 'sealed', !r.ok); loadState(); })
+            .catch(e => log(String(e), true));
+        }
+
+        function loadState() {
+          fetch('/api/state').then(r => r.json()).then(renderState)
+            .catch(() => renderState(null));
         }
 
         function renderBackends() {
@@ -454,6 +524,7 @@ enum Page {
             case 'edit-config': editConfig(stack, service); break;
             case 'setup': showSetup(target.dataset.backend || null); break;
             case 'new-stack-on': newStack(target.dataset.backend); break;
+            case 'seal': sealState(); break;
             case 'checks': {
               const b = backends.find(x => x.name === target.dataset.backend);
               if (b) { b.open = !b.open; renderBackends(); if (!b.checks) checkBackend(b.name); }
@@ -1026,6 +1097,7 @@ enum Page {
         }
 
         loadBackends();
+        loadState();
         refresh();
         setInterval(() => { if (!busy && !anyDialogOpen()) refresh(); }, 10000);
         </script>

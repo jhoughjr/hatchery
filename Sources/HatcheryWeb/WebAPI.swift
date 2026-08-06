@@ -325,6 +325,10 @@ public struct HatcheryAPI: Sendable {
             return await createService(request)
         case ("POST", "/api/config/set"):
             return await setConfig(request)
+        case ("GET", "/api/state"):
+            return stateStatus()
+        case ("POST", "/api/state/seal"):
+            return await sealNow()
         case ("POST", "/api/apply"):
             return await runApply(request)
         case ("GET", "/api/logs"):
@@ -595,6 +599,41 @@ public struct HatcheryAPI: Sendable {
         } catch {
             return .failure(500, "\(error)")
         }
+    }
+
+    /// Where the manifest's state directory is, if it is one that seals.
+    ///
+    /// The manifest is commonly symlinked in from `~/.config/hatchery`, so the link is resolved
+    /// before walking up — otherwise the walk climbs out of `~/.config` and finds nothing.
+    private func sealedRoot() -> String? {
+        let real = URL(fileURLWithPath: Paths.expanded(manifestPath()))
+            .resolvingSymlinksInPath().deletingLastPathComponent().path
+        return SealedState.root(containing: real)
+    }
+
+    private func stateStatus() -> WebResponse {
+        guard let root = sealedRoot() else {
+            // Not a sealed directory. Reported as a fact rather than an error: plenty of
+            // directories are not, and the page offers setup instead of a warning.
+            return .json(["sealed": false, "configured": false])
+        }
+        guard let status = try? SealAudit().status(root: root) else {
+            return .failure(500, "could not read \(root)")
+        }
+        return .json(status)
+    }
+
+    private func sealNow() async -> WebResponse {
+        guard let root = sealedRoot() else {
+            return .failure(400, "no sealed state directory for \(manifestPath())")
+        }
+        let message = await sealState(root) ?? "nothing to seal"
+        let after = try? SealAudit().status(root: root)
+        return .json(
+            Wire.ActionResult(
+                ok: after?.sealed ?? false,
+                message: message,
+                detail: after?.summary))
     }
 
     private func runApply(_ request: WebRequest) async -> WebResponse {
