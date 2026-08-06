@@ -172,6 +172,8 @@ enum Wire {
         /// Declared values, with secrets replaced by a fingerprint. Never the value.
         let declared: [String: String]
         let secretKeys: [String]
+        /// Required keys with no value, so the editor can offer a field for each.
+        let missingKeys: [String]
         let issues: [ValidationIssue]
         let source: String
     }
@@ -445,6 +447,10 @@ public struct HatcheryAPI: Sendable {
                 // Redacted before it leaves the process, not in the browser.
                 declared: ConfigValidator.redact(values, contract: contract),
                 secretKeys: contract.secret.sorted(),
+                // Required keys with no value. The editor needs these by name: a key that is
+                // absent has nothing to render a field from, so without this the only way to
+                // supply one is to type its name from memory, one at a time.
+                missingKeys: contract.required.filter { (values[$0] ?? "").isEmpty }.sorted(),
                 issues: ConfigValidator.validate(values, against: contract),
                 source: source))
     }
