@@ -606,6 +606,12 @@ enum Page {
                 +   ' '
                 +   button('config', 'config', stack.name, svc.name)
                 +   ' '
+                // Beside `config` rather than only at the foot of the panel it opens. A service
+                // flagged for missing keys needs the editor, and burying it under twenty rows
+                // of values makes the fix harder to find than the problem.
+                +   button('edit-config', 'edit', stack.name, svc.name,
+                           cfg && !cfg.complete ? 'primary' : '')
+                +   ' '
                 +   button('restart', 'restart', stack.name, svc.name)
                 +   ' '
                 +   button('deploy', 'deploy', stack.name, svc.name)
@@ -1051,22 +1057,38 @@ enum Page {
           if (!res.ok) { log(res.data.error, true); return; }
           const c = res.data;
           const secret = new Set(c.secretKeys || []);
-          const keys = Object.keys(c.declared || {}).sort();
+          const declared = Object.keys(c.declared || {}).sort();
+          // A required key with no value has nothing in `declared` to build a field from, so it
+          // is listed separately and rendered first — those are the ones stopping it booting.
+          const missing = (c.missingKeys || []).filter(k => declared.indexOf(k) < 0);
+          const keys = missing.concat(declared);
 
-          const body = keys.map(k => field('c-' + k, k,
-            secret.has(k) ? '' : c.declared[k],
-            secret.has(k) ? 'secret — leave blank to keep it unchanged' : null)).join('')
+          const body = (missing.length
+              ? '<div class="warn-line">&#9650; ' + missing.length
+                + ' required key(s) missing — fill these in to let it boot</div>' : '')
+            + missing.map(k => field('c-' + k, k, '',
+                secret.has(k) ? 'required, secret — no value set' : 'required — no value set')).join('')
+            + (missing.length && declared.length ? '<div class="steps">already set</div>' : '')
+            + declared.map(k => field('c-' + k, k,
+                secret.has(k) ? '' : c.declared[k],
+                secret.has(k) ? 'secret — leave blank to keep it unchanged' : null)).join('')
             + '<div class="field"><label>Add a key</label>'
             + '<input id="c-new-key" placeholder="KEY" autocomplete="off">'
             + '<input id="c-new-val" placeholder="value" autocomplete="off"></div>';
 
-          const ok = await step('Config for ' + service, keys.length + ' key(s)', body, 'save');
+          const ok = await step('Config for ' + service,
+            missing.length ? missing.length + ' missing of ' + keys.length + ' key(s)'
+                           : keys.length + ' key(s)', body, 'save');
           if (!ok) { log('cancelled'); return; }
 
           const values = {};
+          const wasMissing = new Set(missing);
           keys.forEach(k => {
             const v = $('c-' + k).value;
-            if (secret.has(k)) { if (v) values[k] = v; }
+            // A missing key left blank is still missing. Posting '' would write an empty value,
+            // which dokku rejects outright and which reads as "set" everywhere else.
+            if (wasMissing.has(k)) { if (v) values[k] = v; }
+            else if (secret.has(k)) { if (v) values[k] = v; }
             else if (v !== c.declared[k]) { values[k] = v; }
           });
           const newKey = $('c-new-key').value.trim();
