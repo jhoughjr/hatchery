@@ -325,6 +325,7 @@ enum Page {
           setup: 'What this provider needs before hatchery can use it',
           checks: 'Show each prerequisite check and how to fix the ones failing',
           seal: 'Re-encrypt the backup so it matches the secrets on disk. Only ever adds a backup',
+          verify: 'Actually open the archive and check it against the manifest. Needs the age key',
         };
 
         function button(action, label, stack, service, extraClass, backend) {
@@ -414,7 +415,7 @@ enum Page {
             + '<div class="state-line"><span class="dot ' + (ok ? 'ok' : 'no') + '"></span>'
             + '<span>' + (ok ? 'every secret is in the encrypted backup'
                              : escapeHTML(s.summary || 'not fully backed up')) + '</span>'
-            + button('seal', 'seal now') + '</div>'
+            + button('verify', 'verify') + ' ' + button('seal', 'seal now') + '</div>'
             + '<div class="hint"><code>' + escapeHTML(s.root || '') + '</code> · last sealed '
             + when + '</div>'
             + detail
@@ -430,6 +431,16 @@ enum Page {
           fetch('/api/state/seal', {method: 'POST', headers, body: '{}'})
             .then(r => r.json())
             .then(r => { log(r.message || 'sealed', !r.ok); loadState(); })
+            .catch(e => log(String(e), true));
+        }
+
+        // Decrypts, so it is on demand rather than on every page load. The panel's green tick
+        // means "matches the manifest"; this is the only thing that means "opens".
+        function verifyState() {
+          log('opening the archive…');
+          fetch('/api/state/verify', {method: 'POST', headers, body: '{}'})
+            .then(r => r.json())
+            .then(r => log(r.message || 'verified', !r.ok))
             .catch(e => log(String(e), true));
         }
 
@@ -525,6 +536,7 @@ enum Page {
             case 'setup': showSetup(target.dataset.backend || null); break;
             case 'new-stack-on': newStack(target.dataset.backend); break;
             case 'seal': sealState(); break;
+            case 'verify': verifyState(); break;
             case 'checks': {
               const b = backends.find(x => x.name === target.dataset.backend);
               if (b) { b.open = !b.open; renderBackends(); if (!b.checks) checkBackend(b.name); }

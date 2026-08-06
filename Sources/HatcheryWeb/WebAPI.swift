@@ -234,6 +234,7 @@ public struct HatcheryAPI: Sendable {
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
     private let sealState: @Sendable (String) async -> String?
+    private let verifyState: @Sendable (String) async -> SealVerification
     private let token: String?
 
     public init(
@@ -260,6 +261,9 @@ public struct HatcheryAPI: Sendable {
         sealState: @escaping @Sendable (String) async -> String? = { path in
             await StateMaintenance.seal(after: path)
         },
+        verifyState: @escaping @Sendable (String) async -> SealVerification = { path in
+            await SealVerifier().verify(pathInside: path)
+        },
         token: String? = nil
     ) {
         self.loadManifest = loadManifest
@@ -275,6 +279,7 @@ public struct HatcheryAPI: Sendable {
         self.readConfig = readConfig
         self.writeConfig = writeConfig
         self.sealState = sealState
+        self.verifyState = verifyState
         self.token = token
     }
 
@@ -331,6 +336,8 @@ public struct HatcheryAPI: Sendable {
             return stateStatus()
         case ("POST", "/api/state/seal"):
             return await sealNow()
+        case ("POST", "/api/state/verify"):
+            return await verifyNow()
         case ("POST", "/api/apply"):
             return await runApply(request)
         case ("GET", "/api/logs"):
@@ -640,6 +647,17 @@ public struct HatcheryAPI: Sendable {
                 ok: after?.sealed ?? false,
                 message: message,
                 detail: after?.summary))
+    }
+
+    /// Opens the archive rather than trusting it would open. `stateStatus` deliberately does
+    /// not: it must stay cheap enough to run on every page load, and this decrypts.
+    private func verifyNow() async -> WebResponse {
+        guard let root = sealedRoot() else {
+            return .failure(400, "no sealed state directory for \(manifestPath())")
+        }
+        let result = await verifyState(root)
+        return .json(
+            Wire.ActionResult(ok: !result.isProblem, message: result.summary, detail: root))
     }
 
     private func runApply(_ request: WebRequest) async -> WebResponse {
