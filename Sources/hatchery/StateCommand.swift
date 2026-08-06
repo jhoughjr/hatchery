@@ -7,8 +7,83 @@ struct State: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "state",
         abstract: "Check and re-seal the encrypted backup of a state directory.",
-        subcommands: [Status.self, Seal.self]
+        subcommands: [Init.self, Status.self, Seal.self]
     )
+
+    /// Turns a directory into one that backs itself up.
+    struct Init: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Set up a state directory that encrypts its secrets and backs them up.",
+            discussion: """
+                Generates an age key, writes seal.sh/unseal.sh and the ignore rules that keep \
+                plaintext secrets out of version control, and starts a git repository. With \
+                --remote it creates a private GitHub repository and pushes.
+
+                Safe to re-run. An existing key is reused rather than replaced — a new key would \
+                leave any existing archive unopenable.
+                """
+        )
+
+        @Option(name: .shortAndLong, help: "Directory to set up.")
+        var directory: String
+
+        @Option(name: .long, help: "Where the age private key lives. Defaults to ~/.config/age/<dir>.txt.")
+        var identity: String?
+
+        @Option(name: .long, help: "GitHub repository as owner/name. Created private.")
+        var remote: String?
+
+        @Flag(name: .long, help: "Commit and push. Without it, nothing leaves this machine.")
+        var push: Bool = false
+
+        @Flag(name: .long, help: "Show what would be done without writing anything.")
+        var dryRun: Bool = false
+
+        func run() async throws {
+            let plan = StateInitPlanner.plan(
+                StateInitRequest(directory: directory, identityPath: identity, remote: remote))
+            let initializer = StateInitializer()
+
+            print(plan.directory)
+            print("  key          \(plan.identityPath)\(plan.reusesIdentity ? " (existing, reused)" : " (will be generated)")")
+            if let remote = plan.remote { print("  remote       \(remote) (private)") }
+            for file in plan.files { print("  write        \(file.path)") }
+
+            let checks = await initializer.preflight(plan)
+            for check in checks where check.status != .ok {
+                print("  MISSING      \(check.name): \(check.detail ?? "")")
+                if let remedy = check.remedy { print("               → \(remedy)") }
+            }
+            guard !checks.contains(where: { $0.status == .failed }) else {
+                throw ExitCode(1)
+            }
+
+            if dryRun {
+                print("")
+                print("  dry run; nothing written")
+                return
+            }
+
+            let result = try await initializer.run(plan)
+            print("")
+            if result.generatedIdentity { print("  generated key at \(plan.identityPath)") }
+            for path in result.created { print("  wrote \(path)") }
+            for path in result.preserved { print("  kept  \(path) (already present)") }
+            if result.gitInitialised { print("  git init") }
+            print("  encrypts to \(result.recipient)")
+
+            if push {
+                let published = try await initializer.publish(plan, message: "Set up encrypted infrastructure state")
+                if published.committed { print("  committed") }
+                if published.pushed { print("  pushed to \(plan.remote ?? "origin")") }
+            } else if plan.remote != nil {
+                print("  nothing pushed; re-run with --push")
+            }
+
+            print("")
+            for warning in result.warnings { print("  ! \(warning)") }
+        }
+    }
 
     /// Where the state directory is, given a manifest path.
     static func root(manifest: String) throws -> String {
