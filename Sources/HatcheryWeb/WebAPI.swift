@@ -231,6 +231,7 @@ public struct HatcheryAPI: Sendable {
     private let liveConfig: LiveConfigReader
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
+    private let sealState: @Sendable (String) async -> String?
     private let token: String?
 
     public init(
@@ -252,6 +253,11 @@ public struct HatcheryAPI: Sendable {
         writeConfig: @escaping @Sendable (URL, [String: String]) throws -> Void = { url, config in
             try ConfigSync.encoded(config).write(to: url)
         },
+        // Injected so a test never shells out. A directory with no `.age-recipient` returns
+        // without running anything, which is why the live default is safe here.
+        sealState: @escaping @Sendable (String) async -> String? = { path in
+            await StateMaintenance.seal(after: path)
+        },
         token: String? = nil
     ) {
         self.loadManifest = loadManifest
@@ -266,6 +272,7 @@ public struct HatcheryAPI: Sendable {
         self.liveConfig = liveConfig
         self.readConfig = readConfig
         self.writeConfig = writeConfig
+        self.sealState = sealState
         self.token = token
     }
 
@@ -317,7 +324,7 @@ public struct HatcheryAPI: Sendable {
         case ("POST", "/api/services/new"):
             return await createService(request)
         case ("POST", "/api/config/set"):
-            return setConfig(request)
+            return await setConfig(request)
         case ("POST", "/api/apply"):
             return await runApply(request)
         case ("GET", "/api/logs"):
@@ -545,7 +552,7 @@ public struct HatcheryAPI: Sendable {
         }
     }
 
-    private func setConfig(_ request: WebRequest) -> WebResponse {
+    private func setConfig(_ request: WebRequest) async -> WebResponse {
         guard let body = try? JSONDecoder().decode(Wire.SetConfigBody.self, from: request.body) else {
             return .failure(400, "expected {stack, service, values, confirm}")
         }
@@ -569,9 +576,14 @@ public struct HatcheryAPI: Sendable {
             let url = ConfigSync.configURL(for: service, in: stack, manifestPath: manifestPath())
             let merged = ConfigSync.applying(body.values, to: try readConfig(url))
             try writeConfig(url, merged)
+            // The browser writes the same gitignored file the CLI does, so it re-seals the same
+            // way. A seal problem is appended rather than thrown: the config write succeeded,
+            // and reporting it as a failure would invite someone to write it again.
+            let sealed = await sealState(url.path)
 
             let contract = EnvContract.contract(for: service.kind, backend: stack.backend)
             let missing = (contract?.required ?? []).filter { (merged[$0] ?? "").isEmpty }.sorted()
+            let detail = "set \(body.values.keys.sorted().joined(separator: ", "))"
             return .json(
                 Wire.ActionResult(
                     ok: missing.isEmpty,
@@ -579,7 +591,7 @@ public struct HatcheryAPI: Sendable {
                     message: missing.isEmpty
                         ? "every required key now has a value"
                         : "still needs: \(missing.joined(separator: ", "))",
-                    detail: "set \(body.values.keys.sorted().joined(separator: ", "))"))
+                    detail: sealed.map { "\(detail) · \($0)" } ?? detail))
         } catch {
             return .failure(500, "\(error)")
         }

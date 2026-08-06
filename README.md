@@ -300,6 +300,44 @@ PKCS#1 structure directly — nine DER integers that are exactly a private RSA J
 Not everything is an environment variable. Stripe credentials for the lab live in the database,
 so the origins above cover the config half of the problem and not the whole of it.
 
+### Keeping the backup current
+
+The files holding those secrets cannot be committed, and cannot be gitignored and forgotten
+either. A state directory marked with `.age-recipient` keeps an encrypted copy — `secrets.tar.age`
+— produced by its own `seal.sh`, and that archive is what version control actually stores.
+
+The mechanism was fine and the workflow was not. Sealing was a separate command a person had to
+remember *after* hatchery had already written the file, so a scaffolded stack left a freshly
+minted signing key on exactly one disk, and nothing said so for a day.
+
+So hatchery seals for you. Any command that writes a secret — `stack new`, `service new`,
+`config set`, `config sync`, a `deploy --apply` that rewrites `terraform.tfstate` — re-seals the
+directory afterwards and says that it did. The browser's config editor does the same.
+
+```
+$ hatchery state status
+/Users/you/infra-state
+  last sealed  2026-08-06T12:20:45Z
+  ok           every secret on disk is in the backup
+```
+
+`state status` compares SHA-256 hashes against `secrets.manifest`, so it never decrypts and
+needs no age identity — cheap enough to run on every check. It reports three things: a secret
+that was never sealed, one that changed since it was, and one still in the archive after being
+removed from disk. `hatchery state seal` re-seals by hand when you want it.
+
+Hatchery runs the directory's own `seal.sh` rather than reimplementing it. That script decides
+what counts as a secret and which key it encrypts to; a second implementation drifting from it is
+precisely how a file ends up believed-sealed and absent.
+
+Sealing never fails the command that triggered it. The config write already succeeded, and
+reporting it as a failure would invite someone to write the value again — so a seal problem is
+reported as a warning beside the result.
+
+Committing and pushing the sealed archive is still yours to run. The archive lands in the working
+tree; getting it off the machine is a git operation on your repository, and hatchery does not
+make those on your behalf.
+
 `config audit` checks what each service is *running with* rather than what a file claims:
 
 ```
