@@ -69,6 +69,8 @@ enum Wire {
         let reasons: [String]
         let latencyMs: Int?
         let gitRev: String?
+        /// Whether the declared config would let it boot, and what is missing if not.
+        let config: ConfigStatus?
     }
 
     struct StackView: Encodable {
@@ -283,6 +285,11 @@ public struct HatcheryAPI: Sendable {
             return await runLifecycle(request)
         case ("POST", "/api/deploy"):
             return await runDeploy(request)
+        case ("GET", "/api/hosts"):
+            let manifest = (try? loadManifest()) ?? StackManifest()
+            return .json(
+                HostRegistry.known(saved: manifest.savedHosts, stacks: manifest.stacks)
+                    .map { ["name": $0.name ?? "", "target": $0.target] })
         case ("GET", "/api/backends"):
             return backends()
         case ("GET", "/api/kinds"):
@@ -642,7 +649,9 @@ public struct HatcheryAPI: Sendable {
                         Wire.ServiceView(
                             name: $0.name, kind: $0.kind.rawValue, image: $0.image,
                             domains: $0.domains, state: nil, reasons: [], latencyMs: nil,
-                            gitRev: nil)
+                            gitRev: nil,
+                            config: ConfigCompleteness.check(
+                                service: $0, in: stack, manifestPath: manifestPath()))
                     })
             }
             return .json(views)
@@ -678,7 +687,10 @@ public struct HatcheryAPI: Sendable {
                             name: service.name, kind: service.kind.rawValue, image: service.image,
                             domains: service.domains, state: entry?.state.rawValue,
                             reasons: entry?.reasons ?? [], latencyMs: entry?.latencyMs,
-                            gitRev: entry?.gitRev)
+                            gitRev: entry?.gitRev,
+                            // A local file read, so this costs nothing on a ten-second poll.
+                            config: ConfigCompleteness.check(
+                                service: service, in: stack, manifestPath: manifestPath()))
                     })
             }
             return .json(views)

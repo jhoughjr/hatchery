@@ -136,6 +136,57 @@ The SSH target is the field worth explaining, and the wizard now does: it is how
 reaches the box to create and manage apps, the user must be `dokku` — that account is what turns
 an SSH command into a dokku command — and your key must already be authorized for it.
 
+### Incomplete configuration
+
+A service whose declared config is missing required keys gets a ▲ next to its name, and the
+stack gets one too:
+
+```
+mwlab-2                                    staging  ▲
+  mwserver-staging ▲   responding   62ms
+                       ▲ 9 required keys missing
+```
+
+Deliberately separate from health. That service answers HTTP and reads `responding`, while its
+declaration could not boot if applied — a service can run happily on values its config file no
+longer contains. Health is about what is running; the triangle is about what is declared.
+
+Computed from the declared file rather than the box, so it costs a local read on a ten-second
+poll instead of an SSH round trip per service. `config audit` is the one that asks the box.
+
+### Saved SSH targets
+
+An address is the same thing in six places, and retyping it is how `192.168.0.103` becomes
+`192.168.0.130` in exactly one of them.
+
+```sh
+hatchery host add opi dokku@192.168.0.103
+hatchery stack new lab --backend dokku --host @opi --tofu-dir ~/infra-state/lab
+hatchery host list
+```
+
+The list is saved names, plus targets already in use by a stack, plus **anything roost
+advertises**. roost configures boxes and hatchery configures the stacks on them, so roost is the
+one that knows a machine exists — `~/.roostrc` already declares `ROOST_DOKKU_HOST`, and hatchery
+reads it rather than making you type an address written down two directories away. Nothing had
+to change in roost for that to work. The file is *read*, never sourced: sourcing an rc file to
+learn one variable would run whatever else is in it.
+
+Host telemetry belongs on the same seam and is deliberately not here. roost already ships a
+per-node reporter with launchd and systemd installers; a second set on the same box would be two
+answers to one question. The dokku guide points at roost's installer instead.
+
+### Tearing a stack down
+
+```sh
+hatchery stack rm <name>                        # shows the destroy plan, changes nothing
+hatchery stack rm <name> --yes --confirm <name>  # actually destroys it
+```
+
+The name has to be repeated back, because this is the one action with no undo. The tofu
+directory and the config files are left on disk: they hold the state file and real secrets, and
+forgetting a declaration should not also delete the only record of what was there.
+
 ### Looking at one service
 
 Each service row expands. **logs** reads `dokku logs` (colour codes stripped, lines classified

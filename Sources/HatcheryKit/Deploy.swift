@@ -139,6 +139,14 @@ public struct Deployer: Sendable {
         ["tofu", "plan", "-detailed-exitcode", "-no-color", "-input=false"]
     }
 
+    static func destroyPlanCommand() -> [String] {
+        ["tofu", "plan", "-destroy", "-detailed-exitcode", "-no-color", "-input=false"]
+    }
+
+    static func destroyCommand() -> [String] {
+        ["tofu", "destroy", "-auto-approve", "-no-color", "-input=false"]
+    }
+
     static func applyCommand() -> [String] {
         ["tofu", "apply", "-auto-approve", "-no-color", "-input=false"]
     }
@@ -194,6 +202,26 @@ public struct Deployer: Sendable {
         }
         let result = try await execute(Self.planCommand(), Paths.expanded(binding.directory))
         return PlanOutcome.from(result)
+    }
+
+    /// What destroying would remove, without removing it.
+    public func destroyPlan(in stack: StackSpec) async throws -> PlanSummary {
+        guard let binding = stack.tofu else {
+            throw DeployError.noTofuBinding(stack: stack.name)
+        }
+        let result = try await execute(Self.destroyPlanCommand(), Paths.expanded(binding.directory))
+        return PlanSummary.parse(result.combined)
+    }
+
+    public func tofuDestroy(in stack: StackSpec) async throws -> String {
+        guard let binding = stack.tofu else {
+            throw DeployError.noTofuBinding(stack: stack.name)
+        }
+        let result = try await execute(Self.destroyCommand(), Paths.expanded(binding.directory))
+        guard result.status == 0 else {
+            throw DeployError.applyFailed(message: result.combined)
+        }
+        return result.combined
     }
 
     public func tofuApply(in stack: StackSpec) async throws -> String {

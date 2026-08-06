@@ -131,6 +131,8 @@ enum Page {
             padding: 0.5rem; line-height: 1.4;
           }
           pre.out div { white-space: pre-wrap; }
+          .warn { color: var(--degraded); cursor: help; margin-left: 0.35rem; }
+          .warn-line { color: var(--degraded); font-size: 0.8rem; }
           .l-error { color: var(--unreachable); }
           .l-warning { color: var(--degraded); }
           .l-info { color: var(--dim); }
@@ -141,7 +143,7 @@ enum Page {
           dialog.wide { max-width: 52rem; width: 90vw; }
           .tally { margin: 0.25rem 0 0.75rem; font-size: 0.8rem; }
           .backends { margin-bottom: 1.5rem; }
-          .backends > h2 {
+          .section > h2, .backends > h2 {
             font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;
             color: var(--dim); margin: 0 0 0.5rem; font-weight: 600;
           }
@@ -150,7 +152,12 @@ enum Page {
             background: var(--card); border: 1px solid var(--line);
             border-radius: 8px; margin-bottom: 0.5rem;
           }
-          .bk .nm { font-weight: 600; min-width: 12rem; }
+          .bk .ico { width: 22px; height: 22px; flex: none; }
+          .bk .nm { font-weight: 600; min-width: 11rem; }
+          .ico.self { color: var(--ready); }
+          .ico.ocean { color: #3a7ad9; }
+          .ico.amzn { color: #d98f2a; }
+          .ico.goog { color: #4a9a6a; }
           .bk .rd { font-size: 0.8rem; min-width: 10rem; }
           .bk .ct { color: var(--dim); font-size: 0.8rem; }
           .bk .btns { margin-left: auto; white-space: nowrap; }
@@ -182,6 +189,7 @@ enum Page {
           </div>
           <div class="sub" id="sub">loading…</div>
           <div class="backends" id="backends"></div>
+          <div class="section"><h2 id="stacks-heading">Stacks</h2></div>
           <div id="stacks"></div>
           <div id="log"></div>
         </main>
@@ -273,8 +281,24 @@ enum Page {
         // listener below. An inline onclick would mean a JS string inside an HTML attribute
         // inside a Swift string literal, and getting a quote wrong there is a *parse* error —
         // which kills the whole script, not just the button. That is exactly what happened.
+        // What each button does, said in full. The labels are terse to keep a row readable;
+        // the tooltip is where the consequence goes, especially for the ones that change things.
+        const TIPS = {
+          logs: 'Read the last 200 lines this service logged',
+          config: 'Show what it is running with, secrets redacted, and the contract issues',
+          'edit-config': 'Change config values. Secrets left blank keep their current value',
+          restart: 'Restart this service. Asks you to type its name first',
+          deploy: 'Plan a deploy and show the diff. Applies nothing on its own',
+          apply: 'Apply the pending plan to this stack. Refused for production',
+          'new-service': 'Add a service to this stack: writes its declaration and config',
+          'new-stack': 'Create a stack on a provider, from nothing',
+          'new-stack-on': 'Create a stack on this provider',
+          setup: 'What this provider needs before hatchery can use it',
+        };
+
         function button(action, label, stack, service, extraClass, backend) {
           return '<button data-action="' + action + '"'
+            + (TIPS[action] ? ' title="' + escapeHTML(TIPS[action]) + '"' : '')
             + (stack ? ' data-stack="' + escapeHTML(stack) + '"' : '')
             + (service ? ' data-service="' + escapeHTML(service) + '"' : '')
             + (backend ? ' data-backend="' + escapeHTML(backend) + '"' : '')
@@ -297,6 +321,34 @@ enum Page {
           backends.forEach(b => checkBackend(b.name));
         }
 
+        // hatchery's own glyphs, not vendor logos: a box for a machine you own, a droplet, a
+        // cube, a cloud. Drawn in the same flat geometry as the hatchery mark so the row reads
+        // as one design rather than four pasted brands.
+        const ICONS = {
+          dokku: ['self',
+            '<rect x="10" y="14" width="44" height="12" rx="2"/>'
+            + '<rect x="10" y="30" width="44" height="12" rx="2"/>'
+            + '<circle cx="17" cy="20" r="2.4" fill="var(--bg)"/>'
+            + '<circle cx="17" cy="36" r="2.4" fill="var(--bg)"/>'
+            + '<rect x="16" y="48" width="32" height="3" rx="1.5"/>'],
+          appPlatform: ['ocean',
+            '<path d="M32 6 C44 22 50 30 50 38 A18 18 0 0 1 14 38 C14 30 20 22 32 6 Z"/>'],
+          aws: ['amzn',
+            '<path d="M32 6 L54 18 L54 44 L32 56 L10 44 L10 18 Z" '
+            + 'fill="none" stroke="currentColor" stroke-width="5"/>'
+            + '<path d="M32 24 L42 30 L42 40 L32 46 L22 40 L22 30 Z"/>'],
+          cloudRun: ['goog',
+            '<path d="M20 44 A12 12 0 0 1 21 21 A15 15 0 0 1 48 26 A10 10 0 0 1 46 44 Z"/>'
+            + '<path d="M28 28 L40 34.5 L28 41 Z" fill="var(--bg)"/>'],
+        };
+
+        function icon(name) {
+          const spec = ICONS[name];
+          if (!spec) return '<span class="ico"></span>';
+          return '<svg class="ico ' + spec[0] + '" viewBox="0 0 64 64" fill="currentColor"'
+            + ' aria-hidden="true">' + spec[1] + '</svg>';
+        }
+
         function renderBackends() {
           $('backends').innerHTML = '<h2>Providers</h2>' + backends.map(b => {
             const r = b.readiness;
@@ -306,6 +358,7 @@ enum Page {
                       : r.failing + ' of ' + r.total + ' checks failing');
             const stacks = b.stackCount === 1 ? '1 stack' : b.stackCount + ' stacks';
             return '<div class="bk">'
+              + icon(b.name)
               + '<span class="nm">' + escapeHTML(b.label) + '</span>'
               + '<span class="rd"><span class="dot ' + dot + '"></span>' + escapeHTML(text) + '</span>'
               + '<span class="ct">' + stacks + '</span>'
@@ -388,6 +441,8 @@ enum Page {
         function render(stacks) {
           const open = capturePanels();
           lastStacks = stacks;
+          const heading = $('stacks-heading');
+          if (heading) heading.style.display = stacks.length ? '' : 'none';
           if (!stacks.length) {
             $('stacks').innerHTML = '<div class="empty">' + MARK
               + '<h2>Nothing declared yet</h2>'
@@ -402,11 +457,20 @@ enum Page {
               const reasons = (svc.reasons || []).map(r =>
                 '<div class="reason">' + escapeHTML(r) + '</div>').join('');
               const latency = svc.latencyMs == null ? '' : svc.latencyMs + 'ms';
+              // A triangle, not a state: an incomplete config is a fact about the declaration
+              // rather than about what the service is currently doing. A service can be running
+              // happily on values that its declared config no longer contains.
+              const cfg = svc.config;
+              const warn = (cfg && !cfg.complete)
+                ? '<span class="warn" title="' + escapeHTML(cfg.summary || 'config incomplete')
+                  + '">&#9650;</span>' : '';
+              const warnLine = (cfg && !cfg.complete)
+                ? '<div class="warn-line">&#9650; ' + escapeHTML(cfg.summary || '') + '</div>' : '';
               return '<tr>'
-                + '<td><div class="name">' + escapeHTML(svc.name) + '</div>'
+                + '<td><div class="name">' + escapeHTML(svc.name) + warn + '</div>'
                 +   '<div class="kind">' + escapeHTML(svc.kind) + '</div></td>'
                 + '<td><span class="state ' + escapeHTML(state) + '">' + escapeHTML(state)
-                +   '</span>' + reasons + '</td>'
+                +   '</span>' + reasons + warnLine + '</td>'
                 + '<td class="num">' + latency + '</td>'
                 + '<td class="actions">'
                 +   button('logs', 'logs', stack.name, svc.name)
@@ -423,8 +487,12 @@ enum Page {
                 + '</td></tr>';
             }).join('');
             const badge = stack.isProduction ? '<span class="prod">prod</span>' : '';
+            const incomplete = stack.services.filter(s => s.config && !s.config.complete).length;
+            const stackWarn = incomplete
+              ? '<span class="warn" title="' + incomplete + ' service(s) cannot boot as declared">'
+                + '&#9650;</span>' : '';
             return '<section class="stack"><header>'
-              + '<h2>' + escapeHTML(stack.name) + '</h2>'
+              + '<h2>' + escapeHTML(stack.name) + stackWarn + '</h2>'
               + '<span class="meta">' + escapeHTML(stack.backend) + ' · '
               + escapeHTML(stack.environment) + '</span>' + badge
               + '<span class="meta state ' + escapeHTML(stack.state || '')
@@ -816,6 +884,11 @@ enum Page {
             '<div class="k' + (secret.has(k) ? ' sec' : '') + '">' + escapeHTML(k) + '</div>'
             + '<div class="v">' + escapeHTML(c.declared[k]) + '</div>').join('');
 
+          const missing = (c.issues || []).filter(i => i.severity === 'error');
+          const missingList = missing.length
+            ? '<div class="warn-line">&#9650; ' + missing.length
+              + ' required key(s) missing: ' + escapeHTML(missing.map(i => i.key).join(', '))
+              + '</div>' : '';
           const issues = (c.issues || []).map(i =>
             '<div class="issue ' + i.severity + '">' + escapeHTML(i.severity) + ': '
             + escapeHTML(i.key) + ' — ' + escapeHTML(i.message) + '</div>').join('');
@@ -827,7 +900,7 @@ enum Page {
             + '<dt>source</dt><dd>' + escapeHTML(c.source)
             +   (c.source === 'live' ? ' (what it is running with)' : ' (the file; the box was unreachable)')
             + '</dd></dl>'
-            + '<div class="kv">' + rows + '</div>' + issues
+            + missingList + '<div class="kv">' + rows + '</div>' + issues
             + '<div style="margin-top:0.6rem">'
             + button('edit-config', 'edit', stack, service, 'add') + '</div>';
         }
