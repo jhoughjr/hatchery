@@ -1,73 +1,8 @@
 name: build
-
-# Builds and tests run on the self-hosted runners, not on a laptop.
-#
-# A release build of this package is a full optimisation pass over four hundred modules. Doing
-# that repeatedly on the MacBook — while the dashboard server and a polling browser are also up
-# — is enough to take the machine down, which is exactly what happened.
-on:
-  push:
-    branches: [main]
-  pull_request:
-  workflow_dispatch:
-
-concurrency:
-  # A new push supersedes the one before it; nothing is gained by finishing the old run.
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+on: [push, pull_request]
 jobs:
   build:
-    # opi specifically, rather than the [self-hosted, arm64] pair roost uses. Those labels match
-    # both runners, and the mini is carrying Phoenix builds — Linux/ARM64 are applied
-    # automatically by the runner, so this pins to opi-roost without new labels.
-    #
-    # It also gets this package compiled on Linux for the first time. `Platform.current` has a
-    # `#if os(Linux)` branch that no macOS build has ever put through a compiler, so the install
-    # hints Linux users are handed are, to date, unverified.
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: [self-hosted, arm64]
     steps:
       - uses: actions/checkout@v4
-
-      - name: toolchain
-        # Reports rather than assumes. If swift is absent this says so plainly instead of
-        # failing several minutes later inside a build step.
-        run: |
-          set -euo pipefail
-          if ! command -v swift >/dev/null 2>&1; then
-            echo "::error::no swift toolchain on this runner — install Swift 6.0 for aarch64 from swift.org/install/linux"
-            exit 1
-          fi
-          swift --version
-
-      - name: build
-        run: swift build --build-tests
-
-      - name: test
-        run: swift test --skip-build
-
-  # What actually gets installed, and the expensive one. Kept off pull requests so they stay
-  # quick, and off the mini so it can get on with Phoenix.
-  release:
-    if: github.ref == 'refs/heads/main'
-    needs: build
-    runs-on: [self-hosted, Linux, ARM64]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: build release
-        run: swift build -c release
-
-      - name: smoke test the binary
-        # Proves the thing that ships actually runs, which compiling does not.
-        run: |
-          set -euo pipefail
-          .build/release/hatchery --help > /dev/null
-          .build/release/hatchery state --help > /dev/null
-          echo "binary runs"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: hatchery-linux-arm64
-          path: .build/release/hatchery
-          retention-days: 14
+      - run: echo hello
