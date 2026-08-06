@@ -45,8 +45,7 @@ public enum Onboarding {
                     provides — so there is nothing for hatchery to store or leak.
                     """,
                 on: "here",
-                commands: [
-                    "brew install awscli",
+                commands: InstallHint.commands(for: "awscli") + [
                     "aws configure          # or: aws sso login --profile <name>",
                     "aws configure set region us-east-1",
                 ],
@@ -111,8 +110,7 @@ public enum Onboarding {
                     hatchery to store, and revoking access is done in one place rather than two.
                     """,
                 on: "here",
-                commands: [
-                    "brew install --cask google-cloud-sdk",
+                commands: InstallHint.commands(for: "gcloud") + [
                     "gcloud auth login",
                     "gcloud auth application-default login   # what tofu actually reads",
                     "gcloud config set project <project-id>",

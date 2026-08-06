@@ -60,7 +60,8 @@ public struct Preflight: Sendable {
         var checks = [await tofu()]
 
         let cli = await binary(
-            "aws", arguments: ["--version"], label: "aws cli", remedy: "brew install awscli")
+            "aws", arguments: ["--version"], label: "aws cli",
+            remedy: InstallHint.forTool("awscli"))
         checks.append(cli)
         guard cli.status == .ok else {
             // One cause, one failure: without the CLI the other two cannot be asked.
@@ -101,7 +102,8 @@ public struct Preflight: Sendable {
         checks.append(
             await binary(
                 "doctl", arguments: ["version"], label: "doctl (optional)",
-                remedy: "brew install doctl — only needed to inspect apps outside hatchery"))
+                remedy: InstallHint.forTool("doctl")
+                    + " — only needed to inspect apps outside hatchery"))
         return checks
     }
 
@@ -111,7 +113,7 @@ public struct Preflight: Sendable {
 
         let cli = await binary(
             "gcloud", arguments: ["version"], label: "gcloud",
-            remedy: "brew install --cask google-cloud-sdk")
+            remedy: InstallHint.forTool("gcloud"))
         checks.append(cli)
         guard cli.status == .ok else {
             for name in ["google credentials", "google project"] {
@@ -200,7 +202,8 @@ public struct Preflight: Sendable {
         checks.append(await tofu())
         checks.append(
             await binary(
-                "ssh", arguments: ["-V"], label: "ssh client", remedy: "install an ssh client"))
+                "ssh", arguments: ["-V"], label: "ssh client",
+                remedy: InstallHint.forTool("ssh")))
 
         guard let host, !host.isEmpty else {
             checks.append(
@@ -240,7 +243,7 @@ public struct Preflight: Sendable {
                 return PreflightCheck(
                     name: "tofu installed", status: .failed,
                     detail: result.combined.isEmpty ? "exited \(result.status)" : result.combined,
-                    remedy: "brew install opentofu")
+                    remedy: InstallHint.forTool("opentofu"))
             }
             let version = result.standardOutput
                 .split(separator: "\n").first.map(String.init) ?? "installed"
@@ -249,7 +252,8 @@ public struct Preflight: Sendable {
             return PreflightCheck(
                 name: "tofu installed", status: .failed,
                 detail: "not found on PATH",
-                remedy: "brew install opentofu — hatchery drives tofu rather than the box directly")
+                remedy: InstallHint.forTool("opentofu")
+                    + " — hatchery drives tofu rather than the box directly")
         }
     }
 
