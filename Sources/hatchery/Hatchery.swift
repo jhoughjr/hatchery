@@ -10,7 +10,7 @@ struct Hatchery: AsyncParsableCommand {
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
             Config.self, Deploy.self, Doctor.self, Host.self, Serve.self, Service.self,
-            Setup.self, Stack.self, Status.self,
+            Setup.self, Stack.self, State.self, Status.self,
             Up.self, Down.self, Restart.self,
         ]
     )
@@ -170,6 +170,10 @@ struct Deploy: AsyncParsableCommand {
 
         if let applied = result.applied {
             print(applied)
+            // An apply rewrites terraform.tfstate, which carries every value the provider has
+            // seen in cleartext. It is the single most important file in the directory to have
+            // a backup of, and the one most certain to have just changed.
+            if let line = await StateMaintenance.seal(after: manifest) { print("  \(line)") }
         } else if result.outcome.verdict == .changes {
             print("  nothing applied; re-run with --apply --yes, or apply from \(spec.tofu?.directory ?? "the tofu directory")")
         }
@@ -574,6 +578,10 @@ struct Service: AsyncParsableCommand {
             try result.manifest.encoded().write(to: URL(fileURLWithPath: manifest))
             print("  manifest updated")
 
+            // Scaffolding mints secrets — a signing key among them. This is exactly the write
+            // that went unsealed before, so it seals before anything else can go wrong.
+            if let line = await StateMaintenance.seal(after: manifest) { print("  \(line)") }
+
             let unresolved = result.unresolved
             if !unresolved.isEmpty {
                 print("")
@@ -765,6 +773,9 @@ struct Config: ParsableCommand {
                     print("  still needs: \(missing.joined(separator: ", "))")
                 }
             }
+
+            // The file just written is gitignored, so the encrypted bundle is the only copy.
+            if let line = await StateMaintenance.seal(after: url.path) { print("  \(line)") }
         }
     }
 
@@ -807,6 +818,7 @@ struct Config: ParsableCommand {
 
             let reader = LiveConfigReader()
             var failed = false
+            var wrote = false
 
             for service in services {
                 do {
@@ -829,12 +841,17 @@ struct Config: ParsableCommand {
                         try ConfigSync.encode(ConfigSync.merged(live: live, declared: declared))
                             .write(to: url, options: .atomic)
                         print("    wrote \(url.lastPathComponent)")
+                        wrote = true
                     }
                 } catch {
                     failed = true
                     print("\(service.name): could not read live config: \(error)")
                 }
             }
+
+            // Once for the whole run, not once per service — sealing is a whole-directory
+            // operation, and doing it per service would re-tar everything each time.
+            if wrote, let line = await StateMaintenance.seal(after: manifest) { print(line) }
 
             if failed { throw ExitCode.failure }
         }
@@ -1029,6 +1046,9 @@ struct Stack: ParsableCommand {
             try created.manifest.encoded().write(to: URL(fileURLWithPath: created.manifestPath))
             print("  wrote \(created.manifestPath)")
             print("  tofu init: ok")
+            if let line = await StateMaintenance.seal(after: created.manifestPath) {
+                print("  \(line)")
+            }
             print("")
             print("  next: hatchery service new \(name) <service> --kind <kind> --domain <d> --image <ref>")
         }
@@ -1092,6 +1112,9 @@ struct Stack: ParsableCommand {
                 .write(to: URL(fileURLWithPath: path))
             print("  removed '\(spec.name)' from \(path)")
             print("  left in place: \(spec.tofu?.directory ?? "the tofu directory") (state and config)")
+            // A destroy empties tfstate. Sealing keeps the backup matching what is on disk, so
+            // the next status call does not read a torn-down stack as unsealed drift.
+            if let line = await StateMaintenance.seal(after: path) { print("  \(line)") }
         }
     }
 
