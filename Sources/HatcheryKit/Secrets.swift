@@ -117,6 +117,43 @@ public struct SecretMinter: Sendable {
     /// Converts a PKCS#1 RSA private key into a private JWK.
     ///
     /// `RSAPrivateKey` is a DER `SEQUENCE` of nine `INTEGER`s — version, n, e, d, p, q, dp, dq,
+    /// The elements of a DER SEQUENCE, with their tags.
+    static func derElements(of der: Data) throws -> [(tag: UInt8, bytes: Data)] {
+        var out: [(tag: UInt8, bytes: Data)] = []
+        var index = der.startIndex
+        guard let outer = try Self.readTag(der, &index), outer.tag == 0x30 else {
+            throw SecretError.malformedKeyMaterial(reason: "expected a DER SEQUENCE")
+        }
+        let end = min(index.advanced(by: outer.length), der.endIndex)
+        while index < end {
+            guard let element = try Self.readTag(der, &index) else { break }
+            let stop = min(index.advanced(by: element.length), der.endIndex)
+            out.append((element.tag, der[index..<stop]))
+            index = stop
+        }
+        return out
+    }
+
+    /// The nine PKCS#1 integers, whichever container `openssl` wrapped them in.
+    ///
+    /// macOS ships LibreSSL, whose `genrsa` writes PKCS#1 — the nine integers directly. Ubuntu
+    /// ships OpenSSL 3, whose `genrsa` writes PKCS#8: the same structure sealed inside an OCTET
+    /// STRING behind a version and an algorithm identifier. Reading only the first shape meant
+    /// minting a signing key failed outright on Linux, with "found 3" as the only clue.
+    ///
+    /// Detected by structure rather than by platform, because the format is a property of the
+    /// openssl that answered, not of the OS it answered on.
+    static func privateKeyIntegers(der: Data) throws -> [Data] {
+        let top = try Self.derElements(of: der)
+
+        // PKCS#8: version, AlgorithmIdentifier, OCTET STRING carrying the PKCS#1 key. Copied
+        // into fresh Data so the nested parse starts from a zero-based index.
+        if top.count == 3, top[2].tag == 0x04 {
+            return try Self.derElements(of: Data(top[2].bytes)).map(\.bytes)
+        }
+        return top.map(\.bytes)
+    }
+
     /// qi — which is exactly the field set a private RSA JWK carries, so the conversion is a
     /// walk over the sequence rather than a crypto operation.
     static func rsaJWK(pem: String, kid: String) throws -> [String: String] {
@@ -127,18 +164,7 @@ public struct SecretMinter: Sendable {
             throw SecretError.malformedKeyMaterial(reason: "the PEM body was not base64")
         }
 
-        var integers: [Data] = []
-        var index = der.startIndex
-        guard let outer = try Self.readTag(der, &index), outer.tag == 0x30 else {
-            throw SecretError.malformedKeyMaterial(reason: "expected a DER SEQUENCE")
-        }
-        let end = min(index.advanced(by: outer.length), der.endIndex)
-        while index < end {
-            guard let element = try Self.readTag(der, &index) else { break }
-            let stop = min(index.advanced(by: element.length), der.endIndex)
-            integers.append(der[index..<stop])
-            index = stop
-        }
+        let integers = try Self.privateKeyIntegers(der: der)
 
         // version, n, e, d, p, q, dp, dq, qi
         guard integers.count >= 9 else {
