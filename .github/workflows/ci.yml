@@ -58,17 +58,44 @@ jobs:
     # manual runs only — PRs stay on the fast debug+test cycle.
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Linux, ARM64]
+    # The repo default is read-only; recreating the rolling release needs contents write.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
       - name: build release
         run: swift build -c release --scratch-path "$HOME/.hatchery-ci-scratch"
 
-      - name: collect binary
-        # upload-artifact globs relative to the workspace, and the scratch path is outside it.
-        run: cp "$HOME/.hatchery-ci-scratch/release/hatchery" hatchery-linux-arm64
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: hatchery-linux-arm64-${{ github.sha }}
-          path: hatchery-linux-arm64
+      - name: publish
+        # A Release asset, not an Actions artifact: this account's Actions storage refuses
+        # uploads ("quota has been hit" while storing zero bytes — see the support ticket
+        # draft), and Release assets don't touch Actions storage. One rolling prerelease,
+        # deleted and recreated per main push, so its tag always points at the commit that
+        # built the asset. Plain curl against the REST API because the runner host has no gh.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for tool in curl python3; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::no $tool on this runner"
+              exit 1
+            fi
+          done
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          auth="Authorization: Bearer ${GITHUB_TOKEN}"
+          pick_id() { python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
+          old=$(curl -sf -H "$auth" "$api/releases/tags/rolling" 2>/dev/null | pick_id 2>/dev/null || true)
+          if [ -n "$old" ]; then
+            curl -sf -X DELETE -H "$auth" "$api/releases/$old"
+            curl -sf -X DELETE -H "$auth" "$api/git/refs/tags/rolling" || true
+          fi
+          rid=$(curl -sf -X POST -H "$auth" "$api/releases" \
+            -d "{\"tag_name\":\"rolling\",\"target_commitish\":\"${GITHUB_SHA}\",\"name\":\"rolling — latest main build\",\"prerelease\":true}" \
+            | pick_id)
+          cp "$HOME/.hatchery-ci-scratch/release/hatchery" hatchery-linux-arm64
+          curl -sf -X POST -H "$auth" -H "Content-Type: application/octet-stream" \
+            --data-binary @hatchery-linux-arm64 \
+            "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${rid}/assets?name=hatchery-linux-arm64" >/dev/null
+          echo "published hatchery-linux-arm64 as the rolling release for ${GITHUB_SHA}"
