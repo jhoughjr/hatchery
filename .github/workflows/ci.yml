@@ -6,37 +6,69 @@ name: build
 # that repeatedly on the MacBook — while the dashboard server and a polling browser are also up
 # — is enough to take the machine down, which is exactly what happened.
 #
-# NOTE: the runners are registered per repository. roost has two and Phoenix-Electron has two;
-# hatchery has none, so this will queue until one is registered to this repo. Registration is at
-# Settings → Actions → Runners.
-on: [push, pull_request, workflow_dispatch]
+# Pushes are built on main only: a PR already gets a pull_request run for every commit, and a
+# push run on top of it doubled the load on the one runner this repo has (opi-hatchery).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# One live run per ref. Superseded PR runs are cancelled — a force-push shouldn't leave the
+# runner finishing a build nobody can merge — but main runs are never cancelled, so every
+# main commit keeps its release artifact.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     # Pinned to the Linux runner rather than the [self-hosted, arm64] pair roost uses, so this
     # lands on opi and leaves the mini to Phoenix. Linux and ARM64 are applied automatically by
     # the runner, so no new labels are needed.
-    #
-    # It also gets this package compiled on Linux for the first time. `Platform.current` has a
-    # `#if os(Linux)` branch that no macOS build has ever put through a compiler, so the install
-    # hints Linux users are handed are, to date, unverified.
     runs-on: [self-hosted, Linux, ARM64]
     steps:
       - uses: actions/checkout@v4
 
       - name: toolchain
         # Reports rather than assumes. If swift is absent this says so in one line instead of
-        # failing several minutes later inside a build step.
+        # failing several minutes later inside a build step. The version is pinned by
+        # .swift-version at the repo root — swiftly's shim on the runner selects it, and errors
+        # if that toolchain isn't installed, so bumping the pin means `swiftly install <ver>`
+        # on the opi first.
         run: |
           set -euo pipefail
           if ! command -v swift >/dev/null 2>&1; then
-            echo "::error::no swift toolchain on this runner — install Swift 6.0 for aarch64 from swift.org/install/linux"
+            echo "::error::no swift toolchain on this runner — install with swiftly from swift.org/install/linux"
             exit 1
           fi
           swift --version
 
+      # The scratch path lives outside the workspace because checkout cleans untracked files on
+      # every run; keeping build state across runs is what makes a warm build take seconds.
       - name: build
-        run: swift build --build-tests
+        run: swift build --build-tests --scratch-path "$HOME/.hatchery-ci-scratch"
 
       - name: test
-        run: swift test --skip-build
+        run: swift test --skip-build --scratch-path "$HOME/.hatchery-ci-scratch"
+
+  release:
+    # The optimisation pass the debug job never exercises, and the artifact that is the point
+    # of this package: a Linux arm64 `hatchery` binary, ready for the opi or a Pi. Main and
+    # manual runs only — PRs stay on the fast debug+test cycle.
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build release
+        run: swift build -c release --scratch-path "$HOME/.hatchery-ci-scratch"
+
+      - name: collect binary
+        # upload-artifact globs relative to the workspace, and the scratch path is outside it.
+        run: cp "$HOME/.hatchery-ci-scratch/release/hatchery" hatchery-linux-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hatchery-linux-arm64-${{ github.sha }}
+          path: hatchery-linux-arm64
