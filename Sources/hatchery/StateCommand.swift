@@ -7,8 +7,44 @@ struct State: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "state",
         abstract: "Check and re-seal the encrypted backup of a state directory.",
-        subcommands: [Init.self, Status.self, Seal.self]
+        subcommands: [Init.self, Status.self, Seal.self, Verify.self]
     )
+
+    /// Opens the archive, rather than trusting that it would open.
+    struct Verify: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Decrypt the backup and check it against the manifest.",
+            discussion: """
+                `state status` compares what is on disk against secrets.manifest and never opens \
+                the archive, so a corrupt or unopenable secrets.tar.age passes it. This opens it.
+
+                Needs the age identity, which is the point: a backup that cannot be opened on \
+                this machine is one you find out about now rather than during a restore.
+                """
+        )
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        func run() async throws {
+            let root = try State.root(manifest: manifest)
+            let result = await SealVerifier().verify(pathInside: root)
+
+            print(root)
+            switch result {
+            case .verified(let files):
+                print("  ok           \(result.summary)")
+                _ = files
+            case .mismatch(let missing, let differing):
+                print("  MISMATCH     \(result.summary)")
+                for path in missing { print("    missing    \(path)") }
+                for path in differing { print("    differs    \(path)") }
+            case .unopenable, .noIdentity, .noArchive, .notSealed:
+                print("  \(result.isProblem ? "FAILED" : "--")         \(result.summary)")
+            }
+            if result.isProblem { throw ExitCode(1) }
+        }
+    }
 
     /// Turns a directory into one that backs itself up.
     struct Init: AsyncParsableCommand {
@@ -160,6 +196,12 @@ struct State: ParsableCommand {
                     print("warning: still unsealed after sealing: \(after.unsealed.joined(separator: ", "))")
                     throw ExitCode(1)
                 }
+                // Opening what was just written is the only thing that makes the archive a
+                // backup rather than a belief. Cheap, and the one moment it is certain to be
+                // openable if it ever will be.
+                let verified = await SealVerifier().verify(pathInside: root)
+                print("  \(verified.isProblem ? "warning: " : "")\(verified.summary)")
+                if case .unopenable = verified { throw ExitCode(1) }
             case .failed, .noScript:
                 throw ExitCode(1)
             case .notSealed:
