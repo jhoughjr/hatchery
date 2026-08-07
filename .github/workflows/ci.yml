@@ -1,7 +1,42 @@
 name: build
-on: [push, pull_request]
+
+# Builds and tests run on a self-hosted runner, not on a laptop.
+#
+# A release build of this package is a full optimisation pass over four hundred modules. Doing
+# that repeatedly on the MacBook — while the dashboard server and a polling browser are also up
+# — is enough to take the machine down, which is exactly what happened.
+#
+# NOTE: the runners are registered per repository. roost has two and Phoenix-Electron has two;
+# hatchery has none, so this will queue until one is registered to this repo. Registration is at
+# Settings → Actions → Runners.
+on: [push, pull_request, workflow_dispatch]
+
 jobs:
-  probe:
-    runs-on: ubuntu-latest
+  build:
+    # Pinned to the Linux runner rather than the [self-hosted, arm64] pair roost uses, so this
+    # lands on opi and leaves the mini to Phoenix. Linux and ARM64 are applied automatically by
+    # the runner, so no new labels are needed.
+    #
+    # It also gets this package compiled on Linux for the first time. `Platform.current` has a
+    # `#if os(Linux)` branch that no macOS build has ever put through a compiler, so the install
+    # hints Linux users are handed are, to date, unverified.
+    runs-on: [self-hosted, Linux, ARM64]
     steps:
-      - run: echo hosted-runner-reached
+      - uses: actions/checkout@v4
+
+      - name: toolchain
+        # Reports rather than assumes. If swift is absent this says so in one line instead of
+        # failing several minutes later inside a build step.
+        run: |
+          set -euo pipefail
+          if ! command -v swift >/dev/null 2>&1; then
+            echo "::error::no swift toolchain on this runner — install Swift 6.0 for aarch64 from swift.org/install/linux"
+            exit 1
+          fi
+          swift --version
+
+      - name: build
+        run: swift build --build-tests
+
+      - name: test
+        run: swift test --skip-build
