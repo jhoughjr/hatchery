@@ -965,7 +965,7 @@ struct Config: ParsableCommand {
 struct Stack: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Work with declared stacks.",
-        subcommands: [New.self, List.self, Destroy.self]
+        subcommands: [New.self, Clone.self, List.self, Destroy.self]
     )
 
     struct New: AsyncParsableCommand {
