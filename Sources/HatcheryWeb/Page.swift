@@ -326,6 +326,7 @@ enum Page {
           restart: 'Restart this service. Asks you to type its name first',
           deploy: 'Plan a deploy and show the diff. Applies nothing on its own',
           apply: 'Apply the pending plan to this stack. Refused for production',
+          clone: 'Plan a copy of this stack into another environment, then create it',
           'new-service': 'Add a service to this stack: writes its declaration and config',
           'new-stack': 'Create a stack on a provider, from nothing',
           'new-stack-on': 'Create a stack on this provider',
@@ -537,6 +538,7 @@ enum Page {
             case 'new-service': newService(stack); break;
             case 'new-stack': newStack(); break;
             case 'apply': applyStack(stack); break;
+            case 'clone': cloneStack(stack); break;
             case 'logs': showLogs(stack, service); break;
             case 'config': showConfig(stack, service); break;
             case 'edit-config': editConfig(stack, service); break;
@@ -655,6 +657,7 @@ enum Page {
               + '</header><table>' + rows + '</table>'
               + '<div class="stack-actions">'
               +   button('new-service', '+ service', stack.name, null, 'add')
+              +   button('clone', 'clone', stack.name, null, 'add')
               +   button('apply', 'apply', stack.name, null, 'add')
               +   button('new-stack', '+ stack', null, null, 'add last')
               + '</div></section>';
@@ -979,6 +982,94 @@ enum Page {
           log(res.data.message || res.data.error, !res.ok);
           if (res.data.detail) log(res.data.detail, !res.ok);
           refresh();
+        }
+
+        // The browser's `stack clone`: plan first, showing what each key would do and where
+        // the config was read from, and only create once the plan has been seen. Values of
+        // secret keys never arrive here — the server sends names and dispositions.
+        async function cloneStack(source) {
+          if (!(await ensureMeta())) return;
+          // staging first, because that is where clones go. The CLI defaults the same way.
+          const envs = [...meta.environments];
+          const at = envs.indexOf('staging');
+          if (at > 0) { envs.splice(at, 1); envs.unshift('staging'); }
+
+          const ok = await step('Clone ' + source, 'Step 1 of 2 — what and where',
+              field('c-target', 'Name', source + '-2', 'What the copy will be called.')
+            + select('c-env', 'Environment', envs,
+                     'Where the copy is headed. Values naming ' + source + "'s environment "
+                     + 'are rewritten to match.')
+            + field('c-dir', 'Tofu directory', '~/infra-state/',
+                    'Where the tofu configuration and config files for the copy are written. '
+                    + 'Must be empty or not exist.')
+            + field('c-port', 'Container port', '8080',
+                    "The source's is not recorded in the manifest; say what it used.")
+            + field('c-network', 'Docker network', '',
+                    'When the source used one. Blank for none.'),
+            'plan');
+          if (!ok) { log('cancelled'); return; }
+
+          const target = $('c-target').value.trim();
+          const env = $('c-env').value;
+          const dir = $('c-dir').value.trim();
+          const port = parseInt($('c-port').value, 10) || 8080;
+          const network = $('c-network').value.trim() || null;
+
+          busy = true;
+          const plan = await send('/api/stack/clone/plan', {source, target, environment: env});
+          busy = false;
+          if (!plan.ok) { log(plan.data.error || 'plan failed', true); return; }
+
+          const p = plan.data;
+          const cls = {rewrite: 'd-change', mint: 'd-add', needs: 'err', skip: 'hint'};
+          const html = p.services.map(s =>
+            '<div class="d-header">' + escapeHTML(s.name) + '  [' + escapeHTML(s.kind)
+            + ']  from ' + escapeHTML(s.origin) + '</div>'
+            + (s.domains.length
+               ? '<div class="hint">domains  ' + escapeHTML(s.domains.join(', ')) + '</div>'
+               : '')
+            + s.keys.map(k => {
+                const label = (k.action === 'needs' ? 'NEEDS' : k.action).padEnd(7);
+                let line = label + '  ' + k.key;
+                if (k.action === 'carry') {
+                  line += k.secret ? '  (secret, hidden)' : (k.value ? '  ' + k.value : '');
+                }
+                if (k.action === 'rewrite' && k.from) {
+                  line += '\\n         ' + k.from + '\\n      →  ' + k.to;
+                }
+                if (k.detail) line += '  — ' + k.detail;
+                return '<div class="' + (cls[k.action] || '') + '">'
+                  + escapeHTML(line) + '</div>';
+              }).join('')
+            + '<div>&nbsp;</div>').join('');
+
+          const create = await step('Clone plan — ' + source + ' → ' + target,
+            p.carried + ' key(s) resolved, ' + p.unresolved + ' still need a person',
+            '<pre class="out">' + html + '</pre>'
+            + '<div class="hint" style="margin-top:0.5rem">Create writes the new stack into '
+            + escapeHTML(dir) + ' and runs tofu init. Nothing touches '
+            + escapeHTML(source) + '.</div>',
+            'create');
+          if (!create) { log('plan only; nothing written'); return; }
+
+          busy = true;
+          const res = await send('/api/stack/clone',
+            {source, target, environment: env, tofuDir: dir, port, network, confirm: target});
+          busy = false;
+          log(res.data.message || res.data.error, !res.ok);
+          if (!res.ok) return;
+
+          (res.data.services || []).forEach(s =>
+            log('  ' + s.name + ': ' + s.carried + ' value(s) carried, '
+                + (s.missing || []).length + ' still needed'));
+          if (res.data.detail) log('  ' + res.data.detail);
+          await refresh();
+
+          // The keys that point at something only the source's environment has, asked for
+          // service by service — the same closing step `service new` uses.
+          for (const s of (res.data.services || [])) {
+            if ((s.missing || []).length) await fillSecrets(target, s.name, s.missing);
+          }
         }
 
         // The half `doctor` cannot do for you: getting dokku onto a box in the first place.

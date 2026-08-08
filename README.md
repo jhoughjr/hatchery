@@ -37,6 +37,12 @@ ever copied. Optional keys the source sets ride along; unset ones aren't mention
 scaffolds the services, layers the carried values on, and prints the `config set` commands for
 what still needs a person.
 
+The dashboard has the same two steps behind each stack's **clone** button: the plan renders
+with every key's fate before anything is written, and creating walks through the same
+bootstrap, scaffold and layering the CLI runs — then asks for the keys only a person can
+supply, exactly as `service new` does. Secret values never reach the browser; the plan shows
+their names and what will happen to them.
+
 ### History and alerts
 
 `hatchery serve` polls on its own clock (`--watch-interval`, default 30s), so watching does
