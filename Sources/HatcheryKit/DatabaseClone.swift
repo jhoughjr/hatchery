@@ -121,6 +121,14 @@ public enum DatabaseClonePlanner {
         // a managed cluster, another box — that hatchery cannot `enter` to run psql in.
         guard !host.contains("."), !host.contains("/"), !host.contains(":") else { return nil }
 
+        // The database server is per-environment by name — mwstack-pg-dev is the dev server —
+        // so a clone headed for another environment targets that environment's server, the
+        // same substitution every other value gets. A server that does not exist yet fails at
+        // provision time with the reason, which is better than quietly parking a staging
+        // stack's data on the dev server.
+        let serverApp =
+            StackCloner.rewrite(host, from: source, to: target, environment: environment) ?? host
+
         let appComponents = Self.components(of: sourceConfig["DATABASE_APP_URL"] ?? "")
         let sourceApp = appComponents?.user ?? sourceConfig["DATABASE_APP_USER"] ?? ""
 
@@ -147,7 +155,7 @@ public enum DatabaseClonePlanner {
         }
 
         return DatabaseClonePlan(
-            serverApp: host,
+            serverApp: serverApp,
             port: port,
             scheme: url?.scheme ?? "postgresql",
             database: derived(sourceDB, source: source, target: target, environment: environment),
