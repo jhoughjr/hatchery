@@ -103,6 +103,19 @@ enum Wire {
         let detail: String?
     }
 
+    /// One health transition, ready to render: the timestamp is already a string and the
+    /// sentence already composed, so the page never re-derives either.
+    struct EventView: Encodable {
+        let at: String
+        let stack: String
+        let service: String
+        let from: String
+        let to: String
+        let worsened: Bool
+        let improved: Bool
+        let line: String
+    }
+
     struct NewStackBody: Decodable {
         let name: String
         let host: String
@@ -235,6 +248,7 @@ public struct HatcheryAPI: Sendable {
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
     private let sealState: @Sendable (String) async -> String?
     private let verifyState: @Sendable (String) async -> SealVerification
+    private let history: @Sendable (Int) -> [HealthTransition]
     private let token: String?
 
     public init(
@@ -264,6 +278,9 @@ public struct HatcheryAPI: Sendable {
         verifyState: @escaping @Sendable (String) async -> SealVerification = { path in
             await SealVerifier().verify(pathInside: path)
         },
+        // The default serves an empty history rather than failing, so an API built without
+        // a watcher (tests, one-shot tools) still answers the route.
+        history: @escaping @Sendable (Int) -> [HealthTransition] = { _ in [] },
         token: String? = nil
     ) {
         self.loadManifest = loadManifest
@@ -280,6 +297,7 @@ public struct HatcheryAPI: Sendable {
         self.writeConfig = writeConfig
         self.sealState = sealState
         self.verifyState = verifyState
+        self.history = history
         self.token = token
     }
 
@@ -350,6 +368,8 @@ public struct HatcheryAPI: Sendable {
         case ("GET", "/api/preflight"):
             let backend = Backend(rawValue: request.query["backend"] ?? "") ?? .dokku
             return .json(await Preflight().run(backend: backend, host: request.query["host"]))
+        case ("GET", "/api/history"):
+            return recentEvents(request)
         default:
             return .failure(404, "no route for \(request.method) \(request.path)")
         }
@@ -772,6 +792,24 @@ public struct HatcheryAPI: Sendable {
         } catch {
             return .failure(500, "\(error)")
         }
+    }
+
+    private func recentEvents(_ request: WebRequest) -> WebResponse {
+        // Capped because the page shows a sidebar's worth; the file itself is the archive.
+        let limit = min(max(request.query["limit"].flatMap { Int($0) } ?? 100, 1), 500)
+        let formatter = ISO8601DateFormatter()
+        return .json(
+            history(limit).map { transition in
+                Wire.EventView(
+                    at: formatter.string(from: transition.at),
+                    stack: transition.stack,
+                    service: transition.service,
+                    from: transition.from.rawValue,
+                    to: transition.to.rawValue,
+                    worsened: transition.worsened,
+                    improved: transition.improved,
+                    line: transition.line)
+            })
     }
 
     private func runLifecycle(_ request: WebRequest) async -> WebResponse {

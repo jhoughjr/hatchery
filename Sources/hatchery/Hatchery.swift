@@ -408,6 +408,15 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .long, help: "Require this token on every API request. Required to bind off-host.")
     var token: String?
 
+    @Option(name: .long, help: "Seconds between server-side health polls. 0 turns the watcher off.")
+    var watchInterval: Int = 30
+
+    @Option(name: .long, help: "Where transitions are appended. Defaults to <manifest>.history.jsonl beside the manifest.")
+    var history: String?
+
+    @Option(name: .long, help: "POST worsening transitions to this URL as JSON.")
+    var alertWebhook: String?
+
     func run() async throws {
         // Resolved once, at boot: the server should keep reading the same file it started with
         // rather than follow the working directory somewhere else mid-session.
@@ -438,9 +447,48 @@ struct Serve: AsyncParsableCommand {
             try manifest.encoded().write(to: URL(fileURLWithPath: path))
         }
 
+        // The history sidecar takes the manifest's name so several manifests on one machine
+        // keep separate records: hatchery.json → hatchery.history.jsonl.
+        let historyPath = history
+            ?? URL(fileURLWithPath: resolved).deletingPathExtension()
+                .appendingPathExtension("history.jsonl").path
+        let transitionLog = TransitionLog(path: historyPath)
+
+        var alert: HealthWatcher.AlertSink?
+        if let alertWebhook {
+            guard let url = URL(string: alertWebhook), url.scheme == "http" || url.scheme == "https" else {
+                throw ValidationError("--alert-webhook must be an http(s) URL")
+            }
+            alert = AlertWebhook.sink(url: url)
+        }
+
+        let reporter = StatusReporter()
         let api = HatcheryAPI(
-            loadManifest: load, saveManifest: save, manifestPath: { resolved }, token: token)
+            loadManifest: load, saveManifest: save, manifestPath: { resolved },
+            reporter: reporter,
+            history: { transitionLog.recent(limit: $0) },
+            token: token)
         let server = try WebServer(api: api, host: bind, port: port, hasToken: token != nil)
+
+        if watchInterval > 0 {
+            let watcher = HealthWatcher(
+                probe: { await reporter.status(of: (try? load()) ?? StackManifest()) },
+                log: transitionLog,
+                alert: alert)
+            let interval = watchInterval
+            Task {
+                // The server process narrates its own record: each transition is one line on
+                // the console this command already owns, timestamped by the entry itself.
+                let clock = DateFormatter()
+                clock.dateFormat = "HH:mm:ss"
+                while !Task.isCancelled {
+                    for change in await watcher.poll() {
+                        print("  \(clock.string(from: change.at)) \(change.line)")
+                    }
+                    try? await Task.sleep(for: .seconds(interval))
+                }
+            }
+        }
 
         print("hatchery serving http://\(bind):\(port)")
         if BindAddress.isLoopback(bind) {
@@ -454,6 +502,12 @@ struct Serve: AsyncParsableCommand {
         } else {
             print("  no manifest yet — open the page to create your first stack")
             print("  one will be written to \(resolved)")
+        }
+        if watchInterval > 0 {
+            print("  watching every \(watchInterval)s — history: \(historyPath)")
+            if alert != nil { print("  alerting worsening transitions to \(alertWebhook ?? "")") }
+        } else {
+            print("  watcher off — no history or alerts while --watch-interval 0")
         }
         try await server.run()
     }

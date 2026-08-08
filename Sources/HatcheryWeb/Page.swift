@@ -142,6 +142,12 @@ enum Page {
           .d-header { color: var(--fg); font-weight: 600; }
           dialog.wide { max-width: 52rem; width: 90vw; }
           .tally { margin: 0.25rem 0 0.75rem; font-size: 0.8rem; }
+          .events .ev {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.75rem; padding: 0.15rem 0; color: var(--dim);
+          }
+          .events .ev.worse { color: var(--degraded); }
+          .events .ev.better { color: var(--ready, var(--fg)); }
           .backends { margin-bottom: 1.5rem; }
           .section > h2, .backends > h2 {
             font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;
@@ -220,6 +226,7 @@ enum Page {
           <div id="state"></div>
           <div class="section"><h2 id="stacks-heading">Stacks</h2></div>
           <div id="stacks"></div>
+          <div class="events" id="events"></div>
           <div id="log"></div>
         </main>
 
@@ -712,6 +719,25 @@ enum Page {
           } catch (e) {
             $('sub').textContent = String(e);
           }
+          // History is garnish on this page; status must render even when it fails.
+          try {
+            const ev = await fetch('/api/history?limit=30', {headers});
+            if (ev.ok) renderEvents(await ev.json());
+          } catch (e) {}
+        }
+
+        // The server watches on its own clock, so this list keeps filling with the tab
+        // closed; the page only shows what already happened.
+        function renderEvents(events) {
+          const box = $('events');
+          if (!events.length) { box.innerHTML = ''; return; }
+          box.innerHTML = '<div class="section"><h2>Events</h2></div>'
+            + events.map(e => {
+                const tone = e.worsened ? ' worse' : (e.improved ? ' better' : '');
+                return '<div class="ev' + tone + '">'
+                  + escapeHTML(new Date(e.at).toLocaleTimeString()) + '  '
+                  + escapeHTML(e.line) + '</div>';
+              }).join('');
         }
 
         // ---- wizard ----------------------------------------------------------
