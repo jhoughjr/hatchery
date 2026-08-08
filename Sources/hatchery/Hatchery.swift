@@ -3,6 +3,10 @@ import Foundation
 import HatcheryKit
 import HatcheryWeb
 
+#if canImport(Glibc)
+    import Glibc
+#endif
+
 @main
 struct Hatchery: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -418,6 +422,13 @@ struct Serve: AsyncParsableCommand {
     var alertWebhook: String?
 
     func run() async throws {
+        // The console is part of the record here, and this process runs for days with its
+        // output redirected to a file more often than to a terminal. Redirected stdout is
+        // block-buffered by default, which holds transition lines invisible until 4 KiB
+        // accumulate — and a kill signal discards the buffer entirely, banner and all. Line
+        // buffering makes every printed line land the moment it ends.
+        setvbuf(stdout, nil, _IOLBF, 0)
+
         // Resolved once, at boot: the server should keep reading the same file it started with
         // rather than follow the working directory somewhere else mid-session.
         //
