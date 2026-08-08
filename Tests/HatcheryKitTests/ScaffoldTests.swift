@@ -61,6 +61,12 @@ private func gateway(_ name: String) -> ServiceSpec {
         domains: ["\(name).opi"], configFile: "\(name).config.json")
 }
 
+private func mwserver(_ name: String) -> ServiceSpec {
+    ServiceSpec(
+        name: name, kind: .mwserver, image: "mwserver2:arm64-abc",
+        domains: ["\(name).opi"], configFile: "\(name).config.json")
+}
+
 @Suite("RSA JWK conversion")
 struct RSAJWKTests {
     @Test("the nine integers become the JWK fields the estate already uses")
@@ -162,6 +168,51 @@ struct SecretPlannerTests {
         let password = resolutions.first { $0.key == "DATABASE_PASSWORD" }
         #expect(password?.origin.needsValue == true)
         #expect(password?.value.isEmpty == true)
+    }
+
+    @Test("a minted signing key brings its private half with it")
+    func mintsThePairTogether() async throws {
+        // What shipped first: the JWKS was minted and its PEM discarded, then the resolver
+        // demanded the private half of a key that had been thrown away — which no person
+        // could supply. The pair resolves together or not at all.
+        let pem = fakeRSAPEM(sampleIntegers)
+        let planner = SecretPlanner(minter: minter(pem: pem))
+        let resolutions = try await planner.resolve(for: mwserver("mwlab"), in: labStack())
+
+        let jwks = resolutions.first { $0.key == "KEYPAIR_JWKS" }
+        let key = resolutions.first { $0.key == "PRIVATE_KEY_PEM" }
+        #expect(jwks?.origin == .minted("RSA-2048, RS512"))
+        #expect(key?.origin == .minted("the private half of the minted keypair"))
+        #expect(key?.value == pem)
+    }
+
+    @Test("the private half is shared from a sibling that carries it")
+    func sharesThePrivateHalf() async throws {
+        let planner = SecretPlanner(minter: minter(pem: fakeRSAPEM(sampleIntegers)))
+        let stack = labStack(services: [mwserver("mwlab")])
+        let resolutions = try await planner.resolve(
+            for: mwserver("mwlab-b"), in: stack,
+            siblings: ["mwlab": [
+                "KEYPAIR_JWKS": "{\"keys\":[]}", "PRIVATE_KEY_PEM": "existing-pem",
+            ]])
+
+        let key = resolutions.first { $0.key == "PRIVATE_KEY_PEM" }
+        #expect(key?.origin == .shared(from: "mwlab"))
+        #expect(key?.value == "existing-pem")
+    }
+
+    @Test("a shared key whose private half lives outside the stack still needs a person")
+    func stillAsksWhenTheKeyLivesOutside() async throws {
+        let planner = SecretPlanner(minter: minter(pem: fakeRSAPEM(sampleIntegers)))
+        let stack = labStack(services: [mwserver("mwlab")])
+        let resolutions = try await planner.resolve(
+            for: mwserver("mwlab-b"), in: stack,
+            siblings: ["mwlab": ["KEYPAIR_JWKS": "{\"keys\":[]}"]])
+
+        // The JWKS came from the sibling, so no pair was minted here — and inventing a
+        // private key for someone else's public one is not a favor.
+        let key = resolutions.first { $0.key == "PRIVATE_KEY_PEM" }
+        #expect(key?.origin.needsValue == true)
     }
 
     @Test("an app-scoped token is minted, because nothing else has a claim on it")

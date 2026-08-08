@@ -84,6 +84,9 @@ struct CloneRouteTests {
         // An optional the source sets rides along, value visible because it is not secret.
         #expect(entry("LOG_LEVEL")?["action"] as? String == "carry")
         #expect(entry("LOG_LEVEL")?["value"] as? String == "debug")
+        // The private half is part of the minted pair, not a demand on the person — asking
+        // for the matching key of a JWKS that was just minted is asking for the impossible.
+        #expect(entry("PRIVATE_KEY_PEM")?["action"] as? String == "mint")
     }
 
     @Test("a source that does not exist is a 404, not an empty plan")
@@ -219,10 +222,18 @@ struct CloneRouteTests {
         #expect(cloned["name"] as? String == "mwlab")
         let missing = try #require(cloned["missing"] as? [[String: Any]])
         #expect(missing.contains { $0["key"] as? String == "DATABASE_URL" })
+        // The keypair is the scaffolder's to mint — it must never come back as homework.
+        #expect(!missing.contains { $0["key"] as? String == "PRIVATE_KEY_PEM" })
+        #expect(!missing.contains { $0["key"] as? String == "KEYPAIR_JWKS" })
 
         // The carried value landed in the clone's own config file, under its tofu directory.
         let landed = written.all().first { $0.value["LOG_LEVEL"] == "debug" }
         #expect(landed != nil)
         #expect(landed?.key.contains("mwlab-2-tf") == true)
+
+        // And the layering carries only what was carried or rewritten: the scaffolder's
+        // shared keypair must not be overwritten by a plan-time mint. That overwrite is how
+        // three services ended up with three different signing keys.
+        #expect(written.all().values.allSatisfy { $0["KEYPAIR_JWKS"] == nil })
     }
 }
