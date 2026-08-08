@@ -9,7 +9,7 @@ struct Hatchery: AsyncParsableCommand {
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
-            Config.self, Deploy.self, Doctor.self, Host.self, Serve.self, Service.self,
+            Config.self, Deploy.self, Doctor.self, Events.self, Host.self, Serve.self, Service.self,
             Setup.self, Stack.self, State.self, Status.self,
             Up.self, Down.self, Restart.self,
         ]
@@ -447,11 +447,7 @@ struct Serve: AsyncParsableCommand {
             try manifest.encoded().write(to: URL(fileURLWithPath: path))
         }
 
-        // The history sidecar takes the manifest's name so several manifests on one machine
-        // keep separate records: hatchery.json → hatchery.history.jsonl.
-        let historyPath = history
-            ?? URL(fileURLWithPath: resolved).deletingPathExtension()
-                .appendingPathExtension("history.jsonl").path
+        let historyPath = history ?? TransitionLog.defaultPath(besideManifest: resolved)
         let transitionLog = TransitionLog(path: historyPath)
 
         var alert: HealthWatcher.AlertSink?
@@ -680,6 +676,55 @@ struct Restart: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Restart the services a stack declares.")
     @OptionGroup var options: LifecycleOptions
     func run() async throws { try await runLifecycle(.restart, options) }
+}
+
+struct Events: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Show what changed while nobody was looking.",
+        discussion: """
+            Reads the transition history `hatchery serve` records beside the manifest. Every \
+            line is one observed change — a service worsening, recovering, or reporting a \
+            different reason at the same state. Nothing here is live; `status` answers that.
+            """
+    )
+
+    @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+    var manifest: String = "hatchery.json"
+
+    @Option(name: .shortAndLong, help: "Show only one stack's events.")
+    var stack: String?
+
+    @Option(name: .shortAndLong, help: "How many events to show.")
+    var limit: Int = 50
+
+    @Option(name: .long, help: "Read this history file instead of the manifest's sidecar.")
+    var history: String?
+
+    func run() async throws {
+        // The same fallback serve uses, so a bare `events` reads what a bare `serve` wrote.
+        let resolved = (try? ManifestLocator.resolve(manifest))
+            ?? Paths.join(NSHomeDirectory(), ".config/hatchery/\(ManifestLocator.defaultName)")
+        let path = history ?? TransitionLog.defaultPath(besideManifest: resolved)
+
+        let recorded = TransitionLog(path: path).recent(limit: 500)
+        let matching = recorded.filter { stack == nil || $0.stack == stack }.prefix(max(limit, 1))
+        guard !matching.isEmpty else {
+            if let stack {
+                print("no recorded events for '\(stack)' in \(path)")
+            } else {
+                print("no recorded events at \(path)")
+                print("`hatchery serve` records transitions while it runs; history begins when it does")
+            }
+            return
+        }
+
+        let clock = DateFormatter()
+        clock.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        // Oldest first, the way a log reads.
+        for event in matching.reversed() {
+            print("  \(clock.string(from: event.at))  \(event.line)")
+        }
+    }
 }
 
 struct Status: AsyncParsableCommand {

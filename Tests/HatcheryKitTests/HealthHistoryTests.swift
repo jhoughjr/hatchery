@@ -122,6 +122,15 @@ final class HealthHistoryTests: XCTestCase {
         XCTAssertEqual(TransitionLog(path: temporaryPath()).recent(limit: 10), [])
     }
 
+    func testTheSidecarTakesTheManifestsName() {
+        XCTAssertEqual(
+            TransitionLog.defaultPath(besideManifest: "/etc/hatchery/hatchery.json"),
+            "/etc/hatchery/hatchery.history.jsonl")
+        XCTAssertEqual(
+            TransitionLog.defaultPath(besideManifest: "/lab/mystack.json"),
+            "/lab/mystack.history.jsonl")
+    }
+
     // MARK: - Watcher
 
     /// Hands out one scripted snapshot per poll.
