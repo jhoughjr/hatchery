@@ -13,6 +13,10 @@ public enum CloneDisposition: Sendable, Equatable {
     /// Deliberately regenerated, because the source's value would grant the clone the source's
     /// authority. Sharing a gateway token means staging can act as production.
     case minted(String)
+    /// Resolved by infrastructure the clone creates for itself — a fresh database on the
+    /// stack's own server, mirroring the source's shape with minted credentials. The value
+    /// exists only after the create step runs.
+    case provisioned(String)
     /// Refused, with the reason. These point at something that exists in the source
     /// environment and nowhere else.
     case refused(String)
@@ -57,6 +61,24 @@ public struct ClonedService: Sendable, Equatable {
     /// The source's readiness path, carried so the clone probes the same route.
     public let healthPath: String?
     public let keys: [ClonedKey]
+    /// The database the clone will create for this service, when its contract needs one and
+    /// the source's shape could be mirrored.
+    public let database: DatabaseClonePlan?
+
+    public init(
+        name: String, kind: ServiceKind, image: String, domains: [String],
+        baseURL: String?, healthPath: String?, keys: [ClonedKey],
+        database: DatabaseClonePlan? = nil
+    ) {
+        self.name = name
+        self.kind = kind
+        self.image = image
+        self.domains = domains
+        self.baseURL = baseURL
+        self.healthPath = healthPath
+        self.keys = keys
+        self.database = database
+    }
 
     /// Keys a person still has to supply before the clone will boot. Refused *optional* keys
     /// are excluded: the source setting one is worth reporting, but it blocks nothing.
@@ -127,12 +149,20 @@ public struct StackCloner: Sendable {
         let secretKeys = Set(contract?.secret ?? [])
         var keys: [ClonedKey] = []
 
+        // Whether this service gets a database of its own is the contract's call — not every
+        // stack needs one — and its shape is the source's, mirrored: same server, new database
+        // and roles, minted credentials. When no plan is possible the database keys fall
+        // through to their old dispositions and stay with a person.
+        let database = DatabaseClonePlanner.plan(
+            service: service.kind, backend: source.backend, sourceConfig: sourceConfig,
+            source: source, target: targetName, environment: environment)
+
         for key in (contract?.required ?? []).sorted() {
             keys.append(
                 classify(
                     key, required: true, secret: secretKeys.contains(key),
                     sourceConfig: sourceConfig, source: source,
-                    targetName: targetName, environment: environment))
+                    targetName: targetName, environment: environment, database: database))
         }
 
         // Optional keys ride along only when the source actually sets them. An unset optional
@@ -145,7 +175,7 @@ public struct StackCloner: Sendable {
                 classify(
                     key, required: false, secret: secretKeys.contains(key),
                     sourceConfig: sourceConfig, source: source,
-                    targetName: targetName, environment: environment))
+                    targetName: targetName, environment: environment, database: database))
         }
 
         return ClonedService(
@@ -155,7 +185,8 @@ public struct StackCloner: Sendable {
                 Self.rewrite($0, from: source, to: targetName, environment: environment) ?? $0
             },
             healthPath: service.healthPath,
-            keys: keys)
+            keys: keys,
+            database: database)
     }
 
     private func classify(
@@ -165,7 +196,8 @@ public struct StackCloner: Sendable {
         sourceConfig: [String: String],
         source: StackSpec,
         targetName: String,
-        environment: Environment
+        environment: Environment,
+        database: DatabaseClonePlan?
     ) -> ClonedKey {
         // 1. The stack's keypair, minted as a *pair* by the scaffolder at create. The plan
         // deliberately carries no value here: an earlier version minted a JWKS per service at
@@ -179,7 +211,17 @@ public struct StackCloner: Sendable {
                 value: nil, secret: secret, required: required)
         }
 
-        // 2. Values that exist only in the source environment. Copying DATABASE_URL is how a
+        // 2. Database keys a fresh database resolves. Ahead of the refusals below: refusing
+        // DATABASE_URL protects the source's database, and a database of the clone's own
+        // protects it better — the clone cannot write to production through credentials that
+        // never pointed there.
+        if let database, database.emitted.contains(key) {
+            return ClonedKey(
+                key: key, disposition: .provisioned(database.summary),
+                value: nil, secret: secret, required: required)
+        }
+
+        // 3. Values that exist only in the source environment. Copying DATABASE_URL is how a
         // staging stack quietly writes to the production database.
         if let reason = SecretPlanner.mustBeSupplied[key] {
             return ClonedKey(
@@ -225,11 +267,13 @@ public struct StackCloner: Sendable {
         environment: Environment? = nil
     ) -> String? {
         // Each name paired with what it becomes, longest first so a service name containing the
-        // stack name is not half-substituted.
-        var pairs: [(name: String, replacement: String)] =
-            ([source.name] + source.services.map(\.name)).map {
-                ($0, $0 == source.name ? target : "\(target)-\($0)")
-            }
+        // stack name is not half-substituted. One pair per name: a service named after its own
+        // stack (mwlab's is) must rewrite as the stack, not as a sort-order accident.
+        var pairs: [(name: String, replacement: String)] = []
+        for name in [source.name] + source.services.map(\.name)
+        where !pairs.contains(where: { $0.name == name }) {
+            pairs.append((name, name == source.name ? target : "\(target)-\(name)"))
+        }
 
         // The source environment's own name, when the clone is going somewhere else. `mwlab`
         // carries TEMPORAL_NAMESPACE=mwserver-dev; copying that verbatim puts the staging stack

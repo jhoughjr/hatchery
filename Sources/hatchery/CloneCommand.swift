@@ -52,15 +52,18 @@ extension Stack {
         @Flag(name: .long, help: "Required with --create, and to clone from a production stack.")
         var yes: Bool = false
 
-        // The manifest does not record these three — they live in the source's tofu files —
-        // so the clone cannot recover them and asks instead of silently guessing.
-        @Option(name: .long, help: "Container port for the clone's services. The source's is not recorded; say what it used.")
-        var port: Int = 8080
+        @Flag(name: .long, help: "After creating, run `tofu apply` so the clone lands on the box — the one-click path.")
+        var apply: Bool = false
 
-        @Option(name: .long, help: "Docker network for the clone's services, when the source used one.")
+        // These three live in the source's tofu files, and are read from there. The flags
+        // remain as overrides for a clone that should deliberately differ from its source.
+        @Option(name: .long, help: "Container port override. Read from the source's tofu when not given.")
+        var port: Int?
+
+        @Option(name: .long, help: "Docker network override. Read from the source's tofu when not given.")
         var network: String?
 
-        @Flag(name: .long, help: "Gate each service behind its enable_<name> tofu variable, as the source may have.")
+        @Flag(name: .long, help: "Force gating behind enable_<name> variables. Read from the source's tofu when not given.")
         var gated: Bool = false
 
         func run() async throws {
@@ -76,6 +79,15 @@ extension Stack {
             }
             if create, tofuDir == nil {
                 throw ValidationError("--create needs --tofu-dir for the clone's declarations")
+            }
+            // The help always said this; now it is true. Reading a production stack's live
+            // config deserves the same deliberate flag as every other production action.
+            if spec.resolvedEnvironment.isProduction, !yes {
+                throw ValidationError(
+                    "'\(source)' is \(spec.resolvedEnvironment.rawValue); pass --yes to clone from it")
+            }
+            if apply, !create {
+                throw ValidationError("--apply only means something with --create")
             }
             if parsed.stack(named: target) != nil {
                 throw ValidationError(
@@ -113,6 +125,8 @@ extension Stack {
                         print("          →  \(to)")
                     case .minted(let how):
                         print("    mint     \(key.key)  (\(how); the source's would grant its authority)")
+                    case .provisioned(let how):
+                        print("    db       \(key.key)  (\(how))")
                     case .refused(let why):
                         if key.required {
                             print("    NEEDS    \(key.key) — \(why)")
@@ -141,106 +155,78 @@ extension Stack {
             }
 
             try await build(
-                clone: planned.plan.services, from: spec, manifest: parsed, at: path,
+                planned: planned, from: spec, manifest: parsed, at: path,
                 environment: env)
         }
 
-        /// Creates the stack, its services, and their config.
-        ///
-        /// Minting is left to the scaffolder rather than done from the clone plan. The scaffolder
-        /// already decides what is minted, shared from a sibling, or composed — running a second
-        /// implementation beside it is how the two drift. The clone contributes only the values
-        /// it carried or rewrote, layered on afterwards.
+        /// Creates the stack through the shared builder — the same code path the dashboard
+        /// uses, so the two cannot promise different clones.
         private func build(
-            clone: [ClonedService],
+            planned: PlannedClone,
             from source: StackSpec,
             manifest: StackManifest,
             at path: String,
             environment: Environment
         ) async throws {
             print("")
-            var settings = source.settings ?? [:]
-            let resolvedHost = host ?? source.host ?? settings["host"] ?? ""
-            settings["host"] = resolvedHost
+            let outcome = try await StackCloneBuilder().build(
+                planned: planned, source: source, manifest: manifest, manifestPath: path,
+                options: StackCloneBuilder.Options(
+                    target: target, tofuDir: tofuDir!, host: host, environment: environment,
+                    port: port, network: network, gated: gated ? true : nil, apply: apply))
 
-            let bootstrapper = StackBootstrapper()
-            let plan = try bootstrapper.plan(
-                name: target, backend: source.backend, host: resolvedHost,
-                tofuDir: tofuDir!, environment: environment, settings: settings,
-                into: manifest, manifestPath: path)
-
-            let created = try await bootstrapper.create(plan)
-            try created.manifest.encoded().write(to: URL(fileURLWithPath: created.manifestPath))
             print("  created \(target) in \(tofuDir!)")
             print("  tofu init: ok")
 
-            var current = created.manifest
-            let scaffolder = Scaffolder()
-
-            var written: [String] = []
-            for service in clone {
-                guard let stack = current.stack(named: target) else {
-                    // Half a stack with no explanation is the worst outcome this command has.
-                    throw ValidationError(
-                        "'\(target)' vanished from the manifest mid-clone after "
-                            + "[\(written.joined(separator: ", "))] were written; inspect \(path)")
-                }
-
-                // Siblings are the services already added to *this* clone, so the signing key is
-                // shared within the new stack rather than carried from the source.
-                var siblings: [String: [String: String]] = [:]
-                for existing in stack.services {
-                    let url = ConfigSync.configURL(
-                        for: existing, in: stack, manifestPath: created.manifestPath)
-                    if let config = try? ConfigSync.readDeclared(at: url) {
-                        siblings[existing.name] = config
-                    }
-                }
-
-                // The shape the source declared travels with the clone: its base URL (already
-                // rewritten by the planner) and its readiness path. Losing the health path
-                // meant a clone of a service with a custom route probed the default and read
-                // as `responding` forever.
-                let spec = ServiceSpec(
-                    name: service.name, kind: service.kind, image: service.image,
-                    domains: service.domains, configFile: "\(service.name).config.json",
-                    baseURL: service.baseURL, healthPath: service.healthPath)
-
-                let result = try await scaffolder.plan(
-                    service: spec, into: target, manifest: current,
-                    containerPort: port, network: network, gated: gated, siblings: siblings)
-                _ = try scaffolder.write(result, in: stack)
-                current = result.manifest
-                try current.encoded().write(to: URL(fileURLWithPath: created.manifestPath))
-
-                // The carried and rewritten values, layered over what the scaffolder wrote.
-                if let target = current.stack(named: target),
-                    let written = target.service(named: service.name) {
-                    let url = ConfigSync.configURL(
-                        for: written, in: target, manifestPath: created.manifestPath)
-                    let existing = (try? ConfigSync.readDeclared(at: url)) ?? [:]
-                    let merged = ConfigSync.applying(service.values, to: existing)
-                    try ConfigSync.encoded(merged).write(to: url)
-                }
-
-                written.append(service.name)
-                print("  \(service.name): \(service.values.count) value(s) carried, "
+            for service in outcome.services {
+                print("  \(service.name): \(service.resolved) value(s) resolved, "
                     + "\(service.unresolved.count) still needed")
+                for line in service.databaseReport {
+                    print("    db  \(line)")
+                }
             }
 
-            if let line = await StateMaintenance.seal(after: created.manifestPath) {
+            if let line = outcome.sealed {
                 print("  \(line)")
+            }
+
+            if let plan = outcome.plan {
+                switch plan.verdict {
+                case .clean: print("  tofu plan: nothing to change")
+                case .changes: print("  tofu plan: changes ready to apply")
+                case .failed: print("  tofu plan FAILED — the clone is written but will not deploy as is")
+                }
+            }
+            if let applied = outcome.applied {
+                let lastLine = applied.split(separator: "\n").last.map(String.init) ?? "done"
+                print("  tofu apply: \(lastLine)")
+            } else if let skipped = outcome.applySkipped {
+                print("  apply skipped: \(skipped)")
+            } else if outcome.plan?.verdict == .changes {
+                print("  nothing applied; re-run with --apply, or `hatchery apply \(target)`")
             }
 
             // Named per service. Flattening lost that, so two services each missing
             // DATABASE_PASSWORD printed the same unusable line twice.
-            let outstanding = clone.filter { !$0.unresolved.isEmpty }
+            let outstanding = outcome.services.filter { !$0.unresolved.isEmpty }
             if !outstanding.isEmpty {
                 print("")
                 print("  before it will boot:")
                 for service in outstanding {
                     for key in service.unresolved {
                         print("    hatchery config set \(target) \(service.name) \(key.key)=…")
+                    }
+                }
+            }
+            // The source set these and the clone dropped them. Nothing breaks, but a person
+            // should decide that rather than never hear about it.
+            let skippedOptional = outcome.services.filter { !$0.optionalSkipped.isEmpty }
+            if !skippedOptional.isEmpty {
+                print("")
+                print("  optional, set on \(source.name) but not carried:")
+                for service in skippedOptional {
+                    for key in service.optionalSkipped {
+                        print("    \(service.name)  \(key.key)")
                     }
                 }
             }

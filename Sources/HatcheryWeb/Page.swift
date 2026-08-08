@@ -1003,10 +1003,13 @@ enum Page {
                     'A directory for this clone alone — it must be empty or not exist. '
                     + 'End with / and the stack name is appended, so the default becomes '
                     + '~/infra-state/<name>.')
-            + field('c-port', 'Container port', '8080',
-                    "The source's is not recorded in the manifest; say what it used.")
+            + field('c-port', 'Container port', '',
+                    "Blank to use whatever the source's tofu declares.")
             + field('c-network', 'Docker network', '',
-                    'When the source used one. Blank for none.'),
+                    "Blank to use whatever the source's tofu declares.")
+            + select('c-apply', 'Apply after create', ['no', 'yes'],
+                     'yes runs tofu apply once everything resolves, so the clone ends '
+                     + 'running on the box rather than written to disk.'),
             'plan');
           if (!ok) { log('cancelled'); return; }
 
@@ -1017,8 +1020,9 @@ enum Page {
           // pointing every clone at the one directory guaranteed to be refused.
           let dir = $('c-dir').value.trim();
           if (dir.endsWith('/')) dir += target;
-          const port = parseInt($('c-port').value, 10) || 8080;
+          const port = parseInt($('c-port').value, 10) || null;
           const network = $('c-network').value.trim() || null;
+          const apply = $('c-apply').value === 'yes';
 
           busy = true;
           const plan = await send('/api/stack/clone/plan',
@@ -1027,7 +1031,7 @@ enum Page {
           if (!plan.ok) { log(plan.data.error || 'plan failed', true); return; }
 
           const p = plan.data;
-          const cls = {rewrite: 'd-change', mint: 'd-add', needs: 'err', skip: 'hint'};
+          const cls = {rewrite: 'd-change', mint: 'd-add', db: 'd-add', needs: 'err', skip: 'hint'};
           const html = p.services.map(s =>
             '<div class="d-header">' + escapeHTML(s.name) + '  [' + escapeHTML(s.kind)
             + ']  from ' + escapeHTML(s.origin) + '</div>'
@@ -1065,15 +1069,21 @@ enum Page {
 
           busy = true;
           const res = await send('/api/stack/clone',
-            {source, target, environment: env, tofuDir: dir, port, network, confirm: target});
+            {source, target, environment: env, tofuDir: dir, port, network, apply,
+             confirm: target});
           busy = false;
           log(res.data.message || res.data.error, !res.ok);
           if (!res.ok) return;
 
-          (res.data.services || []).forEach(s =>
-            log('  ' + s.name + ': ' + s.carried + ' value(s) carried, '
-                + (s.missing || []).length + ' still needed'));
+          (res.data.services || []).forEach(s => {
+            log('  ' + s.name + ': ' + s.carried + ' value(s) resolved, '
+                + (s.missing || []).length + ' still needed');
+            (s.database || []).forEach(line => log('    db  ' + line));
+          });
           if (res.data.detail) log('  ' + res.data.detail);
+          if (res.data.plan) log('  tofu plan: ' + res.data.plan, res.data.plan.indexOf('failed') >= 0);
+          if (res.data.applied) log('  tofu apply: done — the clone is live');
+          else if (res.data.applySkipped) log('  apply skipped: ' + res.data.applySkipped);
           await refresh();
 
           // The keys that point at something only the source's environment has, asked for
