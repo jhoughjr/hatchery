@@ -59,6 +59,12 @@ public struct SealVerifier: Sendable {
 
     public static let scriptName = "unseal.sh"
 
+    /// The live verify as an injectable value — a named reference rather than a literal, for
+    /// the same task-allocator reason as `StateMaintenance.liveSeal` (issue #36).
+    public static let liveVerify: @Sendable (String) async -> SealVerification = { path in
+        await SealVerifier().verify(pathInside: path)
+    }
+
     public init(
         execute: @escaping CommandExecutor = ShellRunner.liveExecutor,
         exists: @escaping @Sendable (String) -> Bool = {
