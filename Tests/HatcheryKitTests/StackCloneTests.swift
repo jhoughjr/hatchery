@@ -76,9 +76,10 @@ struct StackCloneTests {
             Issue.record("expected a minted token, got \(String(describing: disposition(service, "PAYMENT_GATEWAY_TOKEN")))")
             return
         }
-        // The point of regenerating is that the value differs from the source's.
-        #expect(service.values["PAYMENT_GATEWAY_TOKEN"] != "prod-token-value")
-        #expect(service.values["PAYMENT_GATEWAY_TOKEN"]?.isEmpty == false)
+        // The plan carries no value: the scaffolder mints at create, so the whole stack
+        // agrees on the result. A plan-time value layered over the scaffolder's is how the
+        // clone's services ended up unable to talk to each other.
+        #expect(service.values["PAYMENT_GATEWAY_TOKEN"] == nil)
     }
 
     /// A signing key is shared *within* a stack so services accept each other's tokens — but
@@ -91,8 +92,10 @@ struct StackCloneTests {
             Issue.record("expected a minted keypair")
             return
         }
-        #expect(how.contains("RSA"))
-        #expect(service.values["KEYPAIR_JWKS"]?.contains("\"kid\":\"prod\"") != true)
+        #expect(how.contains("keypair"))
+        // The source's key must not travel — and neither must a plan-time mint, whose
+        // private half would be thrown away. The scaffolder mints the pair at create.
+        #expect(service.values["KEYPAIR_JWKS"] == nil)
     }
 
     @Test("rewrites values that name the source stack")
