@@ -31,12 +31,19 @@ public struct ClonedKey: Sendable, Equatable {
     public let value: String?
     /// True when the value is secret and must not be shown or logged.
     public let secret: Bool
+    /// Whether the contract requires this key. A refused optional key is information — the
+    /// source sets it, the clone won't — not a blocker; the boot checklist filters on this.
+    public let required: Bool
 
-    public init(key: String, disposition: CloneDisposition, value: String?, secret: Bool) {
+    public init(
+        key: String, disposition: CloneDisposition, value: String?, secret: Bool,
+        required: Bool = true
+    ) {
         self.key = key
         self.disposition = disposition
         self.value = value
         self.secret = secret
+        self.required = required
     }
 }
 
@@ -45,11 +52,16 @@ public struct ClonedService: Sendable, Equatable {
     public let kind: ServiceKind
     public let image: String
     public let domains: [String]
+    /// The source's explicit base URL with its names rewritten, when it declared one.
+    public let baseURL: String?
+    /// The source's readiness path, carried so the clone probes the same route.
+    public let healthPath: String?
     public let keys: [ClonedKey]
 
-    /// Keys a person still has to supply. These are the whole point of the report.
+    /// Keys a person still has to supply before the clone will boot. Refused *optional* keys
+    /// are excluded: the source setting one is worth reporting, but it blocks nothing.
     public var unresolved: [ClonedKey] {
-        keys.filter { $0.disposition.needsPerson }
+        keys.filter { $0.disposition.needsPerson && $0.required }
     }
 
     /// What the clone can write without asking anyone.
@@ -111,51 +123,79 @@ public struct StackCloner: Sendable {
         var keys: [ClonedKey] = []
 
         for key in (contract?.required ?? []).sorted() {
-            let secret = secretKeys.contains(key)
+            keys.append(
+                try await classify(
+                    key, required: true, secret: secretKeys.contains(key),
+                    sourceConfig: sourceConfig, source: source,
+                    targetName: targetName, environment: environment))
+        }
 
-            // 1. Values that exist only in the source environment. Copying DATABASE_URL is how a
-            // staging stack quietly writes to the production database.
-            if let reason = SecretPlanner.mustBeSupplied[key] {
-                keys.append(ClonedKey(key: key, disposition: .refused(reason), value: nil, secret: secret))
-                continue
-            }
-
-            // 2. Values that would grant the clone the source's authority.
-            if Self.regenerated.contains(key) {
-                let value = key == "KEYPAIR_JWKS"
-                    ? try await minter.signingJWKS() : minter.token()
-                keys.append(
-                    ClonedKey(
-                        key: key,
-                        disposition: .minted(key == "KEYPAIR_JWKS" ? "RSA-2048, RS512" : "random token"),
-                        value: value, secret: secret))
-                continue
-            }
-
-            guard let value = sourceConfig[key], !value.isEmpty else {
-                keys.append(
-                    ClonedKey(
-                        key: key, disposition: .refused("not set on \(source.name) either"),
-                        value: nil, secret: secret))
-                continue
-            }
-
-            // 3. Values that name the source stack, its services, or its environment.
-            if let rewritten = Self.rewrite(
-                value, from: source, to: targetName, environment: environment) {
-                keys.append(
-                    ClonedKey(
-                        key: key, disposition: .rewritten(from: value, to: rewritten),
-                        value: rewritten, secret: secret))
-                continue
-            }
-
-            keys.append(ClonedKey(key: key, disposition: .carried, value: value, secret: secret))
+        // Optional keys ride along only when the source actually sets them. An unset optional
+        // key is nothing — reporting it would bury the lines that matter — but a set one is
+        // part of how the source behaves, and dropping it silently made clones subtly slower,
+        // quieter, or louder than the stack they were copied from.
+        for key in (contract?.optional ?? []).sorted()
+        where !(sourceConfig[key] ?? "").isEmpty && !(contract?.required.contains(key) ?? false) {
+            keys.append(
+                try await classify(
+                    key, required: false, secret: secretKeys.contains(key),
+                    sourceConfig: sourceConfig, source: source,
+                    targetName: targetName, environment: environment))
         }
 
         return ClonedService(
             name: service.name, kind: service.kind, image: service.image,
-            domains: domains, keys: keys)
+            domains: domains,
+            baseURL: service.baseURL.map {
+                Self.rewrite($0, from: source, to: targetName, environment: environment) ?? $0
+            },
+            healthPath: service.healthPath,
+            keys: keys)
+    }
+
+    private func classify(
+        _ key: String,
+        required: Bool,
+        secret: Bool,
+        sourceConfig: [String: String],
+        source: StackSpec,
+        targetName: String,
+        environment: Environment
+    ) async throws -> ClonedKey {
+        // 1. Values that exist only in the source environment. Copying DATABASE_URL is how a
+        // staging stack quietly writes to the production database.
+        if let reason = SecretPlanner.mustBeSupplied[key] {
+            return ClonedKey(
+                key: key, disposition: .refused(reason), value: nil, secret: secret,
+                required: required)
+        }
+
+        // 2. Values that would grant the clone the source's authority.
+        if Self.regenerated.contains(key) {
+            let value = key == "KEYPAIR_JWKS"
+                ? try await minter.signingJWKS() : minter.token()
+            return ClonedKey(
+                key: key,
+                disposition: .minted(key == "KEYPAIR_JWKS" ? "RSA-2048, RS512" : "random token"),
+                value: value, secret: secret, required: required)
+        }
+
+        guard let value = sourceConfig[key], !value.isEmpty else {
+            return ClonedKey(
+                key: key, disposition: .refused("not set on \(source.name) either"),
+                value: nil, secret: secret, required: required)
+        }
+
+        // 3. Values that name the source stack, its services, or its environment.
+        if let rewritten = Self.rewrite(
+            value, from: source, to: targetName, environment: environment) {
+            return ClonedKey(
+                key: key, disposition: .rewritten(from: value, to: rewritten),
+                value: rewritten, secret: secret, required: required)
+        }
+
+        return ClonedKey(
+            key: key, disposition: .carried, value: value, secret: secret, required: required)
     }
 
     /// Swaps the source stack's name for the target's inside a value.
