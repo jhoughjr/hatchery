@@ -274,13 +274,12 @@ public struct HatcheryAPI: Sendable {
             try ConfigSync.encoded(config).write(to: url)
         },
         // Injected so a test never shells out. A directory with no `.age-recipient` returns
-        // without running anything, which is why the live default is safe here.
-        sealState: @escaping @Sendable (String) async -> String? = { path in
-            await StateMaintenance.seal(after: path)
-        },
-        verifyState: @escaping @Sendable (String) async -> SealVerification = { path in
-            await SealVerifier().verify(pathInside: path)
-        },
+        // without running anything, which is why the live default is safe here. Both defaults
+        // must stay named references: a closure literal in this position crashes the task
+        // allocator at the first await through it (issue #36).
+        sealState: @escaping @Sendable (String) async -> String? = StateMaintenance.liveSeal,
+        verifyState: @escaping @Sendable (String) async -> SealVerification
+            = SealVerifier.liveVerify,
         // The default serves an empty history rather than failing, so an API built without
         // a watcher (tests, one-shot tools) still answers the route.
         history: @escaping @Sendable (Int) -> [HealthTransition] = { _ in [] },
