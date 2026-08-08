@@ -3,6 +3,21 @@ import Foundation
 import HatcheryKit
 import HatcheryWeb
 
+#if canImport(Glibc)
+    import Glibc
+#endif
+
+/// Pushes everything printed so far out to wherever stdout points.
+///
+/// The serve console is part of the record, and it is redirected to a file more often than
+/// watched on a terminal — where stdout is block-buffered: lines sit invisible until 4 KiB
+/// accumulate, and a kill signal discards the buffer entirely. Switching the stream to line
+/// buffering would fix it once, but the C global that names the stream is unreachable from
+/// strict concurrency on Glibc — `fflush(nil)` flushes every open stream without naming one.
+private func flushConsole() {
+    fflush(nil)
+}
+
 @main
 struct Hatchery: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -478,9 +493,11 @@ struct Serve: AsyncParsableCommand {
                 let clock = DateFormatter()
                 clock.dateFormat = "HH:mm:ss"
                 while !Task.isCancelled {
-                    for change in await watcher.poll() {
+                    let changes = await watcher.poll()
+                    for change in changes {
                         print("  \(clock.string(from: change.at)) \(change.line)")
                     }
+                    if !changes.isEmpty { flushConsole() }
                     try? await Task.sleep(for: .seconds(interval))
                 }
             }
@@ -505,6 +522,7 @@ struct Serve: AsyncParsableCommand {
         } else {
             print("  watcher off — no history or alerts while --watch-interval 0")
         }
+        flushConsole()
         try await server.run()
     }
 }
