@@ -6,10 +6,12 @@ extension Stack {
     /// Builds a new stack from an existing one, carrying its configuration forward.
     struct Clone: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Show what cloning a stack would carry, regenerate and refuse.",
+            abstract: "Plan what cloning a stack carries, then create it with --create.",
             discussion: """
-                Reads the source stack's declared config and works out, key by key, what a copy \
-                into another environment should do with it.
+                Reads the source stack's config — live from the box when the backend allows it, \
+                the declared sidecar otherwise, and it says which — and works out, key by key, \
+                what a copy into another environment should do with it. Optional keys the \
+                source sets ride along; unset ones are not mentioned.
 
                 Three things are never copied. Anything pointing at the source's database, \
                 because a staging stack silently writing to production is worse than one that \
@@ -17,8 +19,9 @@ extension Stack {
                 signing keys — which is regenerated instead. And anything the source itself \
                 never had, which is reported rather than passed along as though it were set.
 
-                This reports; it does not create. Use the values with `hatchery config set`, or \
-                create the stack with `stack new` and `service new` first.
+                Without --create this only reports. With --create --tofu-dir --yes it \
+                bootstraps the stack, scaffolds each service, layers the carried values on, \
+                and prints the `config set` commands for what still needs a person.
                 """
         )
 
@@ -49,6 +52,17 @@ extension Stack {
         @Flag(name: .long, help: "Required with --create, and to clone from a production stack.")
         var yes: Bool = false
 
+        // The manifest does not record these three — they live in the source's tofu files —
+        // so the clone cannot recover them and asks instead of silently guessing.
+        @Option(name: .long, help: "Container port for the clone's services. The source's is not recorded; say what it used.")
+        var port: Int = 8080
+
+        @Option(name: .long, help: "Docker network for the clone's services, when the source used one.")
+        var network: String?
+
+        @Flag(name: .long, help: "Gate each service behind its enable_<name> tofu variable, as the source may have.")
+        var gated: Bool = false
+
         func run() async throws {
             let path = try ManifestLocator.resolve(manifest)
             let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
@@ -75,9 +89,32 @@ extension Stack {
             var totalCarried = 0
             var cloned: [ClonedService] = []
 
+            let live = LiveConfigReader()
             for service in spec.services {
+                // The box's config, not the sidecar, when the backend can answer: the declared
+                // file misses exactly the keys someone set by hand — the drift `config audit`
+                // exists to find. When live reading fails or isn't supported the declared file
+                // stands in, and the plan says which one it planned from.
                 let url = ConfigSync.configURL(for: service, in: spec, manifestPath: path)
-                let config = (try? ConfigSync.readDeclared(at: url)) ?? [:]
+                let config: [String: String]
+                let origin: String
+                do {
+                    config = try await live.config(for: service, in: spec)
+                    origin = "live config on \(spec.hostAddress ?? spec.backend.rawValue)"
+                } catch {
+                    let why = error is LiveConfigError
+                        ? "" : " — live read failed: \(error); the box may disagree"
+                    do {
+                        config = try ConfigSync.readDeclared(at: url)
+                        origin = "declared file\(why)"
+                    } catch {
+                        // An unreadable sidecar is not an empty one. Planning from [:] would
+                        // report every key as never-set, which is a different claim entirely.
+                        throw ValidationError(
+                            "cannot read \(service.name)'s config: \(url.path): \(error)")
+                    }
+                }
+
                 // Through the planner's rewrite, not a plain stack-name substitution. A sibling
                 // service's domain (`paylab.opi`) contains no stack name, so the naive version
                 // left it untouched — and a clone claiming production's domain is not a clone.
@@ -90,7 +127,7 @@ extension Stack {
                     sourceConfig: config, domains: domains)
 
                 print("")
-                print("  \(planned.name)  [\(planned.kind.rawValue)]")
+                print("  \(planned.name)  [\(planned.kind.rawValue)]  from \(origin)")
                 if !planned.domains.isEmpty {
                     print("    domains  \(planned.domains.joined(separator: ", "))")
                 }
@@ -106,12 +143,18 @@ extension Stack {
                     case .minted(let how):
                         print("    mint     \(key.key)  (\(how); the source's would grant its authority)")
                     case .refused(let why):
-                        print("    NEEDS    \(key.key) — \(why)")
+                        if key.required {
+                            print("    NEEDS    \(key.key) — \(why)")
+                        } else {
+                            // The source sets it, the clone won't, and nothing breaks: worth a
+                            // line, not a place on the boot checklist.
+                            print("    skip     \(key.key) — \(why) (optional)")
+                        }
                     }
                 }
 
                 totalUnresolved += planned.unresolved.count
-                totalCarried += planned.keys.count - planned.unresolved.count
+                totalCarried += planned.values.count
                 cloned.append(planned)
             }
 
@@ -162,8 +205,14 @@ extension Stack {
             var current = created.manifest
             let scaffolder = Scaffolder()
 
+            var written: [String] = []
             for service in clone {
-                guard let stack = current.stack(named: target) else { break }
+                guard let stack = current.stack(named: target) else {
+                    // Half a stack with no explanation is the worst outcome this command has.
+                    throw ValidationError(
+                        "'\(target)' vanished from the manifest mid-clone after "
+                            + "[\(written.joined(separator: ", "))] were written; inspect \(path)")
+                }
 
                 // Siblings are the services already added to *this* clone, so the signing key is
                 // shared within the new stack rather than carried from the source.
@@ -176,13 +225,18 @@ extension Stack {
                     }
                 }
 
+                // The shape the source declared travels with the clone: its base URL (already
+                // rewritten by the planner) and its readiness path. Losing the health path
+                // meant a clone of a service with a custom route probed the default and read
+                // as `responding` forever.
                 let spec = ServiceSpec(
                     name: service.name, kind: service.kind, image: service.image,
-                    domains: service.domains, configFile: "\(service.name).config.json")
+                    domains: service.domains, configFile: "\(service.name).config.json",
+                    baseURL: service.baseURL, healthPath: service.healthPath)
 
                 let result = try await scaffolder.plan(
                     service: spec, into: target, manifest: current,
-                    containerPort: 8080, network: nil, gated: false, siblings: siblings)
+                    containerPort: port, network: network, gated: gated, siblings: siblings)
                 _ = try scaffolder.write(result, in: stack)
                 current = result.manifest
                 try current.encoded().write(to: URL(fileURLWithPath: created.manifestPath))
@@ -197,6 +251,7 @@ extension Stack {
                     try ConfigSync.encoded(merged).write(to: url)
                 }
 
+                written.append(service.name)
                 print("  \(service.name): \(service.values.count) value(s) carried, "
                     + "\(service.unresolved.count) still needed")
             }
