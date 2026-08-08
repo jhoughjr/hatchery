@@ -7,6 +7,11 @@ import HatcheryWeb
     import Glibc
 #endif
 
+/// C stdio's `stdout` is a mutable global holding a non-Sendable pointer, which strict
+/// concurrency refuses to read from checked code. The pointer is set at process start and
+/// never reassigned, so one deliberately unchecked alias is safe on both platforms.
+private nonisolated(unsafe) let processStdout = stdout
+
 @main
 struct Hatchery: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -427,7 +432,7 @@ struct Serve: AsyncParsableCommand {
         // block-buffered by default, which holds transition lines invisible until 4 KiB
         // accumulate — and a kill signal discards the buffer entirely, banner and all. Line
         // buffering makes every printed line land the moment it ends.
-        setvbuf(stdout, nil, _IOLBF, 0)
+        setvbuf(processStdout, nil, _IOLBF, 0)
 
         // Resolved once, at boot: the server should keep reading the same file it started with
         // rather than follow the working directory somewhere else mid-session.
