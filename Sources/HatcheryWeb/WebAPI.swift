@@ -189,6 +189,9 @@ enum Wire {
         let missingKeys: [String]
         let issues: [ValidationIssue]
         let source: String
+        /// Why `source` is "declared" when it is — "not implemented for this backend" is a
+        /// different situation from "the box did not answer", and the page should say which.
+        let note: String?
     }
 
     struct PlanView: Encodable {
@@ -456,11 +459,13 @@ public struct HatcheryAPI: Sendable {
         // Prefer what the service is actually running with. The declared file answers a
         // different question, and `config audit` exists because the two drift apart.
         var source = "live"
+        var note: String?
         var values: [String: String]
         do {
             values = try await liveConfig.config(for: service, in: stack)
         } catch {
             source = "declared"
+            note = "\(error)"
             let url = ConfigSync.configURL(for: service, in: stack, manifestPath: manifestPath())
             values = (try? readConfig(url)) ?? [:]
         }
@@ -479,7 +484,8 @@ public struct HatcheryAPI: Sendable {
                 // supply one is to type its name from memory, one at a time.
                 missingKeys: contract.required.filter { (values[$0] ?? "").isEmpty }.sorted(),
                 issues: ConfigValidator.validate(values, against: contract),
-                source: source))
+                source: source,
+                note: note))
     }
 
     // MARK: - From nothing to something
@@ -607,6 +613,22 @@ public struct HatcheryAPI: Sendable {
             let service = stack.service(named: body.service)
         else {
             return .failure(404, "no service '\(body.service)' in stack '\(body.stack)'")
+        }
+
+        // The editor renders its fields from the contract, but the API takes whatever the
+        // request carries — so the same refusal-by-name the CLI applies happens here too.
+        if let contract = EnvContract.contract(for: service.kind, backend: stack.backend) {
+            let unknown = contract.unknownKeys(in: body.values)
+            if !unknown.isEmpty {
+                let hints = unknown.map { key -> String in
+                    let near = contract.nearest(to: key)
+                    return near.isEmpty ? key : "\(key) (nearest: \(near.joined(separator: ", ")))"
+                }
+                return .failure(
+                    400,
+                    "\(service.kind.rawValue) recognises no key named "
+                        + hints.joined(separator: ", ") + "; nothing written")
+            }
         }
 
         do {

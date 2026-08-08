@@ -1081,7 +1081,9 @@ enum Page {
             + '<dt>kind</dt><dd>' + escapeHTML(c.kind) + '</dd>'
             + '<dt>domains</dt><dd>' + escapeHTML((c.domains || []).join(', ')) + '</dd>'
             + '<dt>source</dt><dd>' + escapeHTML(c.source)
-            +   (c.source === 'live' ? ' (what it is running with)' : ' (the file; the box was unreachable)')
+            +   (c.source === 'live'
+                  ? ' (what it is running with)'
+                  : ' (the file; ' + escapeHTML(c.note || 'the box did not answer') + ')')
             + '</dd></dl>'
             + missingList + '<div class="kv">' + rows + '</div>' + issues
             + '<div style="margin-top:0.6rem">'

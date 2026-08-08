@@ -42,6 +42,49 @@ public struct EnvContract: Sendable, Equatable {
     public func isDeclared(_ key: String) -> Bool {
         required.contains(key) || optional.contains(key) || retired.contains(key)
     }
+
+    /// Whether the contract knows this key under any heading.
+    public func recognizes(_ key: String) -> Bool {
+        isDeclared(key) || isIgnored(key) || secret.contains(key)
+    }
+
+    /// The keys in `updates` this contract does not know, ignoring removals: deleting a typo
+    /// must not require spelling it correctly a second time.
+    public func unknownKeys(in updates: [String: String]) -> [String] {
+        updates.filter { !$0.value.isEmpty && !recognizes($0.key) }.map(\.key).sorted()
+    }
+
+    /// Contract keys within a small edit distance of a misspelled one, closest first.
+    ///
+    /// Case-blind and deliberately narrow: DATABSE_URL should find DATABASE_URL without
+    /// offering the whole contract as consolation.
+    public func nearest(to key: String, limit: Int = 3) -> [String] {
+        let upper = key.uppercased()
+        return required.union(optional).union(secret)
+            .map { (name: $0, distance: Self.editDistance(upper, $0.uppercased())) }
+            .filter { $0.distance <= max(2, key.count / 4) }
+            .sorted { ($0.distance, $0.name) < ($1.distance, $1.name) }
+            .prefix(limit)
+            .map(\.name)
+    }
+
+    static func editDistance(_ a: String, _ b: String) -> Int {
+        let a = Array(a.utf8)
+        let b = Array(b.utf8)
+        if a.isEmpty || b.isEmpty { return a.count + b.count }
+        var previous = Array(0...b.count)
+        for (i, characterA) in a.enumerated() {
+            var current = [i + 1] + [Int](repeating: 0, count: b.count)
+            for (j, characterB) in b.enumerated() {
+                current[j + 1] = min(
+                    previous[j + 1] + 1,
+                    current[j] + 1,
+                    previous[j] + (characterA == characterB ? 0 : 1))
+            }
+            previous = current
+        }
+        return previous[b.count]
+    }
 }
 
 extension EnvContract {

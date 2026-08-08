@@ -808,6 +808,27 @@ struct Config: ParsableCommand {
                 updates[String(parts[0])] = String(parts[1])
             }
 
+            // Same refusal-by-name the bootstrap settings get. A misspelled key is written
+            // without complaint and only ever resurfaces later as `unexpected` in an audit —
+            // by which time the service has been running without the value for weeks.
+            if let contract = EnvContract.contract(for: target.kind, backend: spec.backend) {
+                let unknown = contract.unknownKeys(in: updates)
+                if !unknown.isEmpty {
+                    let hints = unknown.map { key -> String in
+                        let near = contract.nearest(to: key)
+                        return near.isEmpty ? key : "\(key) (nearest: \(near.joined(separator: ", ")))"
+                    }
+                    throw ValidationError(
+                        "\(target.kind.rawValue) on \(spec.backend.rawValue) recognises no key named "
+                            + hints.joined(separator: ", ")
+                            + "; nothing written")
+                }
+                for key in updates.keys.sorted()
+                where contract.retired.contains(key) && !updates[key]!.isEmpty {
+                    print("  note: \(key) is retired for \(target.kind.rawValue); the service no longer reads it")
+                }
+            }
+
             let url = ConfigSync.configURL(for: target, in: spec, manifestPath: manifestPath)
             let declared = (try? ConfigSync.readDeclared(at: url)) ?? [:]
             let merged = ConfigSync.applying(updates, to: declared)
