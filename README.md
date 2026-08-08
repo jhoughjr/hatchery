@@ -15,7 +15,9 @@ Working today:
 ```sh
 hatchery config validate <config.json> --service mwserver --backend dokku
 hatchery stack list --manifest hatchery.json
+hatchery stack clone <source> <target> [--create --tofu-dir <dir> --yes]
 hatchery status --manifest hatchery.json
+hatchery events [--stack <name>]
 hatchery config audit --manifest hatchery.json
 hatchery config sync <stack> --manifest hatchery.json
 hatchery service new <stack> <name> --kind <kind> --domain <d> --image <ref>
@@ -23,6 +25,27 @@ hatchery deploy <stack> <service> --image <ref>
 hatchery up|down|restart <stack>
 hatchery serve
 ```
+
+### Cloning a stack
+
+`stack clone` reads a stack's config — live from the box when the backend can answer, the
+declared sidecar otherwise, and it says which — and decides, key by key, what a copy into
+another environment should do: carry it, rewrite the names in it, mint a fresh one, or refuse
+and say why. Nothing that points at the source's database or grants the source's authority is
+ever copied. Optional keys the source sets ride along; unset ones aren't mentioned. Without
+`--create` it only reports; with `--create --tofu-dir <dir> --yes` it bootstraps the stack,
+scaffolds the services, layers the carried values on, and prints the `config set` commands for
+what still needs a person.
+
+### History and alerts
+
+`hatchery serve` polls on its own clock (`--watch-interval`, default 30s), so watching does
+not depend on a browser tab being open. Every observed change — a service worsening,
+recovering, or degraded for a new reason — is appended to `<manifest>.history.jsonl` beside
+the manifest, printed on the serve console, and listed on the dashboard. `hatchery events`
+reads the same file from the CLI. `--alert-webhook <url>` POSTs worsening transitions (only
+worsening; recovery is in the record but never wakes anyone) as JSON with a ready-made `text`
+line, so anything chat-shaped can consume it directly.
 
 ### Finding the manifest
 

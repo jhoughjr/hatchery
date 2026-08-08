@@ -98,6 +98,14 @@ public struct TransitionLog: Sendable {
         self.path = path
     }
 
+    /// The sidecar path for a manifest: `hatchery.json` → `hatchery.history.jsonl`. Takes the
+    /// manifest's own name so several manifests on one machine keep separate records, and
+    /// lives here so `serve` (which writes it) and `events` (which reads it) cannot disagree.
+    public static func defaultPath(besideManifest path: String) -> String {
+        URL(fileURLWithPath: path).deletingPathExtension()
+            .appendingPathExtension("history.jsonl").path
+    }
+
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
