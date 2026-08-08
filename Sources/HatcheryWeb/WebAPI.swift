@@ -147,6 +147,72 @@ enum Wire {
         let confirm: String
     }
 
+    struct ClonePlanBody: Decodable {
+        let source: String
+        let target: String
+        let environment: String?
+    }
+
+    struct CloneBody: Decodable {
+        let source: String
+        let target: String
+        let environment: String?
+        let tofuDir: String
+        let host: String?
+        let port: Int?
+        let network: String?
+        let gated: Bool?
+        let confirm: String
+    }
+
+    /// One key's fate in a clone plan. `action` is the CLI's vocabulary — carry, rewrite,
+    /// mint, needs, skip — so the two surfaces describe a clone in the same words.
+    struct CloneKeyView: Encodable {
+        let key: String
+        let action: String
+        /// Why it was refused, or how it is minted.
+        let detail: String?
+        /// The rewrite, shown only for keys that are not secret.
+        let from: String?
+        let to: String?
+        /// The carried value, withheld for secret keys — the browser gets names, not values.
+        let value: String?
+        let required: Bool
+        let secret: Bool
+    }
+
+    struct CloneServiceView: Encodable {
+        let name: String
+        let kind: String
+        /// Where this service's config was read from: the box, or the declared file.
+        let origin: String
+        let domains: [String]
+        let keys: [CloneKeyView]
+    }
+
+    struct ClonePlanView: Encodable {
+        let source: String
+        let target: String
+        let environment: String
+        let carried: Int
+        let unresolved: Int
+        let services: [CloneServiceView]
+    }
+
+    struct CloneCreated: Encodable {
+        let ok: Bool
+        let message: String
+        let services: [ClonedSummary]
+        /// The seal line, when the state directory seals.
+        let detail: String?
+
+        struct ClonedSummary: Encodable {
+            let name: String
+            let carried: Int
+            let missing: [MissingKey]
+        }
+    }
+
     struct ApplyBody: Decodable {
         let stack: String
         let confirm: String
@@ -247,6 +313,7 @@ public struct HatcheryAPI: Sendable {
     private let bootstrapper: StackBootstrapper
     private let logReader: LogReader
     private let liveConfig: LiveConfigReader
+    private let clonePlanner: StackClonePlanner
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
     private let sealState: @Sendable (String) async -> String?
@@ -267,6 +334,7 @@ public struct HatcheryAPI: Sendable {
         bootstrapper: StackBootstrapper = StackBootstrapper(),
         logReader: LogReader = LogReader(),
         liveConfig: LiveConfigReader = LiveConfigReader(),
+        clonePlanner: StackClonePlanner = StackClonePlanner(),
         readConfig: @escaping @Sendable (URL) throws -> [String: String] = {
             (try? ConfigSync.readDeclared(at: $0)) ?? [:]
         },
@@ -295,6 +363,7 @@ public struct HatcheryAPI: Sendable {
         self.bootstrapper = bootstrapper
         self.logReader = logReader
         self.liveConfig = liveConfig
+        self.clonePlanner = clonePlanner
         self.readConfig = readConfig
         self.writeConfig = writeConfig
         self.sealState = sealState
@@ -350,6 +419,10 @@ public struct HatcheryAPI: Sendable {
             return await createStack(request)
         case ("POST", "/api/services/new"):
             return await createService(request)
+        case ("POST", "/api/stack/clone/plan"):
+            return await clonePlan(request)
+        case ("POST", "/api/stack/clone"):
+            return await cloneStack(request)
         case ("POST", "/api/config/set"):
             return await setConfig(request)
         case ("GET", "/api/state"):
@@ -589,6 +662,216 @@ public struct HatcheryAPI: Sendable {
                         }
                         return Wire.MissingKey(key: $0.key, reason: "", secret: secret.contains($0.key))
                     }))
+        } catch {
+            return .failure(400, "\(error)")
+        }
+    }
+
+    // MARK: - Cloning a stack
+
+    /// Loads the manifest and checks a clone's source and target make sense, shared by the
+    /// plan and create routes so the two cannot disagree about what is cloneable.
+    private enum CloneContext {
+        case ok(StackManifest, StackSpec)
+        case refused(WebResponse)
+    }
+
+    private func cloneContext(source: String, target: String) -> CloneContext {
+        let manifest: StackManifest
+        do {
+            manifest = try loadManifest()
+        } catch {
+            return .refused(.failure(500, "\(error)"))
+        }
+        guard let stack = manifest.stack(named: source) else {
+            return .refused(.failure(404, "no stack named '\(source)'"))
+        }
+        guard manifest.stack(named: target) == nil else {
+            return .refused(
+                .failure(400, "'\(target)' already exists; clone to a name that does not"))
+        }
+        return .ok(manifest, stack)
+    }
+
+    private func clonePlan(_ request: WebRequest) async -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.ClonePlanBody.self, from: request.body)
+        else {
+            return .failure(400, "expected {source, target, environment}")
+        }
+        let stack: StackSpec
+        switch cloneContext(source: body.source, target: body.target) {
+        case .refused(let response): return response
+        case .ok(_, let found): stack = found
+        }
+
+        let environment = Environment(rawValue: body.environment ?? "staging")
+        do {
+            let planned = try await clonePlanner.plan(
+                stack: stack, into: body.target, environment: environment,
+                manifestPath: manifestPath())
+            return .json(view(of: planned, environment: environment))
+        } catch {
+            return .failure(400, "\(error)")
+        }
+    }
+
+    private func view(of planned: PlannedClone, environment: Environment) -> Wire.ClonePlanView {
+        Wire.ClonePlanView(
+            source: planned.plan.source,
+            target: planned.plan.target,
+            environment: environment.rawValue,
+            carried: planned.plan.carriedCount,
+            unresolved: planned.plan.unresolvedCount,
+            services: planned.plan.services.map { service in
+                Wire.CloneServiceView(
+                    name: service.name,
+                    kind: service.kind.rawValue,
+                    origin: planned.origins[service.name] ?? "declared file",
+                    domains: service.domains,
+                    keys: service.keys.sorted(by: { $0.key < $1.key }).map { key in
+                        // Values are why the config file is gitignored: a secret key's value
+                        // never reaches the browser, in any of the actions.
+                        switch key.disposition {
+                        case .carried:
+                            return Wire.CloneKeyView(
+                                key: key.key, action: "carry", detail: nil, from: nil, to: nil,
+                                value: key.secret ? nil : key.value,
+                                required: key.required, secret: key.secret)
+                        case .rewritten(let from, let to):
+                            return Wire.CloneKeyView(
+                                key: key.key, action: "rewrite", detail: nil,
+                                from: key.secret ? nil : from, to: key.secret ? nil : to,
+                                value: nil, required: key.required, secret: key.secret)
+                        case .minted(let how):
+                            return Wire.CloneKeyView(
+                                key: key.key, action: "mint",
+                                detail: "\(how); the source's would grant its authority",
+                                from: nil, to: nil, value: nil,
+                                required: key.required, secret: key.secret)
+                        case .refused(let why):
+                            return Wire.CloneKeyView(
+                                key: key.key, action: key.required ? "needs" : "skip",
+                                detail: why, from: nil, to: nil, value: nil,
+                                required: key.required, secret: key.secret)
+                        }
+                    })
+            })
+    }
+
+    /// The browser's `--create`: bootstraps the stack, scaffolds each service, and layers the
+    /// carried values on — the same order the CLI does it, through the same components.
+    private func cloneStack(_ request: WebRequest) async -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.CloneBody.self, from: request.body) else {
+            return .failure(400, "expected {source, target, tofuDir, confirm}")
+        }
+        guard body.confirm == body.target else {
+            return .failure(400, "confirmation did not match; expected '\(body.target)'")
+        }
+        guard !body.tofuDir.isEmpty else {
+            return .failure(400, "a clone needs a tofu directory for its declarations")
+        }
+        let manifest: StackManifest
+        let sourceStack: StackSpec
+        switch cloneContext(source: body.source, target: body.target) {
+        case .refused(let response): return response
+        case .ok(let loaded, let found):
+            manifest = loaded
+            sourceStack = found
+        }
+
+        // Planned server-side rather than accepted from the client: the plan the browser
+        // showed is advice, and the one acted on is computed from the same inputs here.
+        let environment = Environment(rawValue: body.environment ?? "staging")
+        let planned: PlannedClone
+        do {
+            planned = try await clonePlanner.plan(
+                stack: sourceStack, into: body.target, environment: environment,
+                manifestPath: manifestPath())
+        } catch {
+            return .failure(400, "\(error)")
+        }
+
+        do {
+            var settings = sourceStack.settings ?? [:]
+            let host = body.host ?? sourceStack.host ?? settings["host"] ?? ""
+            settings["host"] = host
+
+            let plan = try bootstrapper.plan(
+                name: body.target, backend: sourceStack.backend, host: host,
+                tofuDir: body.tofuDir, environment: environment, settings: settings,
+                into: manifest, manifestPath: manifestPath())
+            let created = try await bootstrapper.create(plan)
+            try saveManifest(created.manifest, created.manifestPath)
+
+            var current = created.manifest
+            var written: [String] = []
+            var summaries: [Wire.CloneCreated.ClonedSummary] = []
+
+            for service in planned.plan.services {
+                guard let stack = current.stack(named: body.target) else {
+                    // Half a stack with no explanation is the worst outcome this route has.
+                    return .failure(
+                        500,
+                        "'\(body.target)' vanished from the manifest mid-clone after "
+                            + "[\(written.joined(separator: ", "))] were written")
+                }
+
+                // Siblings are the services already added to *this* clone, so a shared key is
+                // shared within the new stack rather than carried from the source.
+                var siblings: [String: [String: String]] = [:]
+                for existing in stack.services {
+                    let url = ConfigSync.configURL(
+                        for: existing, in: stack, manifestPath: created.manifestPath)
+                    if let config = try? readConfig(url) { siblings[existing.name] = config }
+                }
+
+                let spec = ServiceSpec(
+                    name: service.name, kind: service.kind, image: service.image,
+                    domains: service.domains, configFile: "\(service.name).config.json",
+                    baseURL: service.baseURL, healthPath: service.healthPath)
+
+                let result = try await scaffolder.plan(
+                    service: spec, into: body.target, manifest: current,
+                    containerPort: body.port ?? 8080, network: body.network,
+                    gated: body.gated ?? false, siblings: siblings)
+                try scaffolder.write(result, in: stack)
+                current = result.manifest
+                try saveManifest(current, created.manifestPath)
+
+                // The carried and rewritten values, layered over what the scaffolder wrote.
+                if let target = current.stack(named: body.target),
+                    let landed = target.service(named: service.name) {
+                    let url = ConfigSync.configURL(
+                        for: landed, in: target, manifestPath: created.manifestPath)
+                    let existing = (try? readConfig(url)) ?? [:]
+                    try writeConfig(url, ConfigSync.applying(service.values, to: existing))
+                }
+
+                written.append(service.name)
+                summaries.append(
+                    Wire.CloneCreated.ClonedSummary(
+                        name: service.name,
+                        carried: service.values.count,
+                        missing: service.unresolved.map {
+                            let reason: String
+                            if case .refused(let why) = $0.disposition {
+                                reason = why
+                            } else {
+                                reason = ""
+                            }
+                            return Wire.MissingKey(
+                                key: $0.key, reason: reason, secret: $0.secret)
+                        }))
+            }
+
+            let sealed = await sealState(created.manifestPath)
+            return .json(
+                Wire.CloneCreated(
+                    ok: planned.plan.unresolvedCount == 0,
+                    message: "cloned '\(body.source)' → '\(body.target)' in \(body.tofuDir), "
+                        + "tofu init ok",
+                    services: summaries,
+                    detail: sealed))
         } catch {
             return .failure(400, "\(error)")
         }

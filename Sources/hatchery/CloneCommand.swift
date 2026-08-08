@@ -82,57 +82,28 @@ extension Stack {
                     "'\(target)' already exists in \(path); clone to a name that does not")
             }
 
-            let cloner = StackCloner()
             print("\(source) → \(target)  [\(spec.backend.rawValue) · \(env.rawValue)]")
 
-            var totalUnresolved = 0
-            var totalCarried = 0
-            var cloned: [ClonedService] = []
+            // The reading, rewriting and classifying live in the planner, shared with the
+            // dashboard's clone — two implementations of this loop is how the CLI and the
+            // browser come to promise different clones.
+            let planned: PlannedClone
+            do {
+                planned = try await StackClonePlanner().plan(
+                    stack: spec, into: target, environment: env, manifestPath: path)
+            } catch let error as StackClonePlanner.UnreadableConfig {
+                throw ValidationError("\(error)")
+            }
 
-            let live = LiveConfigReader()
-            for service in spec.services {
-                // The box's config, not the sidecar, when the backend can answer: the declared
-                // file misses exactly the keys someone set by hand — the drift `config audit`
-                // exists to find. When live reading fails or isn't supported the declared file
-                // stands in, and the plan says which one it planned from.
-                let url = ConfigSync.configURL(for: service, in: spec, manifestPath: path)
-                let config: [String: String]
-                let origin: String
-                do {
-                    config = try await live.config(for: service, in: spec)
-                    origin = "live config on \(spec.hostAddress ?? spec.backend.rawValue)"
-                } catch {
-                    let why = error is LiveConfigError
-                        ? "" : " — live read failed: \(error); the box may disagree"
-                    do {
-                        config = try ConfigSync.readDeclared(at: url)
-                        origin = "declared file\(why)"
-                    } catch {
-                        // An unreadable sidecar is not an empty one. Planning from [:] would
-                        // report every key as never-set, which is a different claim entirely.
-                        throw ValidationError(
-                            "cannot read \(service.name)'s config: \(url.path): \(error)")
-                    }
-                }
-
-                // Through the planner's rewrite, not a plain stack-name substitution. A sibling
-                // service's domain (`paylab.opi`) contains no stack name, so the naive version
-                // left it untouched — and a clone claiming production's domain is not a clone.
-                let domains = service.domains.map {
-                    StackCloner.rewrite($0, from: spec, to: target, environment: env) ?? $0
-                }
-
-                let planned = try await cloner.plan(
-                    service: service, from: spec, into: target, environment: env,
-                    sourceConfig: config, domains: domains)
-
+            for service in planned.plan.services {
+                let origin = planned.origins[service.name] ?? "declared file"
                 print("")
-                print("  \(planned.name)  [\(planned.kind.rawValue)]  from \(origin)")
-                if !planned.domains.isEmpty {
-                    print("    domains  \(planned.domains.joined(separator: ", "))")
+                print("  \(service.name)  [\(service.kind.rawValue)]  from \(origin)")
+                if !service.domains.isEmpty {
+                    print("    domains  \(service.domains.joined(separator: ", "))")
                 }
 
-                for key in planned.keys.sorted(by: { $0.key < $1.key }) {
+                for key in service.keys.sorted(by: { $0.key < $1.key }) {
                     switch key.disposition {
                     case .carried:
                         print("    carry    \(key.key)\(display(key))")
@@ -153,14 +124,13 @@ extension Stack {
                     }
                 }
 
-                totalUnresolved += planned.unresolved.count
-                totalCarried += planned.values.count
-                cloned.append(planned)
             }
 
+            let carried = planned.plan.carriedCount
+            let unresolved = planned.plan.unresolvedCount
             print("")
-            print("  \(totalCarried) key(s) resolved, \(totalUnresolved) still need a person")
-            if totalUnresolved > 0 {
+            print("  \(carried) key(s) resolved, \(unresolved) still need a person")
+            if unresolved > 0 {
                 print("  those are the ones that point at something only \(source) has")
             }
 
@@ -170,7 +140,9 @@ extension Stack {
                 return
             }
 
-            try await build(clone: cloned, from: spec, manifest: parsed, at: path, environment: env)
+            try await build(
+                clone: planned.plan.services, from: spec, manifest: parsed, at: path,
+                environment: env)
         }
 
         /// Creates the stack, its services, and their config.

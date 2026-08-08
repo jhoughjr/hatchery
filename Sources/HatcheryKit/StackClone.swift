@@ -80,6 +80,15 @@ public struct ClonePlan: Sendable, Equatable {
     public let environment: Environment
     public let services: [ClonedService]
 
+    public init(
+        source: String, target: String, environment: Environment, services: [ClonedService]
+    ) {
+        self.source = source
+        self.target = target
+        self.environment = environment
+        self.services = services
+    }
+
     public var unresolvedCount: Int {
         services.reduce(0) { $0 + $1.unresolved.count }
     }
