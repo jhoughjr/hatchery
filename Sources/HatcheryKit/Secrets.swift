@@ -94,6 +94,15 @@ public struct SecretMinter: Sendable {
     /// type is a key nothing accepts. CryptoKit has no RSA, so this shells out to `openssl` and
     /// reads the PKCS#1 structure directly.
     public func signingJWKS(kid: String? = nil) async throws -> String {
+        try await signingKeypair(kid: kid).jwks
+    }
+
+    /// The JWKS and the private key it was derived from, together.
+    ///
+    /// Together, because they are one secret: minting a JWKS and discarding its PEM produces a
+    /// service that publishes keys it cannot sign with — and no person can supply the matching
+    /// half of a key that was thrown away. Anything that mints one needs both.
+    public func signingKeypair(kid: String? = nil) async throws -> (pem: String, jwks: String) {
         let pem: String
         do {
             let data = try await run(["openssl", "genrsa", "2048"])
@@ -111,7 +120,7 @@ public struct SecretMinter: Sendable {
         guard let json = String(data: try encoder.encode(document), encoding: .utf8) else {
             throw SecretError.malformedKeyMaterial(reason: "the JWKS did not encode as UTF-8")
         }
-        return json
+        return (pem, json)
     }
 
     /// Converts a PKCS#1 RSA private key into a private JWK.
@@ -269,11 +278,16 @@ public struct SecretPlanner: Sendable {
             return []
         }
 
+        // The keypair resolves as a pair. Walking the keys independently is what produced a
+        // freshly minted JWKS beside "supply the existing key" for its own private half — a
+        // key that was generated and thrown away, which no person could ever supply.
+        var mintedPEM: String?
         var resolutions: [SecretResolution] = []
         for key in contract.required.sorted() {
             resolutions.append(
                 try await resolve(
-                    key: key, for: service, in: stack, siblings: siblings, mintKeypair: mintKeypair))
+                    key: key, for: service, in: stack, siblings: siblings,
+                    mintKeypair: mintKeypair, mintedPEM: &mintedPEM))
         }
         return resolutions
     }
@@ -283,14 +297,30 @@ public struct SecretPlanner: Sendable {
         for service: ServiceSpec,
         in stack: StackSpec,
         siblings: [String: [String: String]],
-        mintKeypair: Bool
+        mintKeypair: Bool,
+        mintedPEM: inout String?
     ) async throws -> SecretResolution {
         if key == "KEYPAIR_JWKS" {
             if !mintKeypair, let (name, value) = Self.sibling(key, in: siblings) {
                 return SecretResolution(key: key, origin: .shared(from: name), value: value)
             }
-            return SecretResolution(
-                key: key, origin: .minted("RSA-2048, RS512"), value: try await minter.signingJWKS())
+            let pair = try await minter.signingKeypair()
+            mintedPEM = pair.pem
+            return SecretResolution(key: key, origin: .minted("RSA-2048, RS512"), value: pair.jwks)
+        }
+
+        if key == "PRIVATE_KEY_PEM" {
+            // The stack's key, wherever the stack keeps it: on a sibling when one carries it,
+            // or the private half of the keypair this very resolution minted. Only a stack
+            // whose key lives entirely outside hatchery still needs a person.
+            if let (name, value) = Self.sibling(key, in: siblings) {
+                return SecretResolution(key: key, origin: .shared(from: name), value: value)
+            }
+            if let pem = mintedPEM {
+                return SecretResolution(
+                    key: key, origin: .minted("the private half of the minted keypair"),
+                    value: pem)
+            }
         }
 
         if Self.mintedTokens.contains(key) {
