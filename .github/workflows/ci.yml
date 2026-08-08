@@ -85,17 +85,31 @@ jobs:
           done
           api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
           auth="Authorization: Bearer ${GITHUB_TOKEN}"
-          pick_id() { python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])'; }
-          old=$(curl -sf -H "$auth" "$api/releases/tags/rolling" 2>/dev/null | pick_id 2>/dev/null || true)
-          if [ -n "$old" ]; then
+          # Prior rolling releases are found through the list, not the by-tag lookup: GitHub
+          # has left this release in draft state before, and the by-tag route hides drafts —
+          # so the lookup missed it, the delete was skipped, and every run after that
+          # compounded the mess. The list shows everything.
+          for old in $(curl -sf -H "$auth" "$api/releases?per_page=100" \
+            | python3 -c 'import sys,json; [print(r["id"]) for r in json.load(sys.stdin) if r.get("tag_name")=="rolling"]'); do
             curl -sf -X DELETE -H "$auth" "$api/releases/$old"
-            curl -sf -X DELETE -H "$auth" "$api/git/refs/tags/rolling" || true
-          fi
+          done
+          curl -sf -X DELETE -H "$auth" "$api/git/refs/tags/rolling" || true
           rid=$(curl -sf -X POST -H "$auth" "$api/releases" \
-            -d "{\"tag_name\":\"rolling\",\"target_commitish\":\"${GITHUB_SHA}\",\"name\":\"rolling — latest main build\",\"prerelease\":true}" \
-            | pick_id)
+            -d "{\"tag_name\":\"rolling\",\"target_commitish\":\"${GITHUB_SHA}\",\"name\":\"rolling — latest main build\",\"prerelease\":true,\"draft\":false}" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
           cp "$HOME/.hatchery-ci-scratch/release/hatchery" hatchery-linux-arm64
           curl -sf -X POST -H "$auth" -H "Content-Type: application/octet-stream" \
             --data-binary @hatchery-linux-arm64 \
             "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${rid}/assets?name=hatchery-linux-arm64" >/dev/null
-          echo "published hatchery-linux-arm64 as the rolling release for ${GITHUB_SHA}"
+          # The step is done when the tag answers with a non-draft release carrying the
+          # asset — verified from the outside, the same way a download would find it. The
+          # first version trusted the POST and printed success over a draft nobody could
+          # reach by tag.
+          curl -sf -H "$auth" "$api/releases/tags/rolling" | python3 -c '
+          import sys, json
+          release = json.load(sys.stdin)
+          assert not release["draft"], "rolling release is a draft"
+          names = [a["name"] for a in release["assets"]]
+          assert "hatchery-linux-arm64" in names, f"asset missing, found {names}"
+          ' || { echo "::error::rolling release did not verify — draft, missing, or no asset"; exit 1; }
+          echo "published and verified hatchery-linux-arm64 as the rolling release for ${GITHUB_SHA}"
