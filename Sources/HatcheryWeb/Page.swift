@@ -1000,8 +1000,9 @@ enum Page {
                      'Where the copy is headed. Values naming ' + source + "'s environment "
                      + 'are rewritten to match.')
             + field('c-dir', 'Tofu directory', '~/infra-state/',
-                    'Where the tofu configuration and config files for the copy are written. '
-                    + 'Must be empty or not exist.')
+                    'A directory for this clone alone — it must be empty or not exist. '
+                    + 'End with / and the stack name is appended, so the default becomes '
+                    + '~/infra-state/<name>.')
             + field('c-port', 'Container port', '8080',
                     "The source's is not recorded in the manifest; say what it used.")
             + field('c-network', 'Docker network', '',
@@ -1011,12 +1012,17 @@ enum Page {
 
           const target = $('c-target').value.trim();
           const env = $('c-env').value;
-          const dir = $('c-dir').value.trim();
+          // A trailing slash means "in here": the stack's own directory is appended, so the
+          // default of ~/infra-state/ lands each clone in its own empty directory instead of
+          // pointing every clone at the one directory guaranteed to be refused.
+          let dir = $('c-dir').value.trim();
+          if (dir.endsWith('/')) dir += target;
           const port = parseInt($('c-port').value, 10) || 8080;
           const network = $('c-network').value.trim() || null;
 
           busy = true;
-          const plan = await send('/api/stack/clone/plan', {source, target, environment: env});
+          const plan = await send('/api/stack/clone/plan',
+            {source, target, environment: env, tofuDir: dir});
           busy = false;
           if (!plan.ok) { log(plan.data.error || 'plan failed', true); return; }
 
@@ -1043,13 +1049,18 @@ enum Page {
               }).join('')
             + '<div>&nbsp;</div>').join('');
 
+          const blocked = p.warning
+            ? '<div class="err" style="margin-bottom:0.5rem">' + escapeHTML(p.warning)
+              + '</div>'
+            : '';
           const create = await step('Clone plan — ' + source + ' → ' + target,
             p.carried + ' key(s) resolved, ' + p.unresolved + ' still need a person',
-            '<pre class="out">' + html + '</pre>'
+            blocked
+            + '<pre class="out">' + html + '</pre>'
             + '<div class="hint" style="margin-top:0.5rem">Create writes the new stack into '
             + escapeHTML(dir) + ' and runs tofu init. Nothing touches '
             + escapeHTML(source) + '.</div>',
-            'create');
+            p.warning ? 'create anyway' : 'create');
           if (!create) { log('plan only; nothing written'); return; }
 
           busy = true;
