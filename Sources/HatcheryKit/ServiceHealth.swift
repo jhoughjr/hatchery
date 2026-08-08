@@ -83,9 +83,6 @@ struct HealthPayload: Decodable {
 }
 
 public enum HealthInterpreter {
-    /// The readiness path this tool asks for.
-    public static let defaultPath = "/api/health"
-
     /// Read one HTTP answer into a state.
     ///
     /// A body is parsed only when the service called it JSON. Some services in this estate
