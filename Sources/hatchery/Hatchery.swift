@@ -7,10 +7,16 @@ import HatcheryWeb
     import Glibc
 #endif
 
-/// C stdio's `stdout` is a mutable global holding a non-Sendable pointer, which strict
-/// concurrency refuses to read from checked code. The pointer is set at process start and
-/// never reassigned, so one deliberately unchecked alias is safe on both platforms.
-private nonisolated(unsafe) let processStdout = stdout
+/// Pushes everything printed so far out to wherever stdout points.
+///
+/// The serve console is part of the record, and it is redirected to a file more often than
+/// watched on a terminal — where stdout is block-buffered: lines sit invisible until 4 KiB
+/// accumulate, and a kill signal discards the buffer entirely. Switching the stream to line
+/// buffering would fix it once, but the C global that names the stream is unreachable from
+/// strict concurrency on Glibc — `fflush(nil)` flushes every open stream without naming one.
+private func flushConsole() {
+    fflush(nil)
+}
 
 @main
 struct Hatchery: AsyncParsableCommand {
@@ -427,13 +433,6 @@ struct Serve: AsyncParsableCommand {
     var alertWebhook: String?
 
     func run() async throws {
-        // The console is part of the record here, and this process runs for days with its
-        // output redirected to a file more often than to a terminal. Redirected stdout is
-        // block-buffered by default, which holds transition lines invisible until 4 KiB
-        // accumulate — and a kill signal discards the buffer entirely, banner and all. Line
-        // buffering makes every printed line land the moment it ends.
-        setvbuf(processStdout, nil, _IOLBF, 0)
-
         // Resolved once, at boot: the server should keep reading the same file it started with
         // rather than follow the working directory somewhere else mid-session.
         //
@@ -494,9 +493,11 @@ struct Serve: AsyncParsableCommand {
                 let clock = DateFormatter()
                 clock.dateFormat = "HH:mm:ss"
                 while !Task.isCancelled {
-                    for change in await watcher.poll() {
+                    let changes = await watcher.poll()
+                    for change in changes {
                         print("  \(clock.string(from: change.at)) \(change.line)")
                     }
+                    if !changes.isEmpty { flushConsole() }
                     try? await Task.sleep(for: .seconds(interval))
                 }
             }
@@ -521,6 +522,7 @@ struct Serve: AsyncParsableCommand {
         } else {
             print("  watcher off — no history or alerts while --watch-interval 0")
         }
+        flushConsole()
         try await server.run()
     }
 }
