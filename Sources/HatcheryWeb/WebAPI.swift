@@ -151,6 +151,9 @@ enum Wire {
         let source: String
         let target: String
         let environment: String?
+        /// When given, the plan also checks the directory would be accepted — so a full
+        /// directory is a line on the plan screen, not a refusal after the create click.
+        let tofuDir: String?
     }
 
     struct CloneBody: Decodable {
@@ -197,6 +200,9 @@ enum Wire {
         let carried: Int
         let unresolved: Int
         let services: [CloneServiceView]
+        /// Why the create would be refused as things stand — an occupied tofu directory,
+        /// mostly. The plan is still shown; this line is what to fix before creating.
+        let warning: String?
     }
 
     struct CloneCreated: Encodable {
@@ -698,10 +704,13 @@ public struct HatcheryAPI: Sendable {
         else {
             return .failure(400, "expected {source, target, environment}")
         }
+        let manifest: StackManifest
         let stack: StackSpec
         switch cloneContext(source: body.source, target: body.target) {
         case .refused(let response): return response
-        case .ok(_, let found): stack = found
+        case .ok(let loaded, let found):
+            manifest = loaded
+            stack = found
         }
 
         let environment = Environment(rawValue: body.environment ?? "staging")
@@ -709,13 +718,33 @@ public struct HatcheryAPI: Sendable {
             let planned = try await clonePlanner.plan(
                 stack: stack, into: body.target, environment: environment,
                 manifestPath: manifestPath())
-            return .json(view(of: planned, environment: environment))
+
+            // The same check the create would make, made now. Failing it after the create
+            // click cost a whole trip through the wizard; a full directory belongs on the
+            // plan screen, where the person still has the form in front of them.
+            var warning: String?
+            if let dir = body.tofuDir, !dir.isEmpty {
+                var settings = stack.settings ?? [:]
+                let host = stack.host ?? settings["host"] ?? ""
+                settings["host"] = host
+                do {
+                    _ = try bootstrapper.plan(
+                        name: body.target, backend: stack.backend, host: host,
+                        tofuDir: dir, environment: environment, settings: settings,
+                        into: manifest, manifestPath: manifestPath())
+                } catch {
+                    warning = "\(error)"
+                }
+            }
+            return .json(view(of: planned, environment: environment, warning: warning))
         } catch {
             return .failure(400, "\(error)")
         }
     }
 
-    private func view(of planned: PlannedClone, environment: Environment) -> Wire.ClonePlanView {
+    private func view(
+        of planned: PlannedClone, environment: Environment, warning: String? = nil
+    ) -> Wire.ClonePlanView {
         Wire.ClonePlanView(
             source: planned.plan.source,
             target: planned.plan.target,
@@ -755,7 +784,8 @@ public struct HatcheryAPI: Sendable {
                                 required: key.required, secret: key.secret)
                         }
                     })
-            })
+            },
+            warning: warning)
     }
 
     /// The browser's `--create`: bootstraps the stack, scaffolds each service, and layers the

@@ -102,6 +102,57 @@ struct CloneRouteTests {
         #expect(response.status == 400)
     }
 
+    @Test("a full tofu directory is a warning on the plan, not a refusal after create")
+    func planWarnsAboutAFullDirectory() async throws {
+        // What shipped first: the plan looked fine, and the create click was refused with
+        // "already holds a tofu configuration" — a whole trip through the wizard, wasted.
+        let api = HatcheryAPI(
+            loadManifest: { StackManifest(stacks: [self.stack()]) },
+            manifestPath: { "/infra/hatchery.json" },
+            bootstrapper: StackBootstrapper(
+                execute: { _, _ in CommandOutput(status: 0, standardOutput: "") },
+                writeFile: { _, _ in },
+                fileExists: { _ in true },
+                createDirectory: { _ in }),
+            clonePlanner: planner(config: [:]))
+
+        let response = await api.handle(
+            post("/api/stack/clone/plan", [
+                "source": "mwlab", "target": "mwlab-2", "tofuDir": "/infra",
+            ]))
+
+        #expect(response.status == 200)
+        let plan = try decoded(response)
+        let warning = try #require(plan["warning"] as? String)
+        #expect(warning.contains("already holds"))
+    }
+
+    @Test("create into a full directory refuses before anything is written")
+    func createRefusesAFullDirectory() async throws {
+        let written = Written()
+        let api = HatcheryAPI(
+            loadManifest: { StackManifest(stacks: [self.stack()]) },
+            manifestPath: { "/infra/hatchery.json" },
+            bootstrapper: StackBootstrapper(
+                execute: { _, _ in CommandOutput(status: 0, standardOutput: "") },
+                writeFile: { _, _ in },
+                fileExists: { _ in true },
+                createDirectory: { _ in }),
+            clonePlanner: planner(config: [:]),
+            writeConfig: { url, values in written.record(url.path, values) })
+
+        let response = await api.handle(
+            post("/api/stack/clone", [
+                "source": "mwlab", "target": "mwlab-2", "tofuDir": "/infra",
+                "confirm": "mwlab-2",
+            ]))
+
+        #expect(response.status == 400)
+        let message = String(decoding: response.body, as: UTF8.self)
+        #expect(message.contains("already holds"))
+        #expect(written.all().isEmpty)
+    }
+
     @Test("create refuses a mismatched confirmation and writes nothing")
     func createConfirmMismatch() async throws {
         let written = Written()
