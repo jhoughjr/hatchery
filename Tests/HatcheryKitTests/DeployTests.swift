@@ -336,6 +336,29 @@ struct DeployTests {
         let commands = recorder.commands
         #expect(commands.count == 1)
     }
+
+    @Test("an unchanged image with apply still converges what the plan found")
+    func unchangedImageStillApplies() async throws {
+        // A mutable tag that moved leaves the declaration identical while the box runs
+        // older code — mwlab, 2026-08-09. Deploy-with-apply must converge it anyway.
+        let recorder = Recorder(files: ["/infra/mwserver-tf/variables.tf": variablesFixture])
+        let deployer = makeDeployer(recorder, plan: { CommandOutput(status: 2, standardOutput: "1 to change") })
+
+        let result = try await deployer.deploy(service: "mwlab", in: labStack(), apply: true)
+        #expect(!result.plan.needsWrite)
+        #expect(result.applied == "Apply complete!")
+        #expect(recorder.commands.contains { $0.argv.contains("apply") })
+    }
+
+    @Test("an unchanged image with a clean plan applies nothing")
+    func unchangedCleanAppliesNothing() async throws {
+        let recorder = Recorder(files: ["/infra/mwserver-tf/variables.tf": variablesFixture])
+        let deployer = makeDeployer(recorder, plan: { CommandOutput(status: 0, standardOutput: "clean") })
+
+        let result = try await deployer.deploy(service: "mwlab", in: labStack(), apply: true)
+        #expect(result.applied == nil)
+        #expect(!recorder.commands.contains { $0.argv.contains("apply") })
+    }
 }
 
 @Suite("Manifest image updates")
