@@ -310,7 +310,7 @@ struct DatabaseProvisionerTests {
         let pipelines = recorded.all().filter { $0.contains("sh") }
         #expect(pipelines.count == 1)
         let pipeline = pipelines[0].last ?? ""
-        #expect(pipeline.contains("pg_dump -U postgres --no-owner -d mwserver"))
+        #expect(pipeline.contains("pg_dump -U postgres --no-owner --no-acl -d mwserver"))
         #expect(pipeline.contains("psql -q -v ON_ERROR_STOP=1 -U mwlab_2_mwserver -d mwlab_2_mwserver"))
         let sql = recorded.all().compactMap(\.last).joined(separator: "\n")
         // The target schema resets before the restore, so a re-run converges instead of
