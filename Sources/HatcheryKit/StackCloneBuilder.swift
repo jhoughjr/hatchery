@@ -262,6 +262,15 @@ public struct StackCloneBuilder: Sendable {
                     applySkipped = "tofu plan did not evaluate; nothing applied"
                 } else {
                     applied = try await deployer.tofuApply(in: targetStack)
+                    // The front door opens only after the apply succeeds: the app must
+                    // exist before its name routes anywhere. Failures narrate — the stack
+                    // is live either way, and the transcript names the missing grant.
+                    if let acting = Exposure.provider(for: targetStack) as? ActingExposureProvider {
+                        onProgress("opening the front door…")
+                        await acting.expose(
+                            domains: targetStack.services.flatMap(\.domains),
+                            stack: targetStack, onProgress: onProgress)
+                    }
                 }
             }
         }

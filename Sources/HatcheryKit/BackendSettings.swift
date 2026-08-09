@@ -118,9 +118,19 @@ extension BackendSetting {
         key: "exposure",
         label: "Exposure provider",
         help: """
-            How this stack's domains become reachable: none (say so on every plan), or \
-            platform. Tunnel and LAN-DNS providers land in their own slices — see \
-            docs/exposure-design.md.
+            How this stack's domains become reachable: cloudflare-local (a locally-managed \
+            tunnel driven through the hatchery-expose wrapper), platform, or none — every \
+            plan says per domain what will happen. See docs/exposure-design.md.
+            """,
+        required: false)
+
+    public static let exposureAdmin = BackendSetting(
+        key: "exposure_admin",
+        label: "Exposure admin SSH target",
+        help: """
+            The account allowed to run hatchery-expose via sudo, as user@host. Optional: \
+            cloudflare-local falls back to db_admin, which on this estate is the same box \
+            and account.
             """,
         required: false)
 

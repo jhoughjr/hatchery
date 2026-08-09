@@ -1201,6 +1201,14 @@ public struct HatcheryAPI: Sendable {
                 store.finish(id, ok: false)
                 return
             }
+            // The door closes after the teardown: the apps are gone, so their names
+            // should stop routing. Failures narrate; the destroy itself already happened.
+            if let acting = Exposure.provider(for: stack) as? ActingExposureProvider {
+                store.append(id, "closing the front door…")
+                await acting.withdraw(
+                    domains: stack.services.flatMap(\.domains), stack: stack
+                ) { line in store.append(id, line) }
+            }
             do {
                 try save(manifest.removing(stack: stack.name), path)
                 store.append(id, "removed '\(stack.name)' from the manifest")

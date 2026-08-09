@@ -1256,6 +1256,12 @@ struct Stack: ParsableCommand {
 
             let output = try await deployer.tofuDestroy(in: spec)
             print(output)
+            if let acting = Exposure.provider(for: spec) as? ActingExposureProvider {
+                print("  closing the front door…")
+                await acting.withdraw(
+                    domains: spec.services.flatMap(\.domains), stack: spec
+                ) { print("    \($0)") }
+            }
             try parsed.removing(stack: spec.name).encoded()
                 .write(to: URL(fileURLWithPath: path))
             print("  removed '\(spec.name)' from \(path)")
