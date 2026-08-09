@@ -239,6 +239,13 @@ enum Wire {
         let confirm: String
     }
 
+    /// A watchable job's transcript, from wherever the page last polled.
+    struct JobView: Encodable {
+        let lines: [String]
+        let state: String
+        let next: Int
+    }
+
     struct DestroyBody: Decodable {
         let stack: String
         /// Absent on the plan call; must equal the stack name on the destroy call.
@@ -364,6 +371,8 @@ public struct HatcheryAPI: Sendable {
     private let clonePlanner: StackClonePlanner
     private let provisioner: DatabaseProvisioner
     private let removeDirectory: @Sendable (String) throws -> Void
+    private let stream: LineStream.Runner
+    private let jobs = JobStore()
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
     private let sealState: @Sendable (String) async -> String?
@@ -389,6 +398,7 @@ public struct HatcheryAPI: Sendable {
         removeDirectory: @escaping @Sendable (String) throws -> Void = {
             try FileManager.default.removeItem(atPath: Paths.expanded($0))
         },
+        stream: @escaping LineStream.Runner = LineStream.live,
         readConfig: @escaping @Sendable (URL) throws -> [String: String] = {
             (try? ConfigSync.readDeclared(at: $0)) ?? [:]
         },
@@ -420,6 +430,7 @@ public struct HatcheryAPI: Sendable {
         self.clonePlanner = clonePlanner
         self.provisioner = provisioner
         self.removeDirectory = removeDirectory
+        self.stream = stream
         self.readConfig = readConfig
         self.writeConfig = writeConfig
         self.sealState = sealState
@@ -483,6 +494,10 @@ public struct HatcheryAPI: Sendable {
             return await destroyPlan(request)
         case ("POST", "/api/stack/destroy"):
             return await destroyStack(request)
+        case ("POST", "/api/jobs/apply"):
+            return jobApply(request)
+        case ("GET", "/api/jobs"):
+            return jobStatus(request)
         case ("POST", "/api/config/set"):
             return await setConfig(request)
         case ("GET", "/api/state"):
@@ -950,6 +965,65 @@ public struct HatcheryAPI: Sendable {
         } catch {
             return .failure(400, "\(error)")
         }
+    }
+
+    // MARK: - Jobs
+
+    /// Starts an apply as a watchable job: the id comes back immediately, tofu's narration
+    /// streams into the transcript, and the page polls `/api/jobs` for what it has not seen.
+    /// The silent version of this cost a whole apply spent staring at a spinner.
+    private func jobApply(_ request: WebRequest) -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.ApplyBody.self, from: request.body)
+        else {
+            return .failure(400, "expected {stack, confirm}")
+        }
+        guard body.confirm == body.stack else {
+            return .failure(400, "confirmation did not match; expected '\(body.stack)'")
+        }
+        let manifest: StackManifest
+        do {
+            manifest = try loadManifest()
+        } catch {
+            return .failure(500, "\(error)")
+        }
+        guard let stack = manifest.stack(named: body.stack) else {
+            return .failure(404, "no stack named '\(body.stack)'")
+        }
+        // The same line the synchronous apply route draws.
+        if stack.resolvedEnvironment.isProduction {
+            return .failure(
+                403, "'\(stack.name)' is \(stack.resolvedEnvironment.rawValue); apply it from the CLI")
+        }
+        guard let directory = stack.tofu?.directory else {
+            return .failure(400, "stack '\(stack.name)' declares no tofu directory")
+        }
+
+        let id = jobs.create()
+        let store = jobs
+        let runner = stream
+        jobs.append(id, "tofu apply in \(directory)")
+        Task.detached {
+            let status = await runner(Deployer.applyCommand(), directory) { line in
+                // Blank lines pad tofu's narration for a terminal; the job log is denser.
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty { store.append(id, trimmed) }
+            }
+            store.append(id, status == 0 ? "apply complete" : "apply failed (exit \(status))")
+            store.finish(id, ok: status == 0)
+        }
+        return .json(["job": id])
+    }
+
+    private func jobStatus(_ request: WebRequest) -> WebResponse {
+        guard let id = request.query["id"] else {
+            return .failure(400, "expected ?id=<job>")
+        }
+        let from = request.query["from"].flatMap { Int($0) } ?? 0
+        guard let snapshot = jobs.snapshot(id, from: from) else {
+            return .failure(404, "no job '\(id)'")
+        }
+        return .json(
+            Wire.JobView(lines: snapshot.lines, state: snapshot.state, next: snapshot.next))
     }
 
     // MARK: - Destroying a stack
