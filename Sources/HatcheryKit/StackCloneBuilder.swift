@@ -193,7 +193,8 @@ public struct StackCloneBuilder: Sendable {
                             "database \(databasePlan.database) shared with an earlier service; "
                                 + "credentials reused")
                     } else {
-                        let provisioned = try await provisioner.provision(databasePlan, host: host)
+                        let provisioned = try await provisioner.provision(
+                            databasePlan, host: host, admin: settings["db_admin"])
                         minted = provisioned.credentials
                         databaseReport = provisioned.report
                         credentials[databasePlan.identity] = minted
