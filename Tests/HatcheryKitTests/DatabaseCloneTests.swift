@@ -418,6 +418,50 @@ struct DatabaseProvisionerTests {
         #expect(report.contains { $0.contains("not a plain identifier") })
     }
 
+
+    @Test("a missing server is created on the stack's network before provisioning")
+    func createsMissingServer() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                let joined = argv.joined(separator: " ")
+                if joined.contains("enter") {
+                    throw CommandFailure(command: "ssh", status: 20,
+                        message: "!     App mwstack-pg-dev does not exist")
+                }
+                // The first admin probe finds no container; after docker run, all is well.
+                if joined.contains("SELECT 1"),
+                    !recorded.all().contains(where: { $0.joined(separator: " ").contains("docker run") }) {
+                    throw CommandFailure(command: "ssh", status: 1,
+                        message: "Error response from daemon: No such container: mwstack-pg-dev")
+                }
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        let (_, report) = try await provisioner.provision(
+            plan(appUser: nil), host: "192.168.0.103", admin: "jimmy@opi.local",
+            network: "macworkstack-infra_default")
+
+        let all = recorded.all().map { $0.joined(separator: " ") }
+        #expect(all.contains { $0.contains("docker run -d --name mwstack-pg-dev --network macworkstack-infra_default") })
+        #expect(all.contains { $0.contains("pg_isready") })
+        #expect(report.contains { $0.contains("created database server mwstack-pg-dev") })
+    }
+
+    @Test("an existing server is never re-created")
+    func leavesExistingServerAlone() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in recorded.record(argv); return Data() },
+            mintPassword: { "minted" })
+        _ = try await provisioner.provision(
+            plan(appUser: nil), host: "192.168.0.103", admin: "jimmy@opi.local",
+            network: "net")
+        #expect(!recorded.all().contains { $0.joined(separator: " ").contains("docker run") })
+    }
+
     @Test("the probe answers nil for a reachable server, a sentence for a missing one")
     func probesTheServer() async throws {
         let reachable = DatabaseProvisioner(run: { _ in Data() }, mintPassword: { "x" })
@@ -438,7 +482,7 @@ struct DatabaseProvisionerTests {
         let warning = await missing.probe(
             plan(), host: "192.168.0.103", admin: "jimmy@opi.local")
         #expect(warning?.contains("mwstack-pg-dev") == true)
-        #expect(warning?.contains("not reachable") == true)
+        #expect(warning?.contains("creates it during the clone") == true)
     }
 
     @Test("a non-dokku server with no admin configured names the missing setting")
