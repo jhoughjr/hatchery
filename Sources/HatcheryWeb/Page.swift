@@ -225,6 +225,7 @@ enum Page {
           <div class="backends" id="backends"></div>
           <div id="state"></div>
           <div class="section"><h2 id="stacks-heading">Stacks</h2></div>
+          <div id="boxes" class="sub" style="margin-bottom:0.75rem"></div>
           <div id="stacks"></div>
           <div class="events" id="events"></div>
           <div id="log"></div>
@@ -698,7 +699,8 @@ enum Page {
               + icon(stack.backend)
               + '<h2>' + escapeHTML(stack.name) + stackWarn + '</h2>'
               + '<span class="meta">' + escapeHTML(stack.backend) + ' · '
-              + escapeHTML(stack.environment) + '</span>' + badge
+              + escapeHTML(stack.environment)
+              + (stack.host ? ' · @ ' + escapeHTML(stack.host) : '') + '</span>' + badge
               + (collapsed ? '<span class="meta">' + doors + '</span>' : '')
               + '<span class="meta state ' + escapeHTML(stack.state || '')
               + '" style="margin-left:auto">' + escapeHTML(stack.state || '') + '</span>'
@@ -718,6 +720,28 @@ enum Page {
                   +   button('destroy', 'destroy', stack.name, null, 'add')
                   + '</div>');
           };
+
+          // Where things actually run, before what runs there: each box with its stacks
+          // and their worst state, and the control plane named for what it is — hatchery
+          // serves from this machine; the stacks live elsewhere. The full system map is
+          // this strip grown up.
+          const byBox = {};
+          stacks.forEach(s => {
+            const box = s.host || (s.backend + ' (managed)');
+            (byBox[box] = byBox[box] || []).push(s);
+          });
+          const rank = {unreachable: 3, degraded: 2, responding: 1, ready: 0};
+          const boxStrip = Object.keys(byBox).sort().map(box => {
+            const members = byBox[box];
+            const worst = members.reduce((w, s) =>
+              (rank[s.state] || 0) > (rank[w] || 0) ? s.state : w, 'ready');
+            return '<span class="meta"><span class="state ' + escapeHTML(worst || '') + '">&#9679;</span> '
+              + escapeHTML(box) + ' <span class="ct">'
+              + members.map(s => escapeHTML(s.name)).join(' · ') + '</span></span>';
+          }).join('&nbsp;&nbsp;&nbsp;');
+          $('boxes').innerHTML = boxStrip
+            ? boxStrip + '&nbsp;&nbsp;&nbsp;<span class="meta hint">control plane: this machine</span>'
+            : '';
 
           // + stack lives once per backend group (or once at the foot for a single-backend
           // page), not on every stack's own action row.

@@ -82,6 +82,10 @@ enum Wire {
         let environment: String
         let isProduction: Bool
         let state: String?
+        /// Where this stack actually lives — the box's address for self-hosted backends,
+        /// nil where the platform hides the machines. "Self-hosted" was reading as "here",
+        /// and here is only the control plane.
+        let host: String?
         let services: [ServiceView]
     }
 
@@ -1540,6 +1544,7 @@ public struct HatcheryAPI: Sendable {
                     environment: stack.resolvedEnvironment.rawValue,
                     isProduction: stack.resolvedEnvironment.isProduction,
                     state: nil,
+                    host: stack.hostAddress,
                     services: stack.services.map {
                         Wire.ServiceView(
                             name: $0.name, kind: $0.kind.rawValue, image: $0.image,
@@ -1577,6 +1582,7 @@ public struct HatcheryAPI: Sendable {
                     environment: stack.resolvedEnvironment.rawValue,
                     isProduction: stack.resolvedEnvironment.isProduction,
                     state: report?.state.rawValue,
+                    host: stack.hostAddress,
                     services: stack.services.map { service in
                         let entry = health[service.name]
                         return Wire.ServiceView(
