@@ -171,6 +171,20 @@ public enum DatabaseClonePlanner {
         let appComponents = Self.components(of: sourceConfig["DATABASE_APP_URL"] ?? "")
         let sourceApp = appComponents?.user ?? sourceConfig["DATABASE_APP_USER"] ?? ""
 
+        // Role names are renamed only when the clone shares the source's server, where the
+        // names would collide. On another server they are kept verbatim, because the role
+        // name is part of the schema: MWServer's row-level security policies say
+        // `TO mwserver_app` by name, and a renamed role restores into policies that bind
+        // nothing — a clone that runs but silently answers as if logged out. One clone per
+        // environment server owns those names; a second clone of the same source onto the
+        // same server will re-mint their passwords and take them over.
+        let crossServer = serverApp != host
+        func roleName(_ name: String) -> String {
+            crossServer
+                ? identifier(name)
+                : derived(name, source: source, target: target, environment: environment)
+        }
+
         // Emit every database key the source carried plus every one the contract requires,
         // so the clone's config answers both the style the contract asks for and the one the
         // running image actually reads.
@@ -181,11 +195,11 @@ public enum DatabaseClonePlanner {
         // An app role's keys are only emittable when there is an app role.
         let appUser: String?
         if !sourceApp.isEmpty {
-            appUser = derived(sourceApp, source: source, target: target, environment: environment)
+            appUser = roleName(sourceApp)
         } else if emitted.contains("DATABASE_APP_URL") {
             // The contract demands a second role the source never had; derive one beside the
             // owner rather than failing the whole plan.
-            appUser = derived(sourceOwner + "_app", source: source, target: target, environment: environment)
+            appUser = roleName(sourceOwner + "_app")
         } else {
             appUser = nil
         }
@@ -198,7 +212,7 @@ public enum DatabaseClonePlanner {
             port: port,
             scheme: url?.scheme ?? "postgresql",
             database: derived(sourceDB, source: source, target: target, environment: environment),
-            owner: derived(sourceOwner, source: source, target: target, environment: environment),
+            owner: roleName(sourceOwner),
             appUser: appUser,
             emitted: emitted,
             mode: mode,
