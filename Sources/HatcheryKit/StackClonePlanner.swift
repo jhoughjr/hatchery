@@ -9,10 +9,14 @@ public struct PlannedClone: Sendable {
     public let plan: ClonePlan
     /// By service name: a line describing where that service's config came from.
     public let origins: [String: String]
+    /// What will go wrong at create as things stand — an unreachable database server,
+    /// mostly. The plan is still shown; these lines are what to fix before creating.
+    public let warnings: [String]
 
-    public init(plan: ClonePlan, origins: [String: String]) {
+    public init(plan: ClonePlan, origins: [String: String], warnings: [String] = []) {
         self.plan = plan
         self.origins = origins
+        self.warnings = warnings
     }
 }
 
@@ -26,6 +30,8 @@ public struct PlannedClone: Sendable {
 public struct StackClonePlanner: Sendable {
     public typealias LiveRead = @Sendable (ServiceSpec, StackSpec) async throws -> [String: String]
     public typealias DeclaredRead = @Sendable (URL) throws -> [String: String]
+    /// Whether a planned database's server answers, before anything is created.
+    public typealias ServerProbe = @Sendable (DatabaseClonePlan, String, String?) async -> String?
 
     /// Named references, not literals, so they can sit in default-argument positions — a
     /// closure literal there trips the task allocator (issue #36).
@@ -33,19 +39,25 @@ public struct StackClonePlanner: Sendable {
         try await LiveConfigReader().config(for: service, in: stack)
     }
     public static let declaredRead: DeclaredRead = { try ConfigSync.readDeclared(at: $0) }
+    public static let serverProbe: ServerProbe = { plan, host, admin in
+        await DatabaseProvisioner().probe(plan, host: host, admin: admin)
+    }
 
     private let cloner: StackCloner
     private let readLive: LiveRead
     private let readDeclared: DeclaredRead
+    private let probe: ServerProbe
 
     public init(
         cloner: StackCloner = StackCloner(),
         readLive: @escaping LiveRead = StackClonePlanner.liveRead,
-        readDeclared: @escaping DeclaredRead = StackClonePlanner.declaredRead
+        readDeclared: @escaping DeclaredRead = StackClonePlanner.declaredRead,
+        probe: @escaping ServerProbe = StackClonePlanner.serverProbe
     ) {
         self.cloner = cloner
         self.readLive = readLive
         self.readDeclared = readDeclared
+        self.probe = probe
     }
 
     /// An unreadable sidecar is not an empty one. Planning from `[:]` would report every key
@@ -107,10 +119,28 @@ public struct StackClonePlanner: Sendable {
             origins[planned.name] = origin
         }
 
+        // Each distinct database server, probed once. A staging clone targets staging's
+        // server by name; a server that does not exist should be a line on this plan, not a
+        // provisioning failure after the create click.
+        var warnings: [String] = []
+        var probed: Set<String> = []
+        let host = source.host ?? source.settings?["host"] ?? ""
+        let admin = source.settings?["db_admin"]
+        for service in services {
+            guard let database = service.database else { continue }
+            let server = "\(database.serverApp):\(database.port)"
+            guard !probed.contains(server) else { continue }
+            probed.insert(server)
+            if let warning = await probe(database, host, admin) {
+                warnings.append(warning)
+            }
+        }
+
         return PlannedClone(
             plan: ClonePlan(
                 source: source.name, target: target, environment: environment,
                 services: services),
-            origins: origins)
+            origins: origins,
+            warnings: warnings)
     }
 }

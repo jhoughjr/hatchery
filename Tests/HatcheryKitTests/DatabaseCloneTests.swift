@@ -287,6 +287,29 @@ struct DatabaseProvisionerTests {
         #expect(admin.contains { $0.last?.contains("CREATE ROLE") == true })
     }
 
+    @Test("the probe answers nil for a reachable server, a sentence for a missing one")
+    func probesTheServer() async throws {
+        let reachable = DatabaseProvisioner(run: { _ in Data() }, mintPassword: { "x" })
+        #expect(await reachable.probe(plan(), host: "192.168.0.103", admin: nil) == nil)
+
+        let missing = DatabaseProvisioner(
+            run: { argv in
+                if argv.contains("enter") {
+                    throw CommandFailure(
+                        command: "ssh", status: 20,
+                        message: "!     App mwstack-pg-dev does not exist")
+                }
+                throw CommandFailure(
+                    command: "ssh", status: 1,
+                    message: "Error response from daemon: No such container: mwstack-pg-dev")
+            },
+            mintPassword: { "x" })
+        let warning = await missing.probe(
+            plan(), host: "192.168.0.103", admin: "jimmy@opi.local")
+        #expect(warning?.contains("mwstack-pg-dev") == true)
+        #expect(warning?.contains("not reachable") == true)
+    }
+
     @Test("a non-dokku server with no admin configured names the missing setting")
     func namesTheMissingAdmin() async throws {
         let provisioner = DatabaseProvisioner(
