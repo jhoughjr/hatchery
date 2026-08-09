@@ -232,6 +232,29 @@ enum Wire {
         let confirm: String
     }
 
+    struct DestroyBody: Decodable {
+        let stack: String
+        /// Absent on the plan call; must equal the stack name on the destroy call.
+        let confirm: String?
+    }
+
+    /// What destroying a stack would remove, shown before the name is typed back.
+    struct DestroyPlanView: Encodable {
+        let stack: String
+        let backend: String
+        let environment: String
+        let isProduction: Bool
+        /// Declared but never applied: removing it drops the declaration only.
+        let noop: Bool
+        let headline: String
+        let services: [Item]
+
+        struct Item: Encodable {
+            let name: String
+            let image: String
+        }
+    }
+
     /// A key that still needs a person, and why hatchery could not supply it.
     struct MissingKey: Encodable {
         let key: String
@@ -440,6 +463,10 @@ public struct HatcheryAPI: Sendable {
             return await clonePlan(request)
         case ("POST", "/api/stack/clone"):
             return await cloneStack(request)
+        case ("POST", "/api/stack/destroy/plan"):
+            return await destroyPlan(request)
+        case ("POST", "/api/stack/destroy"):
+            return await destroyStack(request)
         case ("POST", "/api/config/set"):
             return await setConfig(request)
         case ("GET", "/api/state"):
@@ -900,6 +927,86 @@ public struct HatcheryAPI: Sendable {
             return .failure(500, "\(half)")
         } catch {
             return .failure(400, "\(error)")
+        }
+    }
+
+    // MARK: - Destroying a stack
+
+    /// What `tofu destroy` would remove, shown before anything is typed back. The browser had
+    /// no destroy at all, which left every abandoned clone a CLI errand.
+    private func destroyPlan(_ request: WebRequest) async -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.DestroyBody.self, from: request.body)
+        else {
+            return .failure(400, "expected {stack}")
+        }
+        let manifest: StackManifest
+        do {
+            manifest = try loadManifest()
+        } catch {
+            return .failure(500, "\(error)")
+        }
+        guard let stack = manifest.stack(named: body.stack) else {
+            return .failure(404, "no stack named '\(body.stack)'")
+        }
+        do {
+            let summary = try await deployer.destroyPlan(in: stack)
+            return .json(
+                Wire.DestroyPlanView(
+                    stack: stack.name,
+                    backend: stack.backend.rawValue,
+                    environment: stack.resolvedEnvironment.rawValue,
+                    isProduction: stack.resolvedEnvironment.isProduction,
+                    noop: summary.isNoop,
+                    headline: summary.headline,
+                    services: stack.services.map {
+                        Wire.DestroyPlanView.Item(name: $0.name, image: $0.image)
+                    }))
+        } catch {
+            return .failure(400, "\(error)")
+        }
+    }
+
+    private func destroyStack(_ request: WebRequest) async -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.DestroyBody.self, from: request.body)
+        else {
+            return .failure(400, "expected {stack, confirm}")
+        }
+        guard body.confirm == body.stack else {
+            return .failure(400, "confirmation did not match; expected '\(body.stack)'")
+        }
+        let manifest: StackManifest
+        do {
+            manifest = try loadManifest()
+        } catch {
+            return .failure(500, "\(error)")
+        }
+        guard let stack = manifest.stack(named: body.stack) else {
+            return .failure(404, "no stack named '\(body.stack)'")
+        }
+        // The same line the apply route draws: the one action with no undo, against
+        // production, stays on the CLI.
+        if stack.resolvedEnvironment.isProduction {
+            return .failure(
+                403,
+                "'\(stack.name)' is \(stack.resolvedEnvironment.rawValue); destroy it from the CLI")
+        }
+
+        do {
+            let output = try await deployer.tofuDestroy(in: stack)
+            try saveManifest(manifest.removing(stack: stack.name), manifestPath())
+            let sealed = await sealState(manifestPath())
+
+            let outcome = output.split(separator: "\n").last.map(String.init) ?? "destroyed"
+            var detail = "\(outcome); '\(stack.name)' removed from the manifest, "
+                + "\(stack.tofu?.directory ?? "its tofu directory") left in place (state and config)"
+            if let sealed { detail += "; \(sealed)" }
+            return .json(
+                Wire.ActionResult(
+                    ok: true, message: "destroyed '\(stack.name)'", detail: detail))
+        } catch {
+            return .json(
+                Wire.ActionResult(ok: false, message: "destroy failed", detail: "\(error)"),
+                status: 500)
         }
     }
 
