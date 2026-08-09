@@ -12,7 +12,9 @@ public enum BootstrapError: Error, CustomStringConvertible, Equatable {
         case .stackExists(let name):
             return "a stack named '\(name)' is already declared"
         case .directoryNotEmpty(let path):
-            return "\(path) already holds a tofu configuration; hatchery will not write over it"
+            return "\(path) already holds a tofu configuration; hatchery will not write over "
+                + "it. Name an empty subdirectory instead — a trailing / appends the stack "
+                + "name for you"
         case .initFailed(let message):
             return "tofu init failed: \(message)"
         case .missingSettings(let backend, let keys):
