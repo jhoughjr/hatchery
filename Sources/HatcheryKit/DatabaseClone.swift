@@ -403,6 +403,21 @@ public struct DatabaseProvisioner: Sendable {
             return
         }
 
+        // The copy converges like every other step: the target schema is reset first, so a
+        // re-run lands in the same place instead of tripping over a half-restored attempt —
+        // a serve restart mid-restore left functions without tables, and the next copy died
+        // on "already exists". This resets only the clone's own database, which hatchery
+        // created moments ago; the source is never touched.
+        _ = try await psql(
+            "DROP SCHEMA IF EXISTS public CASCADE", plan: plan, host: host, via: transport,
+            database: plan.database)
+        _ = try await psql(
+            "CREATE SCHEMA public", plan: plan, host: host, via: transport,
+            database: plan.database)
+        _ = try await psql(
+            "ALTER SCHEMA public OWNER TO \"\(plan.owner)\"", plan: plan, host: host,
+            via: transport, database: plan.database)
+
         let flags = plan.mode == .schema ? "--schema-only " : ""
         let restore = "psql -q -v ON_ERROR_STOP=1 -U \(plan.owner) -d \(plan.database)"
         let command: [String]
@@ -433,15 +448,22 @@ public struct DatabaseProvisioner: Sendable {
                 sql: "pg_dump \(sourceDatabase) → \(plan.database)", message: failure.message)
         }
 
-        // Copied tables predate the default-privilege rule above, so the app role's grants
-        // are asserted over what just arrived.
+        // The schema reset above took the app role's grants and default privileges with it,
+        // so every one is re-asserted over what just arrived.
         if let appUser = plan.appUser {
+            _ = try await psql(
+                "GRANT USAGE ON SCHEMA public TO \"\(appUser)\"",
+                plan: plan, host: host, via: transport, database: plan.database)
             _ = try await psql(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public "
                     + "TO \"\(appUser)\"",
                 plan: plan, host: host, via: transport, database: plan.database)
             _ = try await psql(
                 "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO \"\(appUser)\"",
+                plan: plan, host: host, via: transport, database: plan.database)
+            _ = try await psql(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"\(plan.owner)\" IN SCHEMA public "
+                    + "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO \"\(appUser)\"",
                 plan: plan, host: host, via: transport, database: plan.database)
         }
         let what = plan.mode == .schema ? "schema" : "schema and data"

@@ -312,10 +312,17 @@ struct DatabaseProvisionerTests {
         let pipeline = pipelines[0].last ?? ""
         #expect(pipeline.contains("pg_dump -U postgres --no-owner -d mwserver"))
         #expect(pipeline.contains("psql -q -v ON_ERROR_STOP=1 -U mwlab_2_mwserver -d mwlab_2_mwserver"))
-        // Copied tables get the app role's grants asserted over them.
         let sql = recorded.all().compactMap(\.last).joined(separator: "\n")
+        // The target schema resets before the restore, so a re-run converges instead of
+        // dying on a half-restored attempt's leftovers.
+        #expect(sql.contains("DROP SCHEMA IF EXISTS public CASCADE"))
+        #expect(sql.contains("ALTER SCHEMA public OWNER TO \"mwlab_2_mwserver\""))
+        // And the reset takes the grants with it, so they re-assert over what arrived.
         #expect(sql.contains("ON ALL TABLES IN SCHEMA public"))
         #expect(sql.contains("ON ALL SEQUENCES IN SCHEMA public"))
+        let dropIndex = recorded.all().firstIndex { $0.last?.contains("DROP SCHEMA") == true }
+        let copyIndex = recorded.all().firstIndex { $0.last?.contains("pg_dump") == true }
+        #expect(dropIndex != nil && copyIndex != nil && dropIndex! < copyIndex!)
     }
 
     @Test("a schema clone dumps structure only, and none dumps nothing")
