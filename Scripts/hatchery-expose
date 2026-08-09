@@ -14,6 +14,12 @@ set -eu
 
 CONFIG="${HATCHERY_EXPOSE_CONFIG:-/root/.cloudflared/config.yml}"
 CLOUDFLARED="${HATCHERY_EXPOSE_CLOUDFLARED:-/usr/local/bin/cloudflared}"
+# An optional Cloudflare API token, root-owned (mode 600), scoped to Zone.DNS:Edit on the
+# zone this tunnel serves. cloudflared can create DNS routes but cannot delete them; with
+# the token present, `remove` also deletes the hostname's DNS records — a destroyed stack
+# should stop resolving, not 404 forever. Without it, removal says the record was left.
+CF_TOKEN_FILE="${HATCHERY_EXPOSE_CF_TOKEN_FILE:-/etc/hatchery-expose-cf-token}"
+CF_API="${HATCHERY_EXPOSE_CF_API:-https://api.cloudflare.com/client/v4}"
 
 usage() {
     echo "usage: hatchery-expose add <hostname> | remove <hostname> | list" >&2
@@ -100,9 +106,34 @@ remove)
     cat "$tmp" > "$CONFIG"
     rm -f "$tmp"
     systemctl restart cloudflared
-    # The DNS record is left: deleting it needs an API token this wrapper deliberately
-    # does not hold, and a CNAME to a tunnel that no longer routes it answers 404.
-    echo "ingress no longer carries $host (dns record left; it now answers 404)"
+    echo "ingress no longer carries $host"
+
+    # The DNS record, when a token was granted for it. The zone is the hostname's last two
+    # labels; deeper delegations are not this estate's shape.
+    if [ -r "$CF_TOKEN_FILE" ]; then
+        token="$(cat "$CF_TOKEN_FILE")"
+        zone="$(echo "$host" | awk -F. '{ print $(NF-1) "." $NF }')"
+        auth="Authorization: Bearer $token"
+        zone_id="$(curl -sf -H "$auth" "$CF_API/zones?name=$zone" \
+            | python3 -c 'import sys,json; r=json.load(sys.stdin)["result"]; print(r[0]["id"] if r else "")')"
+        if [ -z "$zone_id" ]; then
+            echo "dns record left: the token cannot see a zone named $zone" >&2
+            exit 0
+        fi
+        deleted=0
+        for record in $(curl -sf -H "$auth" "$CF_API/zones/$zone_id/dns_records?name=$host" \
+            | python3 -c 'import sys,json; [print(r["id"]) for r in json.load(sys.stdin)["result"]]'); do
+            curl -sf -X DELETE -H "$auth" "$CF_API/zones/$zone_id/dns_records/$record" > /dev/null
+            deleted=$((deleted + 1))
+        done
+        if [ "$deleted" -gt 0 ]; then
+            echo "dns record deleted: $host no longer resolves"
+        else
+            echo "no dns record found for $host"
+        fi
+    else
+        echo "dns record left (no token at $CF_TOKEN_FILE); it now answers 404"
+    fi
     ;;
 
 *)
