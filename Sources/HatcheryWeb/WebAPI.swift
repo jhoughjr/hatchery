@@ -69,6 +69,9 @@ enum Wire {
         let reasons: [String]
         let latencyMs: Int?
         let gitRev: String?
+        /// Where the declared config says this service's database lives — name @ host:port,
+        /// never credentials. Nil for a service without one; not every service has a database.
+        let database: String?
         /// Whether the declared config would let it boot, and what is missing if not.
         let config: ConfigStatus?
     }
@@ -1177,6 +1180,14 @@ public struct HatcheryAPI: Sendable {
         return .json(views)
     }
 
+    /// The declared database target — name @ host:port, never credentials — from the
+    /// service's sidecar file. A local read, cheap enough for every poll.
+    private func declaredDatabase(of service: ServiceSpec, in stack: StackSpec) -> String? {
+        let url = ConfigSync.configURL(for: service, in: stack, manifestPath: manifestPath())
+        guard let config = try? readConfig(url) else { return nil }
+        return DatabaseTarget.describe(config)
+    }
+
     private func stacks() -> WebResponse {
         do {
             let manifest = try loadManifest()
@@ -1192,6 +1203,7 @@ public struct HatcheryAPI: Sendable {
                             name: $0.name, kind: $0.kind.rawValue, image: $0.image,
                             domains: $0.domains, state: nil, reasons: [], latencyMs: nil,
                             gitRev: nil,
+                            database: declaredDatabase(of: $0, in: stack),
                             config: ConfigCompleteness.check(
                                 service: $0, in: stack, manifestPath: manifestPath()))
                     })
@@ -1230,6 +1242,7 @@ public struct HatcheryAPI: Sendable {
                             domains: service.domains, state: entry?.state.rawValue,
                             reasons: entry?.reasons ?? [], latencyMs: entry?.latencyMs,
                             gitRev: entry?.gitRev,
+                            database: declaredDatabase(of: service, in: stack),
                             // A local file read, so this costs nothing on a ten-second poll.
                             config: ConfigCompleteness.check(
                                 service: service, in: stack, manifestPath: manifestPath()))
