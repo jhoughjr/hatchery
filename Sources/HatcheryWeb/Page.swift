@@ -672,19 +672,24 @@ enum Page {
               +   button('new-service', '+ service', stack.name, null, 'add')
               +   button('clone', 'clone', stack.name, null, 'add')
               +   button('apply', 'apply', stack.name, null, 'add')
+              // + stack belongs to the backend group header, not to every stack's own row.
               +   button('destroy', 'destroy', stack.name, null, 'add')
-              +   button('new-stack', '+ stack', null, null, 'add last')
               + '</div></section>';
           };
 
+          // + stack lives once per backend group (or once at the foot for a single-backend
+          // page), not on every stack's own action row.
           $('stacks').innerHTML = used.length > 1
             ? used.map(b =>
                 '<section class="group"><h3>' + icon(b) + escapeHTML(label(b))
                 + ' <span class="ct">' + stacks.filter(s => s.backend === b).length
-                + '</span></h3>'
+                + '</span> ' + button('new-stack-on', '+ stack', null, null, 'add', b)
+                + '</h3>'
                 + stacks.filter(s => s.backend === b).map(drawStack).join('')
                 + '</section>').join('')
-            : stacks.map(drawStack).join('');
+            : stacks.map(drawStack).join('')
+              + '<div class="stack-actions">'
+              + button('new-stack', '+ stack', null, null, 'add') + '</div>';
           restorePanels(open);
         }
 
@@ -987,14 +992,29 @@ enum Page {
           log(res.data.message || res.data.error, !res.ok);
         }
 
+        // Watches a job, appending each new transcript line to the log as it arrives.
+        // Resolves true when the job finished well. This is what makes a minutes-long apply
+        // readable instead of a spinner.
+        async function followJob(id, indent) {
+          let from = 0;
+          while (true) {
+            const res = await get('/api/jobs?id=' + encodeURIComponent(id) + '&from=' + from);
+            if (!res.ok) { log((res.data && res.data.error) || 'lost the job', true); return false; }
+            (res.data.lines || []).forEach(l => log((indent || '  ') + l));
+            from = res.data.next;
+            if (res.data.state !== 'running') return res.data.state === 'ok';
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+
         async function applyStack(stack) {
           if (!(await confirmNamed(stack, 'Apply ' + stack + ' — this changes running infrastructure')))
             { log('cancelled'); return; }
-          busy = true; render(lastStacks);
-          const res = await send('/api/apply', {stack, confirm: stack});
-          busy = false;
-          log(res.data.message || res.data.error, !res.ok);
-          if (res.data.detail) log(res.data.detail, !res.ok);
+          const started = await send('/api/jobs/apply', {stack, confirm: stack});
+          if (!started.ok) { log(started.data.error || 'apply refused', true); return; }
+          log('applying ' + stack + '…');
+          const ok = await followJob(started.data.job);
+          log(ok ? 'applied ' + stack : 'apply failed', !ok);
           refresh();
         }
 
@@ -1108,11 +1128,14 @@ enum Page {
           if (res.data.plan) log('  tofu plan: ' + res.data.plan, res.data.plan.indexOf('failed') >= 0);
 
           if (apply && missing === 0) {
-            log('  applying — deploying every service; this can take minutes…');
-            busy = true;
-            const applied = await send('/api/apply', {stack: target, confirm: target});
-            busy = false;
-            log('  ' + (applied.data.message || applied.data.error), !applied.ok);
+            const started = await send('/api/jobs/apply', {stack: target, confirm: target});
+            if (!started.ok) {
+              log('  apply refused: ' + (started.data.error || ''), true);
+            } else {
+              log('  applying — deploying every service…');
+              const ok = await followJob(started.data.job, '    ');
+              log(ok ? '  ' + target + ' is live' : '  apply failed', !ok);
+            }
           } else if (apply) {
             log('  apply skipped: ' + missing + ' key(s) still need a person', true);
           }

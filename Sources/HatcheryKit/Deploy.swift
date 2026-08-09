@@ -147,7 +147,9 @@ public struct Deployer: Sendable {
         ["tofu", "destroy", "-auto-approve", "-no-color", "-input=false"]
     }
 
-    static func applyCommand() -> [String] {
+    /// Public because a watchable apply job streams this exact command; two spellings of
+    /// `tofu apply` drifting apart would be two different applies.
+    public static func applyCommand() -> [String] {
         ["tofu", "apply", "-auto-approve", "-no-color", "-input=false"]
     }
 
