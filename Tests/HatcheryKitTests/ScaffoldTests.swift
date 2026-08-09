@@ -22,7 +22,10 @@ private func fakeRSAPEM(_ integers: [[UInt8]]) -> String {
     let body = integers.flatMap { der(0x02, $0) }
     let sequence = der(0x30, body)
     let base64 = Data(sequence).base64EncodedString()
-    return "-----BEGIN RSA PRIVATE KEY-----\n\(base64)\n-----END RSA PRIVATE KEY-----\n"
+    // The PKCS#8 label, though the body is bare PKCS#1: the minter refuses any other label —
+    // the deployed parser accepts only PKCS#8 — while the DER walk under test reads the body
+    // by structure and never the label.
+    return "-----BEGIN PRIVATE KEY-----\n\(base64)\n-----END PRIVATE KEY-----\n"
 }
 
 /// version, n, e, d, p, q, dp, dq, qi — the order the structure defines.
