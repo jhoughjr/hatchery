@@ -1,0 +1,30 @@
+#!/bin/sh
+# Read-only sibling of hatchery-expose: one verb, no writes.
+#
+#   hatchery-inspect digest <image:tag>
+#
+# Prints the registry's current digest for the tag, using root's docker credentials —
+# the same ones dokku deploys pull with, which is exactly why only root can answer
+# "would a deploy change the running code". Installed root-owned; granted with:
+#
+#   <admin-user> ALL=(root) NOPASSWD: /usr/local/bin/hatchery-inspect
+set -eu
+
+[ $# -eq 2 ] || { echo "usage: hatchery-inspect digest <image:tag>" >&2; exit 2; }
+[ "$1" = "digest" ] || { echo "usage: hatchery-inspect digest <image:tag>" >&2; exit 2; }
+image="$2"
+echo "$image" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/:-]*$' || {
+    echo "refusing image reference: $image" >&2
+    exit 2
+}
+
+# buildx asks the registry without pulling; plain manifest inspect is the fallback for
+# older docker. Both answer with the digest of what a deploy would pull right now.
+if docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}' 2>/dev/null; then
+    exit 0
+fi
+DOCKER_CLI_EXPERIMENTAL=enabled docker manifest inspect "$image" -v 2>/dev/null \
+    | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+items = d if isinstance(d, list) else [d]
+print(items[0]["Descriptor"]["digest"])'
