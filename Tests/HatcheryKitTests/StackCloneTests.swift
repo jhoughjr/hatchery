@@ -47,9 +47,10 @@ struct StackCloneTests {
     }
 
     /// The dangerous one. Copying this points staging at production's database, and it does not
-    /// fail — it works, which is worse.
-    @Test("refuses to copy anything that points at the source's database")
-    func refusesDatabaseURLs() async throws {
+    /// fail — it works, which is worse. The clone gets a database of its own instead: same
+    /// server, new name, minted credentials that never pointed at the source's data.
+    @Test("gives the clone its own database rather than copying the source's URLs")
+    func provisionsDatabaseInstead() async throws {
         let service = try await clone(
             config: [
                 "DATABASE_URL": "postgres://user:pw@db/mwlab",
@@ -57,12 +58,32 @@ struct StackCloneTests {
             ])
 
         for key in ["DATABASE_URL", "DATABASE_APP_URL"] {
-            guard case .refused = disposition(service, key) else {
-                Issue.record("\(key) must be refused, got \(String(describing: disposition(service, key)))")
+            guard case .provisioned = disposition(service, key) else {
+                Issue.record("\(key) must be provisioned, got \(String(describing: disposition(service, key)))")
                 continue
             }
-            #expect(service.values[key] == nil, "\(key) must not be written")
+            // The value exists only after create: nothing here may carry the source's.
+            #expect(service.values[key] == nil, "\(key) must not be written at plan time")
         }
+        #expect(!service.unresolved.contains { $0.key == "DATABASE_URL" })
+        let database = try #require(service.database)
+        #expect(database.serverApp == "db")
+        // Named for the target so it cannot collide with the source's on the same server.
+        #expect(database.database == "mwlab_2")
+    }
+
+    /// A database server hatchery cannot reach — a managed cluster, anything with a dotted
+    /// address — keeps the old behaviour: the keys stay with a person.
+    @Test("still refuses database keys when the server is not a dokku app")
+    func refusesManagedDatabase() async throws {
+        let service = try await clone(
+            config: ["DATABASE_URL": "postgres://user:pw@db.example.com:25060/mwlab"])
+
+        guard case .refused = disposition(service, "DATABASE_URL") else {
+            Issue.record("expected a refusal for a managed database server")
+            return
+        }
+        #expect(service.database == nil)
         #expect(service.unresolved.contains { $0.key == "DATABASE_URL" })
     }
 

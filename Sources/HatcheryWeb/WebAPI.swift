@@ -166,6 +166,8 @@ enum Wire {
         let network: String?
         let gated: Bool?
         let confirm: String
+        /// Run `tofu apply` after a clean plan, so the clone ends running rather than written.
+        let apply: Bool?
     }
 
     /// One key's fate in a clone plan. `action` is the CLI's vocabulary — carry, rewrite,
@@ -211,11 +213,17 @@ enum Wire {
         let services: [ClonedSummary]
         /// The seal line, when the state directory seals.
         let detail: String?
+        /// What `tofu plan` said about the finished clone, and whether an apply ran.
+        let plan: String?
+        let applied: Bool?
+        let applySkipped: String?
 
         struct ClonedSummary: Encodable {
             let name: String
             let carried: Int
             let missing: [MissingKey]
+            /// What database provisioning did for this service, one line per assertion.
+            let database: [String]
         }
     }
 
@@ -320,6 +328,7 @@ public struct HatcheryAPI: Sendable {
     private let logReader: LogReader
     private let liveConfig: LiveConfigReader
     private let clonePlanner: StackClonePlanner
+    private let provisioner: DatabaseProvisioner
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
     private let sealState: @Sendable (String) async -> String?
@@ -341,6 +350,7 @@ public struct HatcheryAPI: Sendable {
         logReader: LogReader = LogReader(),
         liveConfig: LiveConfigReader = LiveConfigReader(),
         clonePlanner: StackClonePlanner = StackClonePlanner(),
+        provisioner: DatabaseProvisioner = DatabaseProvisioner(),
         readConfig: @escaping @Sendable (URL) throws -> [String: String] = {
             (try? ConfigSync.readDeclared(at: $0)) ?? [:]
         },
@@ -370,6 +380,7 @@ public struct HatcheryAPI: Sendable {
         self.logReader = logReader
         self.liveConfig = liveConfig
         self.clonePlanner = clonePlanner
+        self.provisioner = provisioner
         self.readConfig = readConfig
         self.writeConfig = writeConfig
         self.sealState = sealState
@@ -777,6 +788,11 @@ public struct HatcheryAPI: Sendable {
                                 detail: "\(how); the source's would grant its authority",
                                 from: nil, to: nil, value: nil,
                                 required: key.required, secret: key.secret)
+                        case .provisioned(let how):
+                            return Wire.CloneKeyView(
+                                key: key.key, action: "db", detail: how,
+                                from: nil, to: nil, value: nil,
+                                required: key.required, secret: key.secret)
                         case .refused(let why):
                             return Wire.CloneKeyView(
                                 key: key.key, action: key.required ? "needs" : "skip",
@@ -812,6 +828,11 @@ public struct HatcheryAPI: Sendable {
         // Planned server-side rather than accepted from the client: the plan the browser
         // showed is advice, and the one acted on is computed from the same inputs here.
         let environment = Environment(rawValue: body.environment ?? "staging")
+        // The same line the deploy and apply routes draw: production stays on the CLI.
+        if environment.isProduction {
+            return .failure(
+                403, "'\(body.target)' would be \(environment.rawValue); create it from the CLI")
+        }
         let planned: PlannedClone
         do {
             planned = try await clonePlanner.plan(
@@ -822,86 +843,57 @@ public struct HatcheryAPI: Sendable {
         }
 
         do {
-            var settings = sourceStack.settings ?? [:]
-            let host = body.host ?? sourceStack.host ?? settings["host"] ?? ""
-            settings["host"] = host
+            // The same builder the CLI runs, with the web's own file seams, so the two
+            // surfaces cannot drift apart again.
+            let builder = StackCloneBuilder(
+                bootstrapper: bootstrapper, scaffolder: scaffolder, deployer: deployer,
+                provisioner: provisioner, readConfig: readConfig, writeConfig: writeConfig,
+                saveManifest: saveManifest, sealState: sealState)
+            let outcome = try await builder.build(
+                planned: planned, source: sourceStack, manifest: manifest,
+                manifestPath: manifestPath(),
+                options: StackCloneBuilder.Options(
+                    target: body.target, tofuDir: body.tofuDir, host: body.host,
+                    environment: environment, port: body.port, network: body.network,
+                    gated: body.gated, apply: body.apply ?? false))
 
-            let plan = try bootstrapper.plan(
-                name: body.target, backend: sourceStack.backend, host: host,
-                tofuDir: body.tofuDir, environment: environment, settings: settings,
-                into: manifest, manifestPath: manifestPath())
-            let created = try await bootstrapper.create(plan)
-            try saveManifest(created.manifest, created.manifestPath)
-
-            var current = created.manifest
-            var written: [String] = []
-            var summaries: [Wire.CloneCreated.ClonedSummary] = []
-
-            for service in planned.plan.services {
-                guard let stack = current.stack(named: body.target) else {
-                    // Half a stack with no explanation is the worst outcome this route has.
-                    return .failure(
-                        500,
-                        "'\(body.target)' vanished from the manifest mid-clone after "
-                            + "[\(written.joined(separator: ", "))] were written")
-                }
-
-                // Siblings are the services already added to *this* clone, so a shared key is
-                // shared within the new stack rather than carried from the source.
-                var siblings: [String: [String: String]] = [:]
-                for existing in stack.services {
-                    let url = ConfigSync.configURL(
-                        for: existing, in: stack, manifestPath: created.manifestPath)
-                    if let config = try? readConfig(url) { siblings[existing.name] = config }
-                }
-
-                let spec = ServiceSpec(
-                    name: service.name, kind: service.kind, image: service.image,
-                    domains: service.domains, configFile: "\(service.name).config.json",
-                    baseURL: service.baseURL, healthPath: service.healthPath)
-
-                let result = try await scaffolder.plan(
-                    service: spec, into: body.target, manifest: current,
-                    containerPort: body.port ?? 8080, network: body.network,
-                    gated: body.gated ?? false, siblings: siblings)
-                try scaffolder.write(result, in: stack)
-                current = result.manifest
-                try saveManifest(current, created.manifestPath)
-
-                // The carried and rewritten values, layered over what the scaffolder wrote.
-                if let target = current.stack(named: body.target),
-                    let landed = target.service(named: service.name) {
-                    let url = ConfigSync.configURL(
-                        for: landed, in: target, manifestPath: created.manifestPath)
-                    let existing = (try? readConfig(url)) ?? [:]
-                    try writeConfig(url, ConfigSync.applying(service.values, to: existing))
-                }
-
-                written.append(service.name)
-                summaries.append(
-                    Wire.CloneCreated.ClonedSummary(
-                        name: service.name,
-                        carried: service.values.count,
-                        missing: service.unresolved.map {
-                            let reason: String
-                            if case .refused(let why) = $0.disposition {
-                                reason = why
-                            } else {
-                                reason = ""
-                            }
-                            return Wire.MissingKey(
-                                key: $0.key, reason: reason, secret: $0.secret)
-                        }))
+            let summaries = outcome.services.map { service in
+                Wire.CloneCreated.ClonedSummary(
+                    name: service.name,
+                    carried: service.resolved,
+                    missing: service.unresolved.map {
+                        let reason: String
+                        if case .refused(let why) = $0.disposition {
+                            reason = why
+                        } else {
+                            reason = "database provisioning did not finish; supply it by hand"
+                        }
+                        return Wire.MissingKey(key: $0.key, reason: reason, secret: $0.secret)
+                    },
+                    database: service.databaseReport)
             }
 
-            let sealed = await sealState(created.manifestPath)
+            let planLine: String?
+            switch outcome.plan?.verdict {
+            case .clean: planLine = "nothing to change"
+            case .changes: planLine = "changes ready to apply"
+            case .failed: planLine = "tofu plan failed; the clone is written but will not deploy as is"
+            case nil: planLine = nil
+            }
+
             return .json(
                 Wire.CloneCreated(
-                    ok: planned.plan.unresolvedCount == 0,
+                    ok: outcome.unresolvedCount == 0 && outcome.plan?.verdict != .failed,
                     message: "cloned '\(body.source)' → '\(body.target)' in \(body.tofuDir), "
                         + "tofu init ok",
                     services: summaries,
-                    detail: sealed))
+                    detail: outcome.sealed,
+                    plan: planLine,
+                    applied: outcome.applied != nil ? true : nil,
+                    applySkipped: outcome.applySkipped))
+        } catch let half as StackCloneBuilder.HalfWritten {
+            // Half a stack with no explanation is the worst outcome this route has.
+            return .failure(500, "\(half)")
         } catch {
             return .failure(400, "\(error)")
         }
