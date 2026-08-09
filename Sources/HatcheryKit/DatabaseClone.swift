@@ -418,19 +418,25 @@ public struct DatabaseProvisioner: Sendable {
             "ALTER SCHEMA public OWNER TO \"\(plan.owner)\"", plan: plan, host: host,
             via: transport, database: plan.database)
 
+        // --no-owner AND --no-acl: the dump must carry no reference to the source's roles.
+        // Ownership was handled from the start, but the ACLs slipped through — GRANTs naming
+        // `mwserver_app` restored fine on the server where that role exists and killed the
+        // copy on the one where it does not, which is how "0 keys needed" became 2 after
+        // create. The clone's own grants are asserted after the copy; the source's are the
+        // one thing that must not travel.
         let flags = plan.mode == .schema ? "--schema-only " : ""
         let restore = "psql -q -v ON_ERROR_STOP=1 -U \(plan.owner) -d \(plan.database)"
         let command: [String]
         if plan.sameServerCopy {
             let pipeline =
-                "pg_dump -U postgres --no-owner \(flags)-d \(sourceDatabase) | " + restore
+                "pg_dump -U postgres --no-owner --no-acl \(flags)-d \(sourceDatabase) | " + restore
             command = Self.shellCommand(pipeline, plan: plan, host: host, via: transport)
         } else if case .adminExec(let admin) = transport, let sourceServer = plan.sourceServer {
             // Two servers, one box, one admin: the dump leaves the source's container and
             // pipes straight into the target's — which is how a staging clone fills its
             // database from dev's server once staging's exists.
             let pipeline =
-                "docker exec \(sourceServer) pg_dump -U postgres --no-owner \(flags)"
+                "docker exec \(sourceServer) pg_dump -U postgres --no-owner --no-acl \(flags)"
                 + "-d \(sourceDatabase) | docker exec -i \(plan.serverApp) " + restore
             command = ["ssh", "-o", "BatchMode=yes", admin, "sh", "-c", Self.shellQuoted(pipeline)]
         } else {
