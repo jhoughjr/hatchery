@@ -243,6 +243,10 @@ enum Wire {
         let stack: String
         /// Absent on the plan call; must equal the stack name on the destroy call.
         let confirm: String?
+        /// Also delete the tofu directory. Opt-in: state and secrets are records, but the
+        /// destroy-and-reclone loop needs the directory gone, and tonight that was a shell
+        /// errand every time.
+        let purge: Bool?
     }
 
     /// What destroying a stack would remove, shown before the name is typed back.
@@ -359,6 +363,7 @@ public struct HatcheryAPI: Sendable {
     private let liveConfig: LiveConfigReader
     private let clonePlanner: StackClonePlanner
     private let provisioner: DatabaseProvisioner
+    private let removeDirectory: @Sendable (String) throws -> Void
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
     private let sealState: @Sendable (String) async -> String?
@@ -381,6 +386,9 @@ public struct HatcheryAPI: Sendable {
         liveConfig: LiveConfigReader = LiveConfigReader(),
         clonePlanner: StackClonePlanner = StackClonePlanner(),
         provisioner: DatabaseProvisioner = DatabaseProvisioner(),
+        removeDirectory: @escaping @Sendable (String) throws -> Void = {
+            try FileManager.default.removeItem(atPath: Paths.expanded($0))
+        },
         readConfig: @escaping @Sendable (URL) throws -> [String: String] = {
             (try? ConfigSync.readDeclared(at: $0)) ?? [:]
         },
@@ -411,6 +419,7 @@ public struct HatcheryAPI: Sendable {
         self.liveConfig = liveConfig
         self.clonePlanner = clonePlanner
         self.provisioner = provisioner
+        self.removeDirectory = removeDirectory
         self.readConfig = readConfig
         self.writeConfig = writeConfig
         self.sealState = sealState
@@ -1011,7 +1020,18 @@ public struct HatcheryAPI: Sendable {
 
             let outcome = output.split(separator: "\n").last.map(String.init) ?? "destroyed"
             var detail = "\(outcome); '\(stack.name)' removed from the manifest, "
-                + "\(stack.tofu?.directory ?? "its tofu directory") left in place (state and config)"
+            if body.purge == true, let directory = stack.tofu?.directory {
+                // Asked for, so the destroy-and-reclone loop needs no shell in between. A
+                // failure to delete is a line, not a failed destroy — the teardown happened.
+                do {
+                    try removeDirectory(directory)
+                    detail += "\(directory) deleted"
+                } catch {
+                    detail += "\(directory) could not be deleted: \(error)"
+                }
+            } else {
+                detail += "\(stack.tofu?.directory ?? "its tofu directory") left in place (state and config)"
+            }
             if let sealed { detail += "; \(sealed)" }
             return .json(
                 Wire.ActionResult(
