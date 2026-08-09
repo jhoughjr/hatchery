@@ -1,0 +1,108 @@
+#!/bin/sh
+# The whole of hatchery's power over the tunnel, in one readable file.
+#
+# Installed root-owned on the box that runs a locally-managed cloudflared; the operator
+# grants exactly this via one sudoers line:
+#
+#   <admin-user> ALL=(root) NOPASSWD: /usr/local/bin/hatchery-expose
+#
+# Three verbs, nothing else: add a hostname to the tunnel's ingress (and route its DNS),
+# remove one, list them. Every edit is convergent — adding what exists changes nothing,
+# removing what is absent changes nothing — because the caller is a clone pipeline that
+# must be safe to re-run. The catch-all 404 rule stays last, where cloudflared requires it.
+set -eu
+
+CONFIG="${HATCHERY_EXPOSE_CONFIG:-/root/.cloudflared/config.yml}"
+CLOUDFLARED="${HATCHERY_EXPOSE_CLOUDFLARED:-/usr/local/bin/cloudflared}"
+
+usage() {
+    echo "usage: hatchery-expose add <hostname> | remove <hostname> | list" >&2
+    exit 2
+}
+
+[ $# -ge 1 ] || usage
+verb="$1"
+
+hostname_ok() {
+    # A hostname, not a shell payload: letters, digits, dots, dashes.
+    echo "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.-]*$'
+}
+
+tunnel_id() {
+    awk '$1 == "tunnel:" { print $2; exit }' "$CONFIG"
+}
+
+case "$verb" in
+list)
+    awk '$1 == "-" && $2 == "hostname:" { print $3 }' "$CONFIG"
+    ;;
+
+add)
+    [ $# -eq 2 ] || usage
+    host="$2"
+    hostname_ok "$host" || { echo "refusing hostname: $host" >&2; exit 2; }
+
+    if awk '$1 == "-" && $2 == "hostname:" { print $3 }' "$CONFIG" | grep -qx "$host"; then
+        echo "ingress already carries $host"
+    else
+        # Inserted immediately before the catch-all, which cloudflared requires to be
+        # last. The rule targets the box's nginx by Host header — one shape for every app.
+        tmp="$(mktemp)"
+        awk -v host="$host" '
+            !inserted && $1 == "-" && $2 == "service:" && $3 ~ /http_status:404/ {
+                print "  - hostname: " host
+                print "    service: http://localhost:80"
+                print "    originRequest:"
+                print "      httpHostHeader: " host
+                inserted = 1
+            }
+            { print }
+            END { if (!inserted) exit 3 }
+        ' "$CONFIG" > "$tmp" || { rm -f "$tmp"; echo "no catch-all rule found in $CONFIG" >&2; exit 3; }
+        cat "$tmp" > "$CONFIG"
+        rm -f "$tmp"
+        systemctl restart cloudflared
+        echo "ingress now carries $host"
+    fi
+
+    # DNS route is separately convergent: an existing record for this tunnel is success.
+    id="$(tunnel_id)"
+    [ -n "$id" ] || { echo "no tunnel id in $CONFIG" >&2; exit 3; }
+    if out="$("$CLOUDFLARED" tunnel route dns "$id" "$host" 2>&1)"; then
+        echo "dns routed: $host -> tunnel $id"
+    elif echo "$out" | grep -qi "already exists"; then
+        echo "dns already routes $host"
+    else
+        echo "$out" >&2
+        exit 4
+    fi
+    ;;
+
+remove)
+    [ $# -eq 2 ] || usage
+    host="$2"
+    hostname_ok "$host" || { echo "refusing hostname: $host" >&2; exit 2; }
+
+    if ! awk '$1 == "-" && $2 == "hostname:" { print $3 }' "$CONFIG" | grep -qx "$host"; then
+        echo "ingress does not carry $host"
+        exit 0
+    fi
+    tmp="$(mktemp)"
+    awk -v host="$host" '
+        $1 == "-" && $2 == "hostname:" && $3 == host { skipping = 1; next }
+        skipping && ($1 == "-" || $1 == "ingress:") { skipping = 0 }
+        skipping { next }
+        { print }
+    ' "$CONFIG" > "$tmp"
+    cat "$tmp" > "$CONFIG"
+    rm -f "$tmp"
+    systemctl restart cloudflared
+    # The DNS record is left: deleting it needs an API token this wrapper deliberately
+    # does not hold, and a CNAME to a tunnel that no longer routes it answers 404.
+    echo "ingress no longer carries $host (dns record left; it now answers 404)"
+    ;;
+
+*)
+    usage
+    ;;
+esac

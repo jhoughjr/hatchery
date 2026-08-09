@@ -285,6 +285,23 @@ public enum Onboarding {
                 verify: nil),
 
             SetupStep(
+                title: "Optional: grant hatchery the tunnel, one readable line",
+                why: """
+                    With a locally-managed Cloudflare tunnel, exposing a stack means editing \
+                    a root-owned ingress file. hatchery never gets root: it gets exactly one \
+                    wrapper with three verbs — add, remove, list — and the sudoers line below \
+                    is the whole grant. Set the stack's `exposure` to cloudflare-local and \
+                    every clone opens its own front door. Full design: docs/exposure-design.md.
+                    """,
+                on: "box",
+                commands: [
+                    "sudo cp Scripts/hatchery-expose /usr/local/bin/hatchery-expose",
+                    "sudo chmod 755 /usr/local/bin/hatchery-expose",
+                    "echo '<admin-user> ALL=(root) NOPASSWD: /usr/local/bin/hatchery-expose' | sudo tee /etc/sudoers.d/hatchery-expose",
+                ],
+                verify: "sudo -n hatchery-expose list    # as the admin user"),
+
+            SetupStep(
                 title: "Optional: install roost's telemetry collector",
                 why: """
                     roost configures boxes and already ships a per-node reporter — load, memory, \

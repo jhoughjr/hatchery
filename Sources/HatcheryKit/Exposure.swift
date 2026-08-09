@@ -63,6 +63,109 @@ public struct PlatformExposure: ExposureProvider {
     }
 }
 
+/// A provider that acts, not only plans. `none` and `platform` never conform: nothing to do
+/// is a fact, not a failure.
+///
+/// Acting methods narrate instead of throwing — by the time a door is being opened the
+/// stack is already live, and a failed grant belongs in the job transcript as a sentence
+/// naming the fix, not as a dead clone.
+public protocol ActingExposureProvider: ExposureProvider {
+    func expose(
+        domains: [String], stack: StackSpec,
+        onProgress: @Sendable (String) -> Void) async
+    func withdraw(
+        domains: [String], stack: StackSpec,
+        onProgress: @Sendable (String) -> Void) async
+}
+
+/// The lab's shape: a locally-managed cloudflared whose ingress is root-owned, driven
+/// through the `hatchery-expose` wrapper behind one readable sudoers line. The wrapper is
+/// the security boundary; this type only speaks its three verbs over the admin channel.
+/// Install: docs/exposure-design.md.
+public struct CloudflareLocalExposure: ActingExposureProvider {
+    private let run: CommandRunner
+
+    public init(run: @escaping CommandRunner = ShellRunner.live) {
+        self.run = run
+    }
+
+    public var name: String { "cloudflare-local" }
+
+    /// The ssh target that may run the wrapper — its own setting, falling back to the
+    /// database admin: on this estate they are the same box and the same account.
+    static func admin(for stack: StackSpec) -> String? {
+        let chosen = stack.settings?["exposure_admin"] ?? stack.settings?["db_admin"]
+        return (chosen?.isEmpty ?? true) ? nil : chosen
+    }
+
+    static func command(_ admin: String, verb: String, host: String? = nil) -> [String] {
+        var argv = [
+            "ssh", "-o", "BatchMode=yes", admin,
+            "sudo", "-n", "/usr/local/bin/hatchery-expose", verb,
+        ]
+        if let host { argv.append(host) }
+        return argv
+    }
+
+    static func grantHint(_ admin: String) -> String {
+        "install Scripts/hatchery-expose on \(admin)'s box and grant it with one sudoers "
+            + "line (docs/exposure-design.md)"
+    }
+
+    public func plan(domains: [String], stack: StackSpec) async -> [ExposurePlan] {
+        guard let admin = Self.admin(for: stack) else {
+            return domains.map {
+                ExposurePlan(
+                    domain: $0,
+                    action: "cloudflare-local is selected but no admin channel is set — "
+                        + "set exposure_admin (or db_admin) in the stack's settings",
+                    actionable: false)
+            }
+        }
+        return domains.map {
+            ExposurePlan(
+                domain: $0,
+                action: "tunnel ingress + DNS via hatchery-expose on \(admin)",
+                actionable: true)
+        }
+    }
+
+    public func expose(
+        domains: [String], stack: StackSpec,
+        onProgress: @Sendable (String) -> Void
+    ) async {
+        await act(verb: "add", domains: domains, stack: stack, onProgress: onProgress)
+    }
+
+    public func withdraw(
+        domains: [String], stack: StackSpec,
+        onProgress: @Sendable (String) -> Void
+    ) async {
+        await act(verb: "remove", domains: domains, stack: stack, onProgress: onProgress)
+    }
+
+    private func act(
+        verb: String, domains: [String], stack: StackSpec,
+        onProgress: @Sendable (String) -> Void
+    ) async {
+        guard let admin = Self.admin(for: stack) else {
+            onProgress("no admin channel for cloudflare-local — \(Self.grantHint("the admin"))")
+            return
+        }
+        for domain in domains {
+            do {
+                let output = try await run(Self.command(admin, verb: verb, host: domain))
+                for line in String(decoding: output, as: UTF8.self).split(separator: "\n") {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    if !trimmed.isEmpty { onProgress(trimmed) }
+                }
+            } catch {
+                onProgress("could not \(verb) \(domain): \(error) — \(Self.grantHint(admin))")
+            }
+        }
+    }
+}
+
 /// Resolves the provider a stack selected.
 public enum Exposure {
     /// The `exposure` stack setting; absent means platform-managed backends expose
@@ -72,14 +175,16 @@ public enum Exposure {
         switch (chosen, stack.backend) {
         case ("platform", _):
             return PlatformExposure()
+        case ("cloudflare-local", _):
+            return CloudflareLocalExposure()
         case ("none", _), (nil, .dokku):
             return NoExposure()
         case (nil, _):
             // App Platform, Cloud Run, App Runner: the platform routes what it creates.
             return PlatformExposure()
         default:
-            // A provider this build does not know yet (cloudflare-local and friends land
-            // in their own slices) reads as none rather than as a crash.
+            // A provider this build does not know yet (cloudflare-api, lan-dns) reads as
+            // none rather than as a crash.
             return NoExposure()
         }
     }
