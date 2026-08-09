@@ -143,7 +143,8 @@ public struct Deployer: Sendable {
         ["tofu", "plan", "-destroy", "-detailed-exitcode", "-no-color", "-input=false"]
     }
 
-    static func destroyCommand() -> [String] {
+    /// Public for the same reason as `applyCommand`: the watchable destroy job streams it.
+    public static func destroyCommand() -> [String] {
         ["tofu", "destroy", "-auto-approve", "-no-color", "-input=false"]
     }
 

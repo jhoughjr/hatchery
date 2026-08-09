@@ -10,16 +10,20 @@ final class JobStore: @unchecked Sendable {
         let lines: [String]
         let state: String
         let next: Int
+        /// A JSON payload the finishing phase left for the page — the clone job parks its
+        /// missing-keys summary here, because a transcript is prose and the fill-in dialog
+        /// needs structure.
+        let result: String?
     }
 
     private let lock = NSLock()
-    private var jobs: [String: (lines: [String], state: String)] = [:]
+    private var jobs: [String: (lines: [String], state: String, result: String?)] = [:]
 
     /// A short id the page can poll with.
     func create() -> String {
         let id = UUID().uuidString.prefix(8).lowercased()
         lock.lock()
-        jobs[id] = ([], "running")
+        jobs[id] = ([], "running", nil)
         lock.unlock()
         return id
     }
@@ -30,9 +34,10 @@ final class JobStore: @unchecked Sendable {
         lock.unlock()
     }
 
-    func finish(_ id: String, ok: Bool) {
+    func finish(_ id: String, ok: Bool, result: String? = nil) {
         lock.lock()
         jobs[id]?.state = ok ? "ok" : "failed"
+        jobs[id]?.result = result
         lock.unlock()
     }
 
@@ -43,6 +48,7 @@ final class JobStore: @unchecked Sendable {
         guard let job = jobs[id] else { return nil }
         let start = min(max(from, 0), job.lines.count)
         return Snapshot(
-            lines: Array(job.lines[start...]), state: job.state, next: job.lines.count)
+            lines: Array(job.lines[start...]), state: job.state, next: job.lines.count,
+            result: job.state == "running" ? nil : job.result)
     }
 }
