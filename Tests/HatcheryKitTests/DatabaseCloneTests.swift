@@ -42,11 +42,11 @@ struct DatabaseClonePlannerTests {
         #expect(plan.serverApp == "mwstack-pg-staging")
         #expect(plan.port == "5432")
         #expect(plan.scheme == "postgresql")
-        // `mwserver` names no stack, so the target prefixes it — either way it cannot
-        // collide with the source's database on the same server.
+        // The database is the clone's own name; the ROLES keep the source's, because
+        // RLS policies bind them by name and the staging server has no collision.
         #expect(plan.database == "mwlab_2_mwserver")
-        #expect(plan.owner == "mwlab_2_mwserver")
-        #expect(plan.appUser == "mwlab_2_mwserver_app")
+        #expect(plan.owner == "mwserver")
+        #expect(plan.appUser == "mwserver_app")
         // Both styles the source carried are emitted, so old images and new agree.
         #expect(plan.emitted.contains("DATABASE_URL"))
         #expect(plan.emitted.contains("DATABASE_APP_URL"))
@@ -64,8 +64,10 @@ struct DatabaseClonePlannerTests {
                 source: labStack(), target: "mwlab-2", environment: .dev))
 
         #expect(plan.serverApp == "mwstack-pg-dev")
-        // The database and roles are still the clone's own — same server never means same data.
+        // The database and roles are still the clone's own — same server never means same data,
+        // and same server forces renamed roles to avoid colliding with the source's.
         #expect(plan.database == "mwlab_2_mwserver")
+        #expect(plan.owner == "mwlab_2_mwserver")
     }
 
     @Test("a gateway with only discrete keys gets discrete keys back")
@@ -89,7 +91,7 @@ struct DatabaseClonePlannerTests {
 
         let values = plan.values(DatabaseCredentials(ownerPassword: "minted", appPassword: nil))
         #expect(values["DATABASE_HOST"] == "mwstack-pg-staging")
-        #expect(values["DATABASE_USER"] == "mwlab_2_payment_gateway")
+        #expect(values["DATABASE_USER"] == "payment_gateway")
         #expect(values["DATABASE_PASSWORD"] == "minted")
         #expect(values["DATABASE_DB"] == "mwlab_2_payment_gateway")
     }
@@ -109,10 +111,10 @@ struct DatabaseClonePlannerTests {
             DatabaseCredentials(ownerPassword: "ownerpw", appPassword: "apppw"))
         #expect(
             values["DATABASE_URL"]
-                == "postgresql://mwlab_2_mwserver:ownerpw@mwstack-pg-staging:5432/mwlab_2_mwserver")
+                == "postgresql://mwserver:ownerpw@mwstack-pg-staging:5432/mwlab_2_mwserver")
         #expect(
             values["DATABASE_APP_URL"]
-                == "postgresql://mwlab_2_mwserver_app:apppw@mwstack-pg-staging:5432/mwlab_2_mwserver")
+                == "postgresql://mwserver_app:apppw@mwstack-pg-staging:5432/mwlab_2_mwserver")
         // Nothing in the composed values is the source's.
         #expect(!values.values.contains { $0.contains("pw@mwstack") && !$0.contains("ownerpw") && !$0.contains("apppw") })
     }
