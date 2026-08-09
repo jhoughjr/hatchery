@@ -1036,6 +1036,16 @@ public struct HatcheryAPI: Sendable {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty { store.append(id, trimmed) }
             }
+            // Apply means converge everything the stack declares, and the front door is
+            // part of the declaration: a successful apply also asserts exposure, so a stack
+            // whose door was granted after its clone becomes reachable with this one click.
+            if status == 0,
+                let acting = Exposure.provider(for: stack) as? ActingExposureProvider {
+                store.append(id, "opening the front door…")
+                await acting.expose(
+                    domains: stack.services.flatMap(\.domains), stack: stack
+                ) { line in store.append(id, line) }
+            }
             store.append(id, status == 0 ? "apply complete" : "apply failed (exit \(status))")
             store.finish(id, ok: status == 0)
         }
