@@ -151,6 +151,17 @@ extension Stack {
 
             }
 
+            if !planned.exposure.isEmpty {
+                print("")
+                for door in planned.exposure {
+                    if door.actionable {
+                        print("  expose   \(door.domain) — \(door.action)")
+                    } else {
+                        print("  NOWHERE  \(door.domain) — \(door.action)")
+                    }
+                }
+            }
+
             if !planned.warnings.isEmpty {
                 print("")
                 for warning in planned.warnings {

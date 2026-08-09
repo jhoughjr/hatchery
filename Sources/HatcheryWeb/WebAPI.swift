@@ -212,6 +212,14 @@ enum Wire {
         /// Why the create would be refused as things stand — an occupied tofu directory,
         /// mostly. The plan is still shown; this line is what to fix before creating.
         let warning: String?
+        /// What happens to each domain's reachability — the front door is part of the plan.
+        let exposure: [ExposureView]
+
+        struct ExposureView: Encodable {
+            let domain: String
+            let action: String
+            let actionable: Bool
+        }
     }
 
     struct CloneCreated: Encodable {
@@ -826,14 +834,16 @@ public struct HatcheryAPI: Sendable {
             return .json(
                 view(
                     of: planned, environment: environment,
-                    warning: warnings.isEmpty ? nil : warnings.joined(separator: "\n")))
+                    warning: warnings.isEmpty ? nil : warnings.joined(separator: "\n"),
+                    exposure: planned.exposure))
         } catch {
             return .failure(400, "\(error)")
         }
     }
 
     private func view(
-        of planned: PlannedClone, environment: Environment, warning: String? = nil
+        of planned: PlannedClone, environment: Environment, warning: String? = nil,
+        exposure: [ExposurePlan] = []
     ) -> Wire.ClonePlanView {
         Wire.ClonePlanView(
             source: planned.plan.source,
@@ -880,7 +890,11 @@ public struct HatcheryAPI: Sendable {
                         }
                     })
             },
-            warning: warning)
+            warning: warning,
+            exposure: exposure.map {
+                Wire.ClonePlanView.ExposureView(
+                    domain: $0.domain, action: $0.action, actionable: $0.actionable)
+            })
     }
 
     /// The browser's `--create`: bootstraps the stack, scaffolds each service, and layers the

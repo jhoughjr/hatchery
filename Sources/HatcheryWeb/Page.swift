@@ -1107,6 +1107,14 @@ enum Page {
               }).join('')
             + '<div>&nbsp;</div>').join('');
 
+          // The front door beside the data: one line per domain, red when nothing will
+          // make it resolve. A plan that ends in an unreachable stack should look like one.
+          const doors = (p.exposure || []).map(e =>
+            '<div class="' + (e.actionable ? '' : 'err') + '">'
+            + escapeHTML((e.actionable ? 'expose   ' : 'NOWHERE  ') + e.domain)
+            + '<span class="hint">  — ' + escapeHTML(e.action) + '</span></div>').join('');
+          const doorBlock = doors ? '<div>&nbsp;</div>' + doors : '';
+
           const blocked = p.warning
             ? '<div class="err" style="margin-bottom:0.5rem">' + escapeHTML(p.warning)
               + '</div>'
@@ -1114,7 +1122,7 @@ enum Page {
           const create = await step('Clone plan — ' + source + ' → ' + target,
             p.carried + ' key(s) resolved, ' + p.unresolved + ' still need a person',
             blocked
-            + '<pre class="out">' + html + '</pre>'
+            + '<pre class="out">' + html + doorBlock + '</pre>'
             + '<div class="hint" style="margin-top:0.5rem">Create writes the new stack into '
             + escapeHTML(dir) + ' and runs tofu init. Nothing touches '
             + escapeHTML(source) + '.</div>',

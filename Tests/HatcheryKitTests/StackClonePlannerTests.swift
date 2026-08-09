@@ -94,6 +94,17 @@ struct StackClonePlannerTests {
         #expect(probes.value == 1)
     }
 
+    @Test("the plan says every domain will resolve nowhere until exposure is chosen")
+    func exposureSaysNowhere() async throws {
+        let planned = try await plan(readLive: { _, _ in ["LOG_LEVEL": "debug"] })
+        // One line per domain, honest about the missing front door.
+        #expect(!planned.exposure.isEmpty)
+        #expect(planned.exposure.allSatisfy { !$0.actionable })
+        #expect(planned.exposure.first?.action.contains("exposure") == true)
+        // The domains are the clone's, already rewritten.
+        #expect(planned.exposure.contains { $0.domain == "mwlab-2.opi" })
+    }
+
     @Test("a reachable server adds no warning")
     func quietWhenTheServerAnswers() async throws {
         let planned = try await StackClonePlanner(
