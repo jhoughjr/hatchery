@@ -555,10 +555,14 @@ public struct DatabaseProvisioner: Sendable {
         do {
             _ = try await psql("SELECT 1", plan: plan, host: host, via: .adminExec(admin))
             return
-        } catch let failure as CommandFailure where failure.message.contains("No such container") {
-            // Missing, and we hold the grant to fix that.
+        } catch let error as DatabaseProvisionError {
+            // psql() wraps transport failures; unwrap to see whether this is the one
+            // failure we exist to fix.
+            guard case .statementFailed(_, let message) = error,
+                message.contains("No such container")
+            else { return }  // Anything else: chooseTransport will surface it properly.
         } catch {
-            return  // Some other failure: chooseTransport will surface it properly.
+            return
         }
 
         let create = "docker run -d --name \(plan.serverApp) --network \(network) "
