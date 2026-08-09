@@ -45,20 +45,23 @@ add)
     if awk '$1 == "-" && $2 == "hostname:" { print $3 }' "$CONFIG" | grep -qx "$host"; then
         echo "ingress already carries $host"
     else
-        # Inserted immediately before the catch-all, which cloudflared requires to be
-        # last. The rule targets the box's nginx by Host header — one shape for every app.
+        # Inserted immediately before the catch-all, which cloudflared requires to be last.
+        # The catch-all is found by position, not by content — it is definitionally the
+        # final `- service:` rule, whether it answers 404 or routes a default somewhere
+        # (this box's routes everything else to another proxy). Anchoring on
+        # http_status:404 missed that and refused a perfectly normal config.
+        last="$(awk '$1 == "-" && $2 == "service:" { line = NR } END { print line }' "$CONFIG")"
+        [ -n "$last" ] || { echo "no catch-all rule found in $CONFIG" >&2; exit 3; }
         tmp="$(mktemp)"
-        awk -v host="$host" '
-            !inserted && $1 == "-" && $2 == "service:" && $3 ~ /http_status:404/ {
+        awk -v host="$host" -v last="$last" '
+            NR == last {
                 print "  - hostname: " host
                 print "    service: http://localhost:80"
                 print "    originRequest:"
                 print "      httpHostHeader: " host
-                inserted = 1
             }
             { print }
-            END { if (!inserted) exit 3 }
-        ' "$CONFIG" > "$tmp" || { rm -f "$tmp"; echo "no catch-all rule found in $CONFIG" >&2; exit 3; }
+        ' "$CONFIG" > "$tmp"
         cat "$tmp" > "$CONFIG"
         rm -f "$tmp"
         systemctl restart cloudflared
