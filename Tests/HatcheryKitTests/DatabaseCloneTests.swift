@@ -347,8 +347,34 @@ struct DatabaseProvisionerTests {
         #expect(!none.all().compactMap(\.last).joined().contains("pg_dump"))
     }
 
-    @Test("a copy across servers is skipped with the reason, not attempted")
-    func skipsCrossServerCopy() async throws {
+    @Test("a copy across servers bridges the two containers through the admin")
+    func crossServerCopyViaAdmin() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                if argv.contains("enter") {
+                    // Not a dokku app: the probe falls through to the admin.
+                    throw CommandFailure(
+                        command: "ssh", status: 20,
+                        message: "!     App mwstack-pg-dev does not exist")
+                }
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        let (_, report) = try await provisioner.provision(
+            plan(mode: .full, sourceDatabase: "mwserver", sourceServer: "mwstack-pg-prod"),
+            host: "192.168.0.103", admin: "jimmy@opi.local")
+
+        let pipeline = recorded.all().compactMap(\.last).first { $0.contains("pg_dump") } ?? ""
+        #expect(pipeline.contains("docker exec mwstack-pg-prod pg_dump"))
+        #expect(pipeline.contains("docker exec -i mwstack-pg-dev psql"))
+        #expect(report.contains { $0.contains("copied from mwserver on mwstack-pg-prod") })
+    }
+
+    @Test("a cross-server copy without an admin is skipped naming the setting")
+    func skipsCrossServerCopyWithoutAdmin() async throws {
         let recorded = Recorded()
         let provisioner = DatabaseProvisioner(
             run: { argv in
@@ -358,11 +384,29 @@ struct DatabaseProvisionerTests {
             mintPassword: { "minted" })
 
         let (_, report) = try await provisioner.provision(
-            plan(mode: .full, sourceDatabase: "mwserver", sourceServer: "mwstack-pg-dev-other"),
+            plan(mode: .full, sourceDatabase: "mwserver", sourceServer: "mwstack-pg-prod"),
             host: "192.168.0.103")
 
         #expect(!recorded.all().compactMap(\.last).joined().contains("pg_dump"))
-        #expect(report.contains { $0.contains("cross-server") })
+        #expect(report.contains { $0.contains("db_admin") })
+    }
+
+    @Test("a source database with a hostile name is never placed in a pipeline")
+    func refusesHostileNames() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        let (_, report) = try await provisioner.provision(
+            plan(mode: .full, sourceDatabase: "db; rm -rf /", sourceServer: "mwstack-pg-dev"),
+            host: "192.168.0.103")
+
+        #expect(!recorded.all().compactMap(\.last).joined().contains("pg_dump"))
+        #expect(report.contains { $0.contains("not a plain identifier") })
     }
 
     @Test("the probe answers nil for a reachable server, a sentence for a missing one")
