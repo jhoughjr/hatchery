@@ -226,6 +226,7 @@ enum Page {
           <div id="state"></div>
           <div class="section"><h2 id="stacks-heading">Stacks</h2></div>
           <div id="boxes" class="sub" style="margin-bottom:0.75rem"></div>
+          <div id="map" hidden style="margin-bottom:1rem"></div>
           <div id="stacks"></div>
           <div class="events" id="events"></div>
           <div id="log"></div>
@@ -318,6 +319,99 @@ enum Page {
         let collapsedStacks = {};
         try { collapsedStacks = JSON.parse(localStorage.getItem('collapsedStacks') || '{}'); }
         catch (e) {}
+        let mapOpen = !!localStorage.getItem('mapOpen');
+
+        // The system map: control plane, boxes, the stacks and databases on them, and the
+        // internet — drawn from the same status payload the cards use, so it can never
+        // disagree with them. The boxes strip grown up.
+        function drawMap(stacks) {
+          const el = $('map');
+          el.hidden = !mapOpen;
+          if (!mapOpen) { el.innerHTML = ''; return; }
+
+          const byBox = {};
+          stacks.forEach(s => {
+            const box = s.host || (s.backend + ' (managed)');
+            (byBox[box] = byBox[box] || []).push(s);
+          });
+          const boxes = Object.keys(byBox).sort();
+          const rowH = 22, pad = 10, boxGap = 18, titleH = 20;
+          const colBox = 210, boxW = 300, colNet = 610;
+
+          let svg = '', y = 10, edges = '', boxAnchors = {};
+          const stateColor = s => ({
+            ready: 'var(--ready)', responding: 'var(--responding)',
+            degraded: 'var(--degraded)', unreachable: 'var(--unreachable)'
+          }[s] || 'var(--dim)');
+
+          boxes.forEach(box => {
+            const members = byBox[box];
+            // Databases drawn inside their box: the db string is "name @ host:port", and
+            // the host is a container on this same machine.
+            const dbHosts = [...new Set(members.flatMap(s => s.services
+              .map(v => (v.database || '').split('@')[1])
+              .filter(Boolean).map(t => t.trim().split(':')[0])))];
+            const rows = members.length + dbHosts.length;
+            const h = titleH + rows * rowH + pad;
+            boxAnchors[box] = y + h / 2;
+
+            svg += '<rect x="' + colBox + '" y="' + y + '" width="' + boxW + '" height="' + h
+              + '" rx="8" fill="var(--card)" stroke="var(--line)"/>'
+              + '<text x="' + (colBox + 12) + '" y="' + (y + 15) + '" fill="var(--dim)" font-size="11">'
+              + escapeHTML(box) + '</text>';
+
+            let ry = y + titleH;
+            const stackAnchors = {};
+            members.forEach(s => {
+              const cy = ry + rowH / 2;
+              stackAnchors[s.name] = cy;
+              svg += '<circle cx="' + (colBox + 18) + '" cy="' + cy + '" r="4" fill="'
+                + stateColor(s.state) + '"/>'
+                + '<text x="' + (colBox + 30) + '" y="' + (cy + 4) + '" fill="var(--fg)" font-size="12">'
+                + escapeHTML(s.name) + ' <tspan fill="var(--dim)" font-size="10">'
+                + escapeHTML(s.environment) + '</tspan></text>';
+              // A stack with a public domain reaches the internet.
+              const pub = s.services.some(v => (v.domains || []).some(d => !d.endsWith('.opi')));
+              if (pub) {
+                edges += '<line x1="' + (colBox + boxW) + '" y1="' + cy + '" x2="' + colNet
+                  + '" y2="120" stroke="var(--line)"/>';
+              }
+              ry += rowH;
+            });
+            dbHosts.forEach(db => {
+              const cy = ry + rowH / 2;
+              svg += '<text x="' + (colBox + 30) + '" y="' + (cy + 4) + '" fill="var(--dim)" font-size="11">'
+                + '&#128451;&#65039; ' + escapeHTML(db) + '</text>';
+              // Every stack on this box whose services name this db talks to it.
+              members.forEach(s => {
+                const uses = s.services.some(v => (v.database || '').includes(db));
+                if (uses && stackAnchors[s.name]) {
+                  edges += '<line x1="' + (colBox + 24) + '" y1="' + stackAnchors[s.name]
+                    + '" x2="' + (colBox + 26) + '" y2="' + cy + '" stroke="var(--line)"/>';
+                }
+              });
+              ry += rowH;
+            });
+            y += h + boxGap;
+          });
+
+          const totalH = Math.max(y, 160);
+          // Control plane on the left, one edge per box; internet cloud on the right.
+          let planeSvg = '<rect x="10" y="' + (totalH / 2 - 24) + '" width="150" height="48" rx="8" '
+            + 'fill="var(--card)" stroke="var(--accent)"/>'
+            + '<text x="24" y="' + (totalH / 2 - 4) + '" fill="var(--fg)" font-size="12">hatchery</text>'
+            + '<text x="24" y="' + (totalH / 2 + 12) + '" fill="var(--dim)" font-size="10">this machine</text>';
+          boxes.forEach(box => {
+            planeSvg += '<line x1="160" y1="' + (totalH / 2) + '" x2="' + colBox + '" y2="'
+              + boxAnchors[box] + '" stroke="var(--line)"/>';
+          });
+          const net = '<text x="' + (colNet + 8) + '" y="124" fill="var(--dim)" font-size="12">'
+            + '&#9729;&#65039; internet</text>';
+
+          el.innerHTML = '<svg viewBox="0 0 720 ' + (totalH + 10)
+            + '" style="width:100%;max-width:60rem" xmlns="http://www.w3.org/2000/svg">'
+            + planeSvg + svg + edges + net + '</svg>';
+        }
 
         // Buttons carry their target in data attributes and are dispatched by one delegated
         // listener below. An inline onclick would mean a JS string inside an HTML attribute
@@ -553,6 +647,12 @@ enum Page {
               render(lastStacks);
               break;
             }
+            case 'toggle-map': {
+              mapOpen = !mapOpen;
+              localStorage.setItem('mapOpen', mapOpen ? '1' : '');
+              render(lastStacks);
+              break;
+            }
             case 'logs': showLogs(stack, service); break;
             case 'config': showConfig(stack, service); break;
             case 'edit-config': editConfig(stack, service); break;
@@ -741,7 +841,9 @@ enum Page {
           }).join('&nbsp;&nbsp;&nbsp;');
           $('boxes').innerHTML = boxStrip
             ? boxStrip + '&nbsp;&nbsp;&nbsp;<span class="meta hint">control plane: this machine</span>'
+              + '&nbsp;&nbsp;' + button('toggle-map', mapOpen ? 'hide map' : 'map', null, null, 'add')
             : '';
+          drawMap(stacks);
 
           // + stack lives once per backend group (or once at the foot for a single-backend
           // page), not on every stack's own action row.
