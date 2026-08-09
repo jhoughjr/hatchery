@@ -185,7 +185,7 @@ struct SecretPlannerTests {
         let jwks = resolutions.first { $0.key == "KEYPAIR_JWKS" }
         let key = resolutions.first { $0.key == "PRIVATE_KEY_PEM" }
         #expect(jwks?.origin == .minted("RSA-2048, RS512"))
-        #expect(key?.origin == .minted("the private half of the minted keypair"))
+        #expect(key?.origin == .minted("P-256, minted with the stack's JWKS"))
         #expect(key?.value == pem)
     }
 

@@ -97,11 +97,14 @@ public struct SecretMinter: Sendable {
         try await signingKeypair(kid: kid).jwks
     }
 
-    /// The JWKS and the private key it was derived from, together.
+    /// The stack's key material: the RSA JWKS and the P-256 private key, minted together.
     ///
-    /// Together, because they are one secret: minting a JWKS and discarding its PEM produces a
-    /// service that publishes keys it cannot sign with — and no person can supply the matching
-    /// half of a key that was thrown away. Anything that mints one needs both.
+    /// Not two halves of one key — the live estate settled that: `KEYPAIR_JWKS` is RSA RS512
+    /// (services verify each other's tokens through it), while `PRIVATE_KEY_PEM` is a separate
+    /// P-256 key MWServer reads through actual CryptoKit, which has no RSA at all. A clone
+    /// that shipped the RSA private key there crashlooped on invalidASN1Object. They are still
+    /// minted together, because a stack needs both and minting them apart is how one of them
+    /// gets thrown away.
     public func signingKeypair(kid: String? = nil) async throws -> (pem: String, jwks: String) {
         let pem: String
         do {
@@ -120,12 +123,20 @@ public struct SecretMinter: Sendable {
         // Refused here, where the openssl that answered is known, rather than at boot on the
         // box — a service that traps on its own config is the failure this whole path exists
         // to prevent.
-        guard pem.hasPrefix("-----BEGIN PRIVATE KEY-----") else {
-            throw SecretError.generationFailed(
-                key: "PRIVATE_KEY_PEM",
-                reason: "openssl wrote \(pem.split(separator: "\n").first ?? "an empty document")"
-                    + " instead of a PKCS#8 PRIVATE KEY; the deployed parser accepts only PKCS#8")
+        try Self.assertPKCS8(pem, minting: "KEYPAIR_JWKS")
+
+        // The estate's PRIVATE_KEY_PEM shape: P-256, PKCS#8 — read by CryptoKit on the box.
+        let privateKey: String
+        do {
+            let data = try await run([
+                "openssl", "genpkey", "-algorithm", "EC",
+                "-pkeyopt", "ec_paramgen_curve:P-256",
+            ])
+            privateKey = String(decoding: data, as: UTF8.self)
+        } catch {
+            throw SecretError.generationFailed(key: "PRIVATE_KEY_PEM", reason: "\(error)")
         }
+        try Self.assertPKCS8(privateKey, minting: "PRIVATE_KEY_PEM")
 
         let identifier = kid ?? Self.base64URL(randomBytes(8))
         let jwk = try Self.rsaJWK(pem: pem, kid: identifier)
@@ -136,7 +147,17 @@ public struct SecretMinter: Sendable {
         guard let json = String(data: try encoder.encode(document), encoding: .utf8) else {
             throw SecretError.malformedKeyMaterial(reason: "the JWKS did not encode as UTF-8")
         }
-        return (pem, json)
+        return (privateKey, json)
+    }
+
+    /// Refuses key material in any wrapper but PKCS#8, naming what openssl actually wrote.
+    static func assertPKCS8(_ pem: String, minting key: String) throws {
+        guard pem.hasPrefix("-----BEGIN PRIVATE KEY-----") else {
+            throw SecretError.generationFailed(
+                key: key,
+                reason: "openssl wrote \(pem.split(separator: "\n").first ?? "an empty document")"
+                    + " instead of a PKCS#8 PRIVATE KEY; the deployed parser accepts only PKCS#8")
+        }
     }
 
     /// Converts a PKCS#1 RSA private key into a private JWK.
@@ -327,14 +348,14 @@ public struct SecretPlanner: Sendable {
 
         if key == "PRIVATE_KEY_PEM" {
             // The stack's key, wherever the stack keeps it: on a sibling when one carries it,
-            // or the private half of the keypair this very resolution minted. Only a stack
-            // whose key lives entirely outside hatchery still needs a person.
+            // or the P-256 key minted alongside the JWKS this very resolution produced. Only
+            // a stack whose key lives entirely outside hatchery still needs a person.
             if let (name, value) = Self.sibling(key, in: siblings) {
                 return SecretResolution(key: key, origin: .shared(from: name), value: value)
             }
             if let pem = mintedPEM {
                 return SecretResolution(
-                    key: key, origin: .minted("the private half of the minted keypair"),
+                    key: key, origin: .minted("P-256, minted with the stack's JWKS"),
                     value: pem)
             }
         }
