@@ -110,7 +110,9 @@ extension Stack {
             for service in planned.plan.services {
                 let origin = planned.origins[service.name] ?? "declared file"
                 print("")
-                print("  \(service.name)  [\(service.kind.rawValue)]  from \(origin)")
+                // The rename is part of the plan: the clone's apps must not collide with the
+                // source's on the same box, and the arrow is where that is shown.
+                print("  \(service.sourceName) → \(service.name)  [\(service.kind.rawValue)]  from \(origin)")
                 if !service.domains.isEmpty {
                     print("    domains  \(service.domains.joined(separator: ", "))")
                 }

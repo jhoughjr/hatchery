@@ -35,7 +35,7 @@ struct StackClonePlannerTests {
         let planned = try await plan(readLive: { _, _ in ["LOG_LEVEL": "debug"] })
         // The address alone: `hostAddress` strips the SSH user, which is a login detail
         // rather than part of where the config lives.
-        #expect(planned.origins["mwlab"] == "live config on 192.168.0.103")
+        #expect(planned.origins["mwlab-2"] == "live config on 192.168.0.103")
     }
 
     @Test("a backend that cannot answer falls back without alarm")
@@ -43,7 +43,7 @@ struct StackClonePlannerTests {
         // Not-implemented-yet is a fact about the backend, not a failure worth a warning.
         let planned = try await plan(
             readLive: { _, _ in throw LiveConfigError.unsupportedBackend(.dokku) })
-        #expect(planned.origins["mwlab"] == "declared file")
+        #expect(planned.origins["mwlab-2"] == "declared file")
     }
 
     @Test("an unexpected live failure is named, because the box may disagree")
@@ -52,7 +52,7 @@ struct StackClonePlannerTests {
             readLive: { _, _ in
                 throw CommandFailure(command: "ssh", status: 255, message: "connection refused")
             })
-        let origin = try #require(planned.origins["mwlab"])
+        let origin = try #require(planned.origins["mwlab-2"])
         #expect(origin.hasPrefix("declared file — live read failed"))
         #expect(origin.contains("the box may disagree"))
     }

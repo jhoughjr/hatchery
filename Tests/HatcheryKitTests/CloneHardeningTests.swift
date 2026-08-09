@@ -81,6 +81,18 @@ struct CloneHardeningTests {
         #expect(planned.unresolved.contains { $0.required })
     }
 
+    /// The first live clone kept the source's app names and its apply collided with the
+    /// running apps on the same box, three times over. The names are part of the rewrite.
+    @Test func servicesAreRenamedForTheClone() async throws {
+        let stackNamed = try await plan(service: 0, config: [:])
+        #expect(stackNamed.name == "mwlab-2")
+        #expect(stackNamed.sourceName == "mwlab")
+
+        let sibling = try await plan(service: 1, config: [:])
+        #expect(sibling.name == "mwlab-2-paylab")
+        #expect(sibling.sourceName == "paylab")
+    }
+
     @Test func theServiceShapeTravels() async throws {
         let planned = try await plan(service: 0, config: [:])
         #expect(planned.baseURL == "https://mwlab-2.opi")

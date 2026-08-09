@@ -168,7 +168,8 @@ public struct StackCloneBuilder: Sendable {
                 domains: service.domains, configFile: "\(service.name).config.json",
                 baseURL: service.baseURL, healthPath: service.healthPath)
 
-            let shape = shapes[service.name]
+            // Source-side facts stay keyed by the source's name; the clone's own name is new.
+            let shape = shapes[service.sourceName]
             let result = try await scaffolder.plan(
                 service: spec, into: options.target, manifest: current,
                 containerPort: options.port ?? shape?.containerPort ?? 8080,
