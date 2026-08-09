@@ -114,6 +114,16 @@ extension BackendSetting {
         required: false,
         defaultValue: "~/.ssh/id_rsa")
 
+    public static let exposure = BackendSetting(
+        key: "exposure",
+        label: "Exposure provider",
+        help: """
+            How this stack's domains become reachable: none (say so on every plan), or \
+            platform. Tunnel and LAN-DNS providers land in their own slices — see \
+            docs/exposure-design.md.
+            """,
+        required: false)
+
     public static let dbAdmin = BackendSetting(
         key: "db_admin",
         label: "Database admin SSH target",

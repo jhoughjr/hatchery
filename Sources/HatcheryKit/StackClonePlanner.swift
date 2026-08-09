@@ -12,11 +12,18 @@ public struct PlannedClone: Sendable {
     /// What will go wrong at create as things stand — an unreachable database server,
     /// mostly. The plan is still shown; these lines are what to fix before creating.
     public let warnings: [String]
+    /// What will happen to each domain's reachability — the front door is part of the
+    /// clone, and a domain that will resolve nowhere says so here, not after health polls.
+    public let exposure: [ExposurePlan]
 
-    public init(plan: ClonePlan, origins: [String: String], warnings: [String] = []) {
+    public init(
+        plan: ClonePlan, origins: [String: String], warnings: [String] = [],
+        exposure: [ExposurePlan] = []
+    ) {
         self.plan = plan
         self.origins = origins
         self.warnings = warnings
+        self.exposure = exposure
     }
 }
 
@@ -137,11 +144,17 @@ public struct StackClonePlanner: Sendable {
             }
         }
 
+        // The clone carries the source's settings, so its exposure provider is the
+        // source's; the domains are the clone's own, already rewritten.
+        let exposure = await Exposure.provider(for: source)
+            .plan(domains: services.flatMap(\.domains), stack: source)
+
         return PlannedClone(
             plan: ClonePlan(
                 source: source.name, target: target, environment: environment,
                 services: services),
             origins: origins,
-            warnings: warnings)
+            warnings: warnings,
+            exposure: exposure)
     }
 }

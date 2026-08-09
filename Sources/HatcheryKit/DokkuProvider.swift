@@ -21,7 +21,7 @@ public struct DokkuProvider: ServiceProvider {
         await Preflight(execute: execute).dokku(host: host)
     }
 
-    public var settings: [BackendSetting] { [.sshHost, .sshKey, .dbAdmin] }
+    public var settings: [BackendSetting] { [.sshHost, .sshKey, .dbAdmin, .exposure] }
 
     public func bootstrapFiles(settings values: [String: String]) -> [GeneratedFile] {
         let resolved = settings.resolving(values)
