@@ -92,6 +92,48 @@ struct DestroyRouteTests {
         #expect(saved.all().isEmpty)
     }
 
+    @Test("purge also deletes the tofu directory, and only when asked")
+    func purgeDeletesTheDirectory() async throws {
+        let removed = Removed()
+        let api = HatcheryAPI(
+            loadManifest: { StackManifest(stacks: [self.stack()]) },
+            saveManifest: { _, _ in },
+            manifestPath: { "/infra/hatchery.json" },
+            deployer: deployer(
+                planOutput: "Plan: 0 to add, 0 to change, 1 to destroy.",
+                destroyOutput: "Destroy complete!"),
+            removeDirectory: { removed.record($0) },
+            sealState: { _ in nil })
+
+        let kept = await api.handle(
+            post("/api/stack/destroy", ["stack": "mwlab-3", "confirm": "mwlab-3"]))
+        #expect(kept.status == 200)
+        #expect(removed.all().isEmpty)
+
+        // The same stack again — the manifest reloads fresh each call in this test.
+        let purged = await api.handle(
+            post("/api/stack/destroy", ["stack": "mwlab-3", "confirm": "mwlab-3", "purge": true]))
+        #expect(purged.status == 200)
+        #expect(removed.all() == ["/infra/mwlab-3"])
+        let detail = try decoded(purged)["detail"] as? String ?? ""
+        #expect(detail.contains("deleted"))
+    }
+
+    private final class Removed: @unchecked Sendable {
+        private let lock = NSLock()
+        private var paths: [String] = []
+        func record(_ path: String) {
+            lock.lock()
+            paths.append(path)
+            lock.unlock()
+        }
+        func all() -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return paths
+        }
+    }
+
     @Test("destroy tears down, forgets the stack, and seals")
     func destroys() async throws {
         let saved = Saved()

@@ -1219,6 +1219,9 @@ struct Stack: ParsableCommand {
         @Flag(name: .long, help: "Actually destroy. Without it, only the plan is shown.")
         var yes: Bool = false
 
+        @Flag(name: .long, help: "Also delete the tofu directory, so the same name can be cloned again. Off by default: state and secrets are records.")
+        var purge: Bool = false
+
         func run() async throws {
             let path = try ManifestLocator.resolve(manifest)
             let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
@@ -1256,7 +1259,17 @@ struct Stack: ParsableCommand {
             try parsed.removing(stack: spec.name).encoded()
                 .write(to: URL(fileURLWithPath: path))
             print("  removed '\(spec.name)' from \(path)")
-            print("  left in place: \(spec.tofu?.directory ?? "the tofu directory") (state and config)")
+            if purge, let directory = spec.tofu?.directory {
+                // A failure to delete is a line, not a failed destroy — the teardown happened.
+                do {
+                    try FileManager.default.removeItem(atPath: Paths.expanded(directory))
+                    print("  deleted \(directory)")
+                } catch {
+                    print("  could not delete \(directory): \(error)")
+                }
+            } else {
+                print("  left in place: \(spec.tofu?.directory ?? "the tofu directory") (state and config)")
+            }
             // A destroy empties tfstate. Sealing keeps the backup matching what is on disk, so
             // the next status call does not read a torn-down stack as unsealed drift.
             if let line = await StateMaintenance.seal(after: path) { print("  \(line)") }

@@ -1075,23 +1075,36 @@ enum Page {
             p.warning ? 'create anyway' : 'create');
           if (!create) { log('plan only; nothing written'); return; }
 
+          // Two stages, so the log advances instead of one long silent spinner: create is
+          // fast and reports the databases and the plan; the apply — minutes of image
+          // deploys — runs as its own call through the same route the apply button uses.
           busy = true;
           const res = await send('/api/stack/clone',
-            {source, target, environment: env, tofuDir: dir, port, network, apply, db,
+            {source, target, environment: env, tofuDir: dir, port, network, apply: false, db,
              confirm: target});
           busy = false;
           log(res.data.message || res.data.error, !res.ok);
           if (!res.ok) return;
 
+          let missing = 0;
           (res.data.services || []).forEach(s => {
+            missing += (s.missing || []).length;
             log('  ' + s.name + ': ' + s.carried + ' value(s) resolved, '
                 + (s.missing || []).length + ' still needed');
             (s.database || []).forEach(line => log('    db  ' + line));
           });
           if (res.data.detail) log('  ' + res.data.detail);
           if (res.data.plan) log('  tofu plan: ' + res.data.plan, res.data.plan.indexOf('failed') >= 0);
-          if (res.data.applied) log('  tofu apply: done — the clone is live');
-          else if (res.data.applySkipped) log('  apply skipped: ' + res.data.applySkipped);
+
+          if (apply && missing === 0) {
+            log('  applying — deploying every service; this can take minutes…');
+            busy = true;
+            const applied = await send('/api/apply', {stack: target, confirm: target});
+            busy = false;
+            log('  ' + (applied.data.message || applied.data.error), !applied.ok);
+          } else if (apply) {
+            log('  apply skipped: ' + missing + ' key(s) still need a person', true);
+          }
           await refresh();
 
           // The keys that point at something only the source's environment has, asked for
@@ -1121,16 +1134,19 @@ enum Page {
               + '<pre class="out">'
               + p.services.map(s => escapeHTML(s.name + '  ' + s.image)).join('\\n')
               + '</pre>')
+            + select('d-purge', 'Tofu directory', ['keep', 'delete'],
+                     'keep leaves state and config on disk as a record. delete clears it '
+                     + 'too, so the same name can be cloned again without a shell in between.')
             + field('d-confirm', 'Type ' + name + ' to confirm', '',
-                    'The one action with no undo. The tofu directory and its config files '
-                    + 'stay on disk — state and secrets are records, not clutter.');
+                    'The one action with no undo.');
           const ok = await step('Destroy ' + name,
             p.backend + ' · ' + p.environment, body, 'destroy');
           if (!ok) { log('nothing destroyed'); return; }
 
           const confirm = $('d-confirm').value.trim();
+          const purge = $('d-purge').value === 'delete';
           busy = true;
-          const res = await send('/api/stack/destroy', {stack: name, confirm});
+          const res = await send('/api/stack/destroy', {stack: name, confirm, purge});
           busy = false;
           log(res.data.message || res.data.error, !res.ok);
           if (res.data.detail) log('  ' + res.data.detail);
