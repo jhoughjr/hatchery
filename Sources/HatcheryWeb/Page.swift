@@ -618,16 +618,20 @@ enum Page {
                   + '">&#9650;</span>' : '';
               const warnLine = (cfg && !cfg.complete)
                 ? '<div class="warn-line">&#9650; ' + escapeHTML(cfg.summary || '') + '</div>' : '';
-              // What is actually deployed, at a glance: the image tag carries the build, the
-              // rev is what the box reports it is running, and the db line says where its
-              // data lives — no more inferring any of the three from boot failures.
+              // What is actually deployed, at a glance — each datum wears an icon saying
+              // what it is, and its tooltip says where it came from, because three bare dim
+              // lines read as one unlabelled blur.
               const tag = (svc.image || '').split(':').pop();
               const rev = svc.gitRev ? 'rev ' + svc.gitRev.slice(0, 9) : '';
               const build = [tag, rev].filter(Boolean).join(' · ');
               const buildLine = build
-                ? '<div class="kind">' + escapeHTML(build) + '</div>' : '';
+                ? '<div class="kind" title="build: image tag as the manifest declares it'
+                  + (rev ? ', rev as the running service reports it' : '') + '">&#128230; '
+                  + escapeHTML(build) + '</div>' : '';
               const dbLine = svc.database
-                ? '<div class="kind">db ' + escapeHTML(svc.database) + '</div>' : '';
+                ? '<div class="kind" title="database @ server:port, from the declared '
+                  + 'config — credentials never shown">&#128451;&#65039; '
+                  + escapeHTML(svc.database) + '</div>' : '';
               return '<tr>'
                 + '<td><div class="name">' + escapeHTML(svc.name) + warn + '</div>'
                 +   '<div class="kind">' + escapeHTML(svc.kind) + '</div>'

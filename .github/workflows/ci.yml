@@ -44,6 +44,11 @@ jobs:
           fi
           swift --version
 
+      - name: page script parses
+        # A JS syntax error in the dashboard's inline script is a page that never renders,
+        # and one shipped (#58). Cheap to check, expensive to ship.
+        run: bash Scripts/check-page-syntax.sh
+
       # The scratch path lives outside the workspace because checkout cleans untracked files on
       # every run; keeping build state across runs is what makes a warm build take seconds.
       - name: build
