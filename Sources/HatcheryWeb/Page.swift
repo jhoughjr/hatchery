@@ -692,9 +692,9 @@ enum Page {
             // stops scaling at about the third stack.
             const collapsed = collapsedStacks[stack.name] === true;
             return '<section class="stack"><header>'
-              + '<span class="meta caret" data-action="toggle-stack" data-stack="'
-              +   escapeHTML(stack.name) + '" style="cursor:pointer">'
-              +   (collapsed ? '&#9656;' : '&#9662;') + '</span>'
+              // A real button, not a decorated span: the click dispatcher matches
+              // button[data-action] only, and the wiring tests hold every case to having one.
+              + button('toggle-stack', collapsed ? '▸' : '▾', stack.name, null, 'add')
               + icon(stack.backend)
               + '<h2>' + escapeHTML(stack.name) + stackWarn + '</h2>'
               + '<span class="meta">' + escapeHTML(stack.backend) + ' · '
