@@ -163,11 +163,17 @@ struct DatabaseProvisionerTests {
         }
     }
 
-    private func plan(appUser: String? = "mwlab_2_app") -> DatabaseClonePlan {
+    private func plan(
+        appUser: String? = "mwlab_2_app",
+        mode: DatabaseCloneMode = .none,
+        sourceDatabase: String? = nil,
+        sourceServer: String? = nil
+    ) -> DatabaseClonePlan {
         DatabaseClonePlan(
             serverApp: "mwstack-pg-dev", port: "5432", scheme: "postgresql",
             database: "mwlab_2_mwserver", owner: "mwlab_2_mwserver", appUser: appUser,
-            emitted: ["DATABASE_URL"])
+            emitted: ["DATABASE_URL"], mode: mode,
+            sourceDatabase: sourceDatabase, sourceServer: sourceServer)
     }
 
     @Test("asserts roles, database and grants through the postgres app, over ssh")
@@ -285,6 +291,78 @@ struct DatabaseProvisionerTests {
             #expect(command.contains("mwstack-pg-dev"))
         }
         #expect(admin.contains { $0.last?.contains("CREATE ROLE") == true })
+    }
+
+    @Test("a full clone pipes the source database into the new one, as the new owner")
+    func copiesFullDatabase() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        _ = try await provisioner.provision(
+            plan(mode: .full, sourceDatabase: "mwserver", sourceServer: "mwstack-pg-dev"),
+            host: "192.168.0.103")
+
+        let pipelines = recorded.all().filter { $0.contains("sh") }
+        #expect(pipelines.count == 1)
+        let pipeline = pipelines[0].last ?? ""
+        #expect(pipeline.contains("pg_dump -U postgres --no-owner -d mwserver"))
+        #expect(pipeline.contains("psql -q -v ON_ERROR_STOP=1 -U mwlab_2_mwserver -d mwlab_2_mwserver"))
+        // Copied tables get the app role's grants asserted over them.
+        let sql = recorded.all().compactMap(\.last).joined(separator: "\n")
+        #expect(sql.contains("ON ALL TABLES IN SCHEMA public"))
+        #expect(sql.contains("ON ALL SEQUENCES IN SCHEMA public"))
+    }
+
+    @Test("a schema clone dumps structure only, and none dumps nothing")
+    func schemaAndNone() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        _ = try await provisioner.provision(
+            plan(mode: .schema, sourceDatabase: "mwserver", sourceServer: "mwstack-pg-dev"),
+            host: "192.168.0.103")
+        let schema = recorded.all().compactMap(\.last).joined(separator: "\n")
+        #expect(schema.contains("--schema-only"))
+
+        let none = Recorded()
+        let empty = DatabaseProvisioner(
+            run: { argv in
+                none.record(argv)
+                return Data()
+            },
+            mintPassword: { "minted" })
+        _ = try await empty.provision(
+            plan(mode: .none, sourceDatabase: "mwserver", sourceServer: "mwstack-pg-dev"),
+            host: "192.168.0.103")
+        #expect(!none.all().compactMap(\.last).joined().contains("pg_dump"))
+    }
+
+    @Test("a copy across servers is skipped with the reason, not attempted")
+    func skipsCrossServerCopy() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        let (_, report) = try await provisioner.provision(
+            plan(mode: .full, sourceDatabase: "mwserver", sourceServer: "mwstack-pg-dev-other"),
+            host: "192.168.0.103")
+
+        #expect(!recorded.all().compactMap(\.last).joined().contains("pg_dump"))
+        #expect(report.contains { $0.contains("cross-server") })
     }
 
     @Test("the probe answers nil for a reachable server, a sentence for a missing one")

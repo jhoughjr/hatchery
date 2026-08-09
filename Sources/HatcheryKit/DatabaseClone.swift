@@ -1,5 +1,26 @@
 import Foundation
 
+/// What a clone's database starts with.
+///
+/// The choice is the operator's, per clone: `full` is the one-click default — a clone of a
+/// running stack behaves like the running stack, gateway registrations and all — until the
+/// person says it should not be, which is what `schema` (tables, no rows) and `none` (empty;
+/// the app's own tooling owns the schema) are for.
+public enum DatabaseCloneMode: String, Sendable, Codable, CaseIterable, Equatable {
+    case none
+    case schema
+    case full
+
+    /// What the plan display says this mode will do.
+    var carrying: String {
+        switch self {
+        case .none: return "created empty"
+        case .schema: return "schema copied, no rows"
+        case .full: return "schema and data copied"
+        }
+    }
+}
+
 /// One service's database, as a clone will create it.
 ///
 /// The shape is read from the source service rather than declared anywhere: the tofu files
@@ -21,10 +42,18 @@ public struct DatabaseClonePlan: Sendable, Equatable {
     public let appUser: String?
     /// The config keys this plan will emit, copied from which style the source carried.
     public let emitted: Set<String>
+    /// What the new database starts with.
+    public let mode: DatabaseCloneMode
+    /// The source's database, for `schema` and `full` copies.
+    public let sourceDatabase: String?
+    /// The server the source's database lives on — pre-rewrite, so a cross-environment
+    /// clone knows its copy would have to cross servers.
+    public let sourceServer: String?
 
     public init(
         serverApp: String, port: String, scheme: String, database: String, owner: String,
-        appUser: String?, emitted: Set<String>
+        appUser: String?, emitted: Set<String>, mode: DatabaseCloneMode = .full,
+        sourceDatabase: String? = nil, sourceServer: String? = nil
     ) {
         self.serverApp = serverApp
         self.port = port
@@ -33,6 +62,9 @@ public struct DatabaseClonePlan: Sendable, Equatable {
         self.owner = owner
         self.appUser = appUser
         self.emitted = emitted
+        self.mode = mode
+        self.sourceDatabase = sourceDatabase
+        self.sourceServer = sourceServer
     }
 
     /// Two services pointing at the same database must provision it once and share the
@@ -41,7 +73,13 @@ public struct DatabaseClonePlan: Sendable, Equatable {
 
     /// What one sentence in a plan display should say this will do.
     public var summary: String {
-        "database \(database) on \(serverApp), minted credentials, created with the clone"
+        "database \(database) on \(serverApp), minted credentials, \(mode.carrying)"
+    }
+
+    /// A copy has a source, and both databases sit on the same server. Piping a dump across
+    /// two servers is not built yet, and pretending otherwise would fail after create.
+    var copyable: Bool {
+        mode != .none && sourceDatabase != nil && sourceServer == serverApp
     }
 
     /// The config values this database resolves, once its credentials exist.
@@ -102,7 +140,8 @@ public enum DatabaseClonePlanner {
         sourceConfig: [String: String],
         source: StackSpec,
         target: String,
-        environment: Environment
+        environment: Environment,
+        mode: DatabaseCloneMode = .full
     ) -> DatabaseClonePlan? {
         guard backend == .dokku else { return nil }
         guard let contract = EnvContract.contract(for: kind, backend: backend) else { return nil }
@@ -161,7 +200,10 @@ public enum DatabaseClonePlanner {
             database: derived(sourceDB, source: source, target: target, environment: environment),
             owner: derived(sourceOwner, source: source, target: target, environment: environment),
             appUser: appUser,
-            emitted: emitted)
+            emitted: emitted,
+            mode: mode,
+            sourceDatabase: sourceDB,
+            sourceServer: host)
     }
 
     /// A postgres name for the clone's copy of a source-side name.
@@ -315,7 +357,71 @@ public struct DatabaseProvisioner: Sendable {
             report.append("granted \(appUser) connect and table access on \(plan.database)")
         }
 
+        try await copyContents(of: plan, host: host, via: transport, report: &report)
+
         return (DatabaseCredentials(ownerPassword: ownerPassword, appPassword: appPassword), report)
+    }
+
+    /// Fills the new database from the source's, as the mode asks.
+    ///
+    /// MWServer does not create its own schema at boot — the lab's databases were initialised
+    /// by MacWorkStack-infra's db/init matrix — so an empty database is a running app with no
+    /// tables. The dump restores as the clone's owner, so every copied object belongs to the
+    /// clone's role rather than the source's.
+    private func copyContents(
+        of plan: DatabaseClonePlan, host: String, via transport: DatabaseTransport,
+        report: inout [String]
+    ) async throws {
+        guard plan.mode != .none else { return }
+        guard let sourceDatabase = plan.sourceDatabase else { return }
+        guard plan.copyable else {
+            report.append(
+                "\(plan.mode.rawValue) copy skipped: the source database lives on "
+                    + "\(plan.sourceServer ?? "another server"), not \(plan.serverApp) — "
+                    + "cross-server copies are not built yet; created empty")
+            return
+        }
+
+        let flags = plan.mode == .schema ? "--schema-only " : ""
+        let pipeline = "pg_dump -U postgres --no-owner \(flags)-d \(sourceDatabase) | "
+            + "psql -q -v ON_ERROR_STOP=1 -U \(plan.owner) -d \(plan.database)"
+        do {
+            _ = try await run(
+                Self.shellCommand(pipeline, plan: plan, host: host, via: transport))
+        } catch let failure as CommandFailure {
+            throw DatabaseProvisionError.statementFailed(
+                sql: "pg_dump \(sourceDatabase) → \(plan.database)", message: failure.message)
+        }
+
+        // Copied tables predate the default-privilege rule above, so the app role's grants
+        // are asserted over what just arrived.
+        if let appUser = plan.appUser {
+            _ = try await psql(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public "
+                    + "TO \"\(appUser)\"",
+                plan: plan, host: host, via: transport, database: plan.database)
+            _ = try await psql(
+                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO \"\(appUser)\"",
+                plan: plan, host: host, via: transport, database: plan.database)
+        }
+        report.append(
+            "\(plan.mode == .schema ? "schema" : "schema and data") copied from \(sourceDatabase)")
+    }
+
+    /// A shell pipeline on the database server, through whichever transport is in use — the
+    /// one place a remote `sh -c` is allowed, because a dump has to pipe into a restore.
+    static func shellCommand(
+        _ pipeline: String, plan: DatabaseClonePlan, host: String, via transport: DatabaseTransport
+    ) -> [String] {
+        let remote = ["sh", "-c", shellQuoted(pipeline)]
+        switch transport {
+        case .dokkuEnter:
+            return ["ssh", "-o", "BatchMode=yes", DokkuProvider.sshTarget(host)]
+                + ["enter", plan.serverApp, "web"] + remote
+        case .adminExec(let admin):
+            return ["ssh", "-o", "BatchMode=yes", admin]
+                + ["docker", "exec", "-i", plan.serverApp] + remote
+        }
     }
 
     /// Whether the plan's server can be reached at all, without creating anything.

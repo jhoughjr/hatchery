@@ -154,6 +154,8 @@ enum Wire {
         /// When given, the plan also checks the directory would be accepted — so a full
         /// directory is a line on the plan screen, not a refusal after the create click.
         let tofuDir: String?
+        /// What each database starts with: full, schema, or none. Absent means full.
+        let db: String?
     }
 
     struct CloneBody: Decodable {
@@ -168,6 +170,8 @@ enum Wire {
         let confirm: String
         /// Run `tofu apply` after a clean plan, so the clone ends running rather than written.
         let apply: Bool?
+        /// What each database starts with: full, schema, or none. Absent means full.
+        let db: String?
     }
 
     /// One key's fate in a clone plan. `action` is the CLI's vocabulary — carry, rewrite,
@@ -725,10 +729,13 @@ public struct HatcheryAPI: Sendable {
         }
 
         let environment = Environment(rawValue: body.environment ?? "staging")
+        guard let databaseMode = DatabaseCloneMode(rawValue: body.db ?? "full") else {
+            return .failure(400, "db must be one of: full, schema, none")
+        }
         do {
             let planned = try await clonePlanner.plan(
                 stack: stack, into: body.target, environment: environment,
-                manifestPath: manifestPath())
+                manifestPath: manifestPath(), databaseMode: databaseMode)
 
             // The same checks the create would make, made now. Failing them after the
             // create click cost a whole trip through the wizard; a full directory or an
@@ -837,11 +844,14 @@ public struct HatcheryAPI: Sendable {
             return .failure(
                 403, "'\(body.target)' would be \(environment.rawValue); create it from the CLI")
         }
+        guard let databaseMode = DatabaseCloneMode(rawValue: body.db ?? "full") else {
+            return .failure(400, "db must be one of: full, schema, none")
+        }
         let planned: PlannedClone
         do {
             planned = try await clonePlanner.plan(
                 stack: sourceStack, into: body.target, environment: environment,
-                manifestPath: manifestPath())
+                manifestPath: manifestPath(), databaseMode: databaseMode)
         } catch {
             return .failure(400, "\(error)")
         }

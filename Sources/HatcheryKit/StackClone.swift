@@ -150,7 +150,8 @@ public struct StackCloner: Sendable {
         into targetName: String,
         environment: Environment,
         sourceConfig: [String: String],
-        domains: [String]
+        domains: [String],
+        databaseMode: DatabaseCloneMode = .full
     ) async throws -> ClonedService {
         let contract = EnvContract.contract(for: service.kind, backend: source.backend)
         let secretKeys = Set(contract?.secret ?? [])
@@ -162,7 +163,7 @@ public struct StackCloner: Sendable {
         // through to their old dispositions and stay with a person.
         let database = DatabaseClonePlanner.plan(
             service: service.kind, backend: source.backend, sourceConfig: sourceConfig,
-            source: source, target: targetName, environment: environment)
+            source: source, target: targetName, environment: environment, mode: databaseMode)
 
         for key in (contract?.required ?? []).sorted() {
             keys.append(

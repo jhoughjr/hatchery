@@ -76,7 +76,8 @@ public struct StackClonePlanner: Sendable {
         stack source: StackSpec,
         into target: String,
         environment: Environment,
-        manifestPath: String
+        manifestPath: String,
+        databaseMode: DatabaseCloneMode = .full
     ) async throws -> PlannedClone {
         var services: [ClonedService] = []
         var origins: [String: String] = [:]
@@ -113,7 +114,7 @@ public struct StackClonePlanner: Sendable {
 
             let planned = try await cloner.plan(
                 service: service, from: source, into: target, environment: environment,
-                sourceConfig: config, domains: domains)
+                sourceConfig: config, domains: domains, databaseMode: databaseMode)
             services.append(planned)
             // Keyed by the clone-side name, which is what every display looks services up by.
             origins[planned.name] = origin

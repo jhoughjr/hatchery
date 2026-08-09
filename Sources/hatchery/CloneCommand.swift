@@ -55,6 +55,9 @@ extension Stack {
         @Flag(name: .long, help: "After creating, run `tofu apply` so the clone lands on the box — the one-click path.")
         var apply: Bool = false
 
+        @Option(name: .long, help: "What each database starts with: full (schema and data — the default; a clone of a running stack behaves like one), schema (tables, no rows), or none (empty).")
+        var db: String = DatabaseCloneMode.full.rawValue
+
         // These three live in the source's tofu files, and are read from there. The flags
         // remain as overrides for a clone that should deliberately differ from its source.
         @Option(name: .long, help: "Container port override. Read from the source's tofu when not given.")
@@ -89,6 +92,11 @@ extension Stack {
             if apply, !create {
                 throw ValidationError("--apply only means something with --create")
             }
+            guard let databaseMode = DatabaseCloneMode(rawValue: db) else {
+                throw ValidationError(
+                    "--db must be one of: "
+                        + DatabaseCloneMode.allCases.map(\.rawValue).joined(separator: ", "))
+            }
             if parsed.stack(named: target) != nil {
                 throw ValidationError(
                     "'\(target)' already exists in \(path); clone to a name that does not")
@@ -102,7 +110,8 @@ extension Stack {
             let planned: PlannedClone
             do {
                 planned = try await StackClonePlanner().plan(
-                    stack: spec, into: target, environment: env, manifestPath: path)
+                    stack: spec, into: target, environment: env, manifestPath: path,
+                    databaseMode: databaseMode)
             } catch let error as StackClonePlanner.UnreadableConfig {
                 throw ValidationError("\(error)")
             }
