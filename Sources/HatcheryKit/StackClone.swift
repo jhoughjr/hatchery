@@ -52,7 +52,13 @@ public struct ClonedKey: Sendable, Equatable {
 }
 
 public struct ClonedService: Sendable, Equatable {
+    /// The clone-side name: the dokku app the clone will actually create. The first live
+    /// clone kept the source's names, and its apply collided with the source's running apps
+    /// on the same box — `App already exists`, three times.
     public let name: String
+    /// What this service is called on the source, for reading source-side facts (its tofu
+    /// shape, its origin line) that are keyed by the old name.
+    public let sourceName: String
     public let kind: ServiceKind
     public let image: String
     public let domains: [String]
@@ -66,11 +72,12 @@ public struct ClonedService: Sendable, Equatable {
     public let database: DatabaseClonePlan?
 
     public init(
-        name: String, kind: ServiceKind, image: String, domains: [String],
-        baseURL: String?, healthPath: String?, keys: [ClonedKey],
+        name: String, sourceName: String? = nil, kind: ServiceKind, image: String,
+        domains: [String], baseURL: String?, healthPath: String?, keys: [ClonedKey],
         database: DatabaseClonePlan? = nil
     ) {
         self.name = name
+        self.sourceName = sourceName ?? name
         self.kind = kind
         self.image = image
         self.domains = domains
@@ -178,8 +185,16 @@ public struct StackCloner: Sendable {
                     targetName: targetName, environment: environment, database: database))
         }
 
+        // The clone-side name, through the same substitution the domains and URLs already
+        // get: the service sharing its stack's name becomes the target, a sibling becomes
+        // target-sibling. This is what the rewritten internal URLs were already promising —
+        // `http://<target>-paylab.web.1:8080` names an app that has to exist under that name.
+        let cloneName =
+            Self.rewrite(service.name, from: source, to: targetName, environment: environment)
+            ?? "\(targetName)-\(service.name)"
+
         return ClonedService(
-            name: service.name, kind: service.kind, image: service.image,
+            name: cloneName, sourceName: service.name, kind: service.kind, image: service.image,
             domains: domains,
             baseURL: service.baseURL.map {
                 Self.rewrite($0, from: source, to: targetName, environment: environment) ?? $0

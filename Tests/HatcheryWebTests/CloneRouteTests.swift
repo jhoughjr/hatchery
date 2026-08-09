@@ -219,7 +219,8 @@ struct CloneRouteTests {
 
         let services = try #require(result["services"] as? [[String: Any]])
         let cloned = try #require(services.first)
-        #expect(cloned["name"] as? String == "mwlab")
+        // The clone-side name: the app the clone creates, not the source's app.
+        #expect(cloned["name"] as? String == "mwlab-2")
         let missing = try #require(cloned["missing"] as? [[String: Any]])
         #expect(missing.contains { $0["key"] as? String == "DATABASE_URL" })
         // The keypair is the scaffolder's to mint — it must never come back as homework.

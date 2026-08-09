@@ -103,7 +103,8 @@ public struct StackClonePlanner: Sendable {
                 service: service, from: source, into: target, environment: environment,
                 sourceConfig: config, domains: domains)
             services.append(planned)
-            origins[service.name] = origin
+            // Keyed by the clone-side name, which is what every display looks services up by.
+            origins[planned.name] = origin
         }
 
         return PlannedClone(
