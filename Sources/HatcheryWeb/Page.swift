@@ -1029,10 +1029,15 @@ enum Page {
         // secret keys never arrive here — the server sends names and dispositions.
         async function cloneStack(source) {
           if (!(await ensureMeta())) return;
-          // staging first, because that is where clones go. The CLI defaults the same way.
+          // The source's own environment first: a clone of a dev stack goes to dev unless
+          // said otherwise. The staging-first default sent three clones toward a staging
+          // database server that does not exist yet — the guardrails caught each one, but a
+          // default that needs guardrails is the wrong default.
+          const src = (lastStacks || []).find(s => s.name === source);
+          const preferred = (src && src.environment) || 'staging';
           const envs = [...meta.environments];
-          const at = envs.indexOf('staging');
-          if (at > 0) { envs.splice(at, 1); envs.unshift('staging'); }
+          const at = envs.indexOf(preferred);
+          if (at > 0) { envs.splice(at, 1); envs.unshift(preferred); }
 
           const ok = await step('Clone ' + source, 'Step 1 of 2 — what and where',
               field('c-target', 'Name', source + '-2', 'What the copy will be called.')
@@ -1173,8 +1178,10 @@ enum Page {
           const started = await send('/api/jobs/destroy', {stack: name, confirm, purge});
           if (!started.ok) { log(started.data.error || 'destroy refused', true); return; }
           log('destroying ' + name + '…');
-          const ok = await followJob(started.data.job);
-          log(ok ? 'destroyed ' + name : 'destroy failed', !ok);
+          // Not `ok` — the dialog's answer above already claimed that name, and redeclaring
+          // it is a SyntaxError that killed the entire page script, not just this function.
+          const finished = await followJob(started.data.job);
+          log(finished ? 'destroyed ' + name : 'destroy failed', !finished);
           await refresh();
         }
 
