@@ -119,12 +119,16 @@ public struct StackCloneBuilder: Sendable {
         self.readShapes = readShapes
     }
 
+    /// `onProgress` narrates as the work happens — one line per step, the same lines the
+    /// outcome summarises — so a watchable job has something to show while a full-copy
+    /// database dump takes its time. The default swallows them; the CLI reads the outcome.
     public func build(
         planned: PlannedClone,
         source: StackSpec,
         manifest: StackManifest,
         manifestPath: String,
-        options: Options
+        options: Options,
+        onProgress: @escaping @Sendable (String) -> Void = { _ in }
     ) async throws -> Outcome {
         var settings = source.settings ?? [:]
         let host = options.host ?? source.host ?? settings["host"] ?? ""
@@ -136,6 +140,7 @@ public struct StackCloneBuilder: Sendable {
             into: manifest, manifestPath: manifestPath)
         let created = try await bootstrapper.create(plan)
         try saveManifest(created.manifest, created.manifestPath)
+        onProgress("created \(options.target) in \(options.tofuDir), tofu init ok")
 
         // What the source's declarations actually say each app uses — port, network, gating —
         // keyed by app name. The clone keeps service names, so the lookup is direct.
@@ -182,10 +187,14 @@ public struct StackCloneBuilder: Sendable {
 
             // The carried and rewritten values, plus whatever the database provisioning
             // resolved, layered over what the scaffolder wrote.
+            onProgress("scaffolded \(service.name)")
             var values = service.values
             var databaseReport: [String] = []
             var unresolved = service.unresolved
             if let databasePlan = service.database {
+                onProgress(
+                    "database \(databasePlan.database) on \(databasePlan.serverApp): "
+                        + databasePlan.mode.rawValue + "…")
                 do {
                     let minted: DatabaseCredentials
                     if let cached = credentials[databasePlan.identity] {
@@ -220,6 +229,10 @@ public struct StackCloneBuilder: Sendable {
                 try writeConfig(url, ConfigSync.applying(values, to: existing))
             }
 
+            for line in databaseReport { onProgress("  " + line) }
+            onProgress(
+                "\(service.name): \(values.count) value(s) resolved, "
+                    + "\(unresolved.count) still needed")
             written.append(service.name)
             outcomes.append(
                 ServiceOutcome(
@@ -231,6 +244,7 @@ public struct StackCloneBuilder: Sendable {
         }
 
         let sealed = await sealState(created.manifestPath)
+        if let sealed { onProgress(sealed) }
 
         // The clone exists on disk; now ask tofu whether it deploys. Stopping at written files
         // was the old behaviour, and it meant nothing was ever created on the box.

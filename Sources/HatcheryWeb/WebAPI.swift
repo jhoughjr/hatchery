@@ -244,6 +244,8 @@ enum Wire {
         let lines: [String]
         let state: String
         let next: Int
+        /// A JSON payload from the finished job, when its phase left one.
+        let result: String?
     }
 
     struct DestroyBody: Decodable {
@@ -496,6 +498,10 @@ public struct HatcheryAPI: Sendable {
             return await destroyStack(request)
         case ("POST", "/api/jobs/apply"):
             return jobApply(request)
+        case ("POST", "/api/jobs/clone"):
+            return await jobClone(request)
+        case ("POST", "/api/jobs/destroy"):
+            return jobDestroy(request)
         case ("GET", "/api/jobs"):
             return jobStatus(request)
         case ("POST", "/api/config/set"):
@@ -588,6 +594,14 @@ public struct HatcheryAPI: Sendable {
                 Wire.LogsView(service: service.name, lines: try await logReader.logs(
                     for: service, in: stack, lines: lines)))
         } catch {
+            // Dokku's phrasing describes its internals; the person clicked a button during a
+            // deploy and deserves a sentence about *that*.
+            if "\(error)".contains("has not been deployed") {
+                return .failure(
+                    409,
+                    "\(service.name) has not finished its first deploy yet — "
+                        + "logs appear once it has")
+            }
             return .failure(502, "\(error)")
         }
     }
@@ -1023,7 +1037,178 @@ public struct HatcheryAPI: Sendable {
             return .failure(404, "no job '\(id)'")
         }
         return .json(
-            Wire.JobView(lines: snapshot.lines, state: snapshot.state, next: snapshot.next))
+            Wire.JobView(
+                lines: snapshot.lines, state: snapshot.state, next: snapshot.next,
+                result: snapshot.result))
+    }
+
+    /// The clone's create — and its apply, when asked — as one watchable job: the builder
+    /// narrates each step into the transcript, tofu's own narration follows, and the missing
+    /// keys land in the job's result so the fill-in dialog still has structure to work with.
+    private func jobClone(_ request: WebRequest) async -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.CloneBody.self, from: request.body) else {
+            return .failure(400, "expected {source, target, tofuDir, confirm}")
+        }
+        guard body.confirm == body.target else {
+            return .failure(400, "confirmation did not match; expected '\(body.target)'")
+        }
+        guard !body.tofuDir.isEmpty else {
+            return .failure(400, "a clone needs a tofu directory for its declarations")
+        }
+        let manifest: StackManifest
+        let sourceStack: StackSpec
+        switch cloneContext(source: body.source, target: body.target) {
+        case .refused(let response): return response
+        case .ok(let loaded, let found):
+            manifest = loaded
+            sourceStack = found
+        }
+        let environment = Environment(rawValue: body.environment ?? "staging")
+        if environment.isProduction {
+            return .failure(
+                403, "'\(body.target)' would be \(environment.rawValue); create it from the CLI")
+        }
+        guard let databaseMode = DatabaseCloneMode(rawValue: body.db ?? "full") else {
+            return .failure(400, "db must be one of: full, schema, none")
+        }
+
+        // Planned before the job starts, so a plan that cannot be made is a refusal now
+        // rather than a dead transcript.
+        let planned: PlannedClone
+        do {
+            planned = try await clonePlanner.plan(
+                stack: sourceStack, into: body.target, environment: environment,
+                manifestPath: manifestPath(), databaseMode: databaseMode)
+        } catch {
+            return .failure(400, "\(error)")
+        }
+
+        let id = jobs.create()
+        let store = jobs
+        let runner = stream
+        let builder = StackCloneBuilder(
+            bootstrapper: bootstrapper, scaffolder: scaffolder, deployer: deployer,
+            provisioner: provisioner, readConfig: readConfig, writeConfig: writeConfig,
+            saveManifest: saveManifest, sealState: sealState)
+        let path = manifestPath()
+        let wantsApply = body.apply ?? false
+        Task.detached {
+            do {
+                let outcome = try await builder.build(
+                    planned: planned, source: sourceStack, manifest: manifest,
+                    manifestPath: path,
+                    options: StackCloneBuilder.Options(
+                        target: body.target, tofuDir: body.tofuDir, host: body.host,
+                        environment: environment, port: body.port, network: body.network,
+                        gated: body.gated, apply: false),
+                    onProgress: { line in store.append(id, line) })
+
+                let missing = outcome.services.flatMap { service in
+                    service.unresolved.map { key in
+                        ["service": service.name, "key": key.key]
+                    }
+                }
+                let result = try? JSONSerialization.data(
+                    withJSONObject: ["missing": missing, "target": body.target])
+
+                if wantsApply, outcome.unresolvedCount == 0 {
+                    store.append(id, "applying — deploying every service…")
+                    let status = await runner(Deployer.applyCommand(), body.tofuDir) { line in
+                        let trimmed = line.trimmingCharacters(in: .whitespaces)
+                        if !trimmed.isEmpty { store.append(id, "  " + trimmed) }
+                    }
+                    store.append(
+                        id, status == 0 ? "\(body.target) is live" : "apply failed (exit \(status))")
+                    store.finish(
+                        id, ok: status == 0,
+                        result: result.map { String(decoding: $0, as: UTF8.self) })
+                } else {
+                    if wantsApply {
+                        store.append(
+                            id,
+                            "apply skipped: \(outcome.unresolvedCount) key(s) still need a person")
+                    }
+                    store.finish(
+                        id, ok: true,
+                        result: result.map { String(decoding: $0, as: UTF8.self) })
+                }
+            } catch {
+                store.append(id, "clone failed: \(error)")
+                store.finish(id, ok: false)
+            }
+        }
+        return .json(["job": id])
+    }
+
+    /// The destroy as a watchable job: tofu's teardown narrates, then the stack is forgotten
+    /// and the state sealed, with the purge as its own line.
+    private func jobDestroy(_ request: WebRequest) -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.DestroyBody.self, from: request.body)
+        else {
+            return .failure(400, "expected {stack, confirm}")
+        }
+        guard body.confirm == body.stack else {
+            return .failure(400, "confirmation did not match; expected '\(body.stack)'")
+        }
+        let manifest: StackManifest
+        do {
+            manifest = try loadManifest()
+        } catch {
+            return .failure(500, "\(error)")
+        }
+        guard let stack = manifest.stack(named: body.stack) else {
+            return .failure(404, "no stack named '\(body.stack)'")
+        }
+        if stack.resolvedEnvironment.isProduction {
+            return .failure(
+                403,
+                "'\(stack.name)' is \(stack.resolvedEnvironment.rawValue); destroy it from the CLI")
+        }
+        guard let directory = stack.tofu?.directory else {
+            return .failure(400, "stack '\(stack.name)' declares no tofu directory")
+        }
+
+        let id = jobs.create()
+        let store = jobs
+        let runner = stream
+        let save = saveManifest
+        let seal = sealState
+        let remove = removeDirectory
+        let path = manifestPath()
+        let purge = body.purge == true
+        jobs.append(id, "tofu destroy in \(directory)")
+        Task.detached {
+            let status = await runner(Deployer.destroyCommand(), directory) { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty { store.append(id, trimmed) }
+            }
+            guard status == 0 else {
+                store.append(id, "destroy failed (exit \(status)); the stack is still declared")
+                store.finish(id, ok: false)
+                return
+            }
+            do {
+                try save(manifest.removing(stack: stack.name), path)
+                store.append(id, "removed '\(stack.name)' from the manifest")
+            } catch {
+                store.append(id, "could not update the manifest: \(error)")
+                store.finish(id, ok: false)
+                return
+            }
+            if purge {
+                do {
+                    try remove(directory)
+                    store.append(id, "deleted \(directory)")
+                } catch {
+                    store.append(id, "could not delete \(directory): \(error)")
+                }
+            } else {
+                store.append(id, "left in place: \(directory) (state and config)")
+            }
+            if let sealed = await seal(path) { store.append(id, sealed) }
+            store.finish(id, ok: true)
+        }
+        return .json(["job": id])
     }
 
     // MARK: - Destroying a stack

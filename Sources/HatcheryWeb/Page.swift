@@ -993,16 +993,22 @@ enum Page {
         }
 
         // Watches a job, appending each new transcript line to the log as it arrives.
-        // Resolves true when the job finished well. This is what makes a minutes-long apply
-        // readable instead of a spinner.
-        async function followJob(id, indent) {
+        // Resolves true (or, with detail, {ok, result}) when the narration ends. This is
+        // what makes a minutes-long apply readable instead of a spinner.
+        async function followJob(id, indent, wantResult) {
           let from = 0;
           while (true) {
             const res = await get('/api/jobs?id=' + encodeURIComponent(id) + '&from=' + from);
-            if (!res.ok) { log((res.data && res.data.error) || 'lost the job', true); return false; }
+            if (!res.ok) {
+              log((res.data && res.data.error) || 'lost the job', true);
+              return wantResult ? {ok: false, result: null} : false;
+            }
             (res.data.lines || []).forEach(l => log((indent || '  ') + l));
             from = res.data.next;
-            if (res.data.state !== 'running') return res.data.state === 'ok';
+            if (res.data.state !== 'running') {
+              const ok = res.data.state === 'ok';
+              return wantResult ? {ok, result: res.data.result || null} : ok;
+            }
             await new Promise(resolve => setTimeout(resolve, 1000));
           }
         }
@@ -1106,45 +1112,30 @@ enum Page {
             p.warning ? 'create anyway' : 'create');
           if (!create) { log('plan only; nothing written'); return; }
 
-          // Two stages, so the log advances instead of one long silent spinner: create is
-          // fast and reports the databases and the plan; the apply — minutes of image
-          // deploys — runs as its own call through the same route the apply button uses.
-          busy = true;
-          const res = await send('/api/stack/clone',
-            {source, target, environment: env, tofuDir: dir, port, network, apply: false, db,
+          // One watchable job for the whole thing: the builder narrates the create — every
+          // scaffold, every database assertion, the dump — and tofu's own narration follows
+          // when the apply runs. The log advances the entire time.
+          const started = await send('/api/jobs/clone',
+            {source, target, environment: env, tofuDir: dir, port, network, apply, db,
              confirm: target});
-          busy = false;
-          log(res.data.message || res.data.error, !res.ok);
-          if (!res.ok) return;
-
-          let missing = 0;
-          (res.data.services || []).forEach(s => {
-            missing += (s.missing || []).length;
-            log('  ' + s.name + ': ' + s.carried + ' value(s) resolved, '
-                + (s.missing || []).length + ' still needed');
-            (s.database || []).forEach(line => log('    db  ' + line));
-          });
-          if (res.data.detail) log('  ' + res.data.detail);
-          if (res.data.plan) log('  tofu plan: ' + res.data.plan, res.data.plan.indexOf('failed') >= 0);
-
-          if (apply && missing === 0) {
-            const started = await send('/api/jobs/apply', {stack: target, confirm: target});
-            if (!started.ok) {
-              log('  apply refused: ' + (started.data.error || ''), true);
-            } else {
-              log('  applying — deploying every service…');
-              const ok = await followJob(started.data.job, '    ');
-              log(ok ? '  ' + target + ' is live' : '  apply failed', !ok);
-            }
-          } else if (apply) {
-            log('  apply skipped: ' + missing + ' key(s) still need a person', true);
-          }
+          if (!started.ok) { log(started.data.error || 'clone refused', true); return; }
+          log('cloning ' + source + ' → ' + target + '…');
+          const finished = await followJob(started.data.job, '  ', true);
+          log(finished.ok ? target + ' cloned' : 'clone failed', !finished.ok);
           await refresh();
 
           // The keys that point at something only the source's environment has, asked for
-          // service by service — the same closing step `service new` uses.
-          for (const s of (res.data.services || [])) {
-            if ((s.missing || []).length) await fillSecrets(target, s.name, s.missing);
+          // service by service — the same closing step `service new` uses. The job leaves
+          // them in its result, because a transcript is prose and this dialog needs names.
+          let leftover = {};
+          try { leftover = JSON.parse(finished.result || '{}'); } catch (e) {}
+          const byService = {};
+          (leftover.missing || []).forEach(m => {
+            (byService[m.service] = byService[m.service] || []).push(
+              {key: m.key, reason: '', secret: true});
+          });
+          for (const name of Object.keys(byService)) {
+            await fillSecrets(target, name, byService[name]);
           }
         }
 
@@ -1179,11 +1170,11 @@ enum Page {
 
           const confirm = $('d-confirm').value.trim();
           const purge = $('d-purge').value === 'delete';
-          busy = true;
-          const res = await send('/api/stack/destroy', {stack: name, confirm, purge});
-          busy = false;
-          log(res.data.message || res.data.error, !res.ok);
-          if (res.data.detail) log('  ' + res.data.detail);
+          const started = await send('/api/jobs/destroy', {stack: name, confirm, purge});
+          if (!started.ok) { log(started.data.error || 'destroy refused', true); return; }
+          log('destroying ' + name + '…');
+          const ok = await followJob(started.data.job);
+          log(ok ? 'destroyed ' + name : 'destroy failed', !ok);
           await refresh();
         }
 
