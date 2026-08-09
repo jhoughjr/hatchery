@@ -997,6 +997,31 @@ public struct HatcheryAPI: Sendable {
 
     // MARK: - Jobs
 
+    /// Ground truth between tofu's ticks: while a long command narrates "Still creating…",
+    /// this polls the stack's services and appends a line whenever their states change —
+    /// so progress is visible as movement and a stall is visible as none.
+    private func progressPoller(
+        stack: StackSpec, id: String, store: JobStore
+    ) -> Task<Void, Never> {
+        let reporter = self.reporter
+        return Task.detached {
+            var last = ""
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                guard !Task.isCancelled else { return }
+                let reports = await reporter.status(of: StackManifest(stacks: [stack]))
+                guard let report = reports.first, !report.services.isEmpty else { continue }
+                let line = report.services
+                    .map { "\($0.service) \($0.state.rawValue)" }
+                    .joined(separator: " · ")
+                if line != last {
+                    last = line
+                    store.append(id, "box: \(line)")
+                }
+            }
+        }
+    }
+
     /// Starts an apply as a watchable job: the id comes back immediately, tofu's narration
     /// streams into the transcript, and the page polls `/api/jobs` for what it has not seen.
     /// The silent version of this cost a whole apply spent staring at a spinner.
@@ -1030,12 +1055,14 @@ public struct HatcheryAPI: Sendable {
         let store = jobs
         let runner = stream
         jobs.append(id, "tofu apply in \(directory)")
+        let poller = progressPoller(stack: stack, id: id, store: store)
         Task.detached {
             let status = await runner(Deployer.applyCommand(), directory) { line in
                 // Blank lines pad tofu's narration for a terminal; the job log is denser.
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty { store.append(id, trimmed) }
             }
+            poller.cancel()
             // Apply means converge everything the stack declares, and the front door is
             // part of the declaration: a successful apply also asserts exposure, so a stack
             // whose door was granted after its clone becomes reachable with this one click.
@@ -1137,10 +1164,14 @@ public struct HatcheryAPI: Sendable {
 
                 if wantsApply, outcome.unresolvedCount == 0 {
                     store.append(id, "applying — deploying every service…")
+                    let poller = outcome.manifest.stack(named: body.target).map {
+                        self.progressPoller(stack: $0, id: id, store: store)
+                    }
                     let status = await runner(Deployer.applyCommand(), body.tofuDir) { line in
                         let trimmed = line.trimmingCharacters(in: .whitespaces)
                         if !trimmed.isEmpty { store.append(id, "  " + trimmed) }
                     }
+                    poller?.cancel()
                     store.append(
                         id, status == 0 ? "\(body.target) is live" : "apply failed (exit \(status))")
                     store.finish(
