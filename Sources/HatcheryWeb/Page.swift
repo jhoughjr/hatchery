@@ -1010,6 +1010,10 @@ enum Page {
                     "Blank to use whatever the source's tofu declares.")
             + field('c-network', 'Docker network', '',
                     "Blank to use whatever the source's tofu declares.")
+            + select('c-db', 'Databases', ['full', 'schema', 'none'],
+                     'What each database starts with. full copies schema and data from the '
+                     + 'source — a clone of a running stack behaves like one. schema copies '
+                     + 'tables without rows; none leaves it empty.')
             + select('c-apply', 'Apply after create', ['no', 'yes'],
                      'yes runs tofu apply once everything resolves, so the clone ends '
                      + 'running on the box rather than written to disk.'),
@@ -1026,10 +1030,11 @@ enum Page {
           const port = parseInt($('c-port').value, 10) || null;
           const network = $('c-network').value.trim() || null;
           const apply = $('c-apply').value === 'yes';
+          const db = $('c-db').value;
 
           busy = true;
           const plan = await send('/api/stack/clone/plan',
-            {source, target, environment: env, tofuDir: dir});
+            {source, target, environment: env, tofuDir: dir, db});
           busy = false;
           if (!plan.ok) { log(plan.data.error || 'plan failed', true); return; }
 
@@ -1072,7 +1077,7 @@ enum Page {
 
           busy = true;
           const res = await send('/api/stack/clone',
-            {source, target, environment: env, tofuDir: dir, port, network, apply,
+            {source, target, environment: env, tofuDir: dir, port, network, apply, db,
              confirm: target});
           busy = false;
           log(res.data.message || res.data.error, !res.ok);
