@@ -92,7 +92,7 @@ public struct SecretMinter: Sendable {
     /// RSA rather than an elliptic curve, and `RS512` rather than a default, because that is
     /// what the live keys are: the services verify each other's tokens, so a key of a different
     /// type is a key nothing accepts. CryptoKit has no RSA, so this shells out to `openssl` and
-    /// reads the PKCS#1 structure directly.
+    /// reads the DER structure directly.
     public func signingJWKS(kid: String? = nil) async throws -> String {
         try await signingKeypair(kid: kid).jwks
     }
@@ -105,10 +105,26 @@ public struct SecretMinter: Sendable {
     public func signingKeypair(kid: String? = nil) async throws -> (pem: String, jwks: String) {
         let pem: String
         do {
-            let data = try await run(["openssl", "genrsa", "2048"])
+            // `genpkey`, not `genrsa`: genrsa's output depends on which openssl answered —
+            // LibreSSL writes PKCS#1, whose "BEGIN RSA PRIVATE KEY" MWServer's PEM parser
+            // rejects outright (the first live clone crashlooped on invalidPEMDocument).
+            // genpkey writes PKCS#8 on both, which is the shape the estate's live keys use.
+            let data = try await run([
+                "openssl", "genpkey", "-algorithm", "RSA",
+                "-pkeyopt", "rsa_keygen_bits:2048",
+            ])
             pem = String(decoding: data, as: UTF8.self)
         } catch {
             throw SecretError.generationFailed(key: "KEYPAIR_JWKS", reason: "\(error)")
+        }
+        // Refused here, where the openssl that answered is known, rather than at boot on the
+        // box — a service that traps on its own config is the failure this whole path exists
+        // to prevent.
+        guard pem.hasPrefix("-----BEGIN PRIVATE KEY-----") else {
+            throw SecretError.generationFailed(
+                key: "PRIVATE_KEY_PEM",
+                reason: "openssl wrote \(pem.split(separator: "\n").first ?? "an empty document")"
+                    + " instead of a PKCS#8 PRIVATE KEY; the deployed parser accepts only PKCS#8")
         }
 
         let identifier = kid ?? Self.base64URL(randomBytes(8))
