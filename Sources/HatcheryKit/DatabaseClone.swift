@@ -344,9 +344,19 @@ public struct DatabaseProvisioner: Sendable {
     /// `admin` is the stack's `db_admin` setting: a real shell target that can `docker exec`
     /// the database container, for the (lab's actual) case where postgres is not a dokku app.
     public func provision(
-        _ plan: DatabaseClonePlan, host: String, admin: String? = nil
+        _ plan: DatabaseClonePlan, host: String, admin: String? = nil,
+        network: String? = nil
     ) async throws -> (credentials: DatabaseCredentials, report: [String]) {
         var report: [String] = []
+        // The per-environment database server is hatchery's own idea, so its existence is
+        // hatchery's own assertion: a clone targeting a server that does not exist yet
+        // creates it — same image and network as the estate's, its own volume — instead of
+        // sending a person to do it. Needs the admin channel and the stack's network;
+        // without either, the old honest refusal stands.
+        if let admin, let network {
+            try await ensureServer(
+                plan, host: host, admin: admin, network: network, report: &report)
+        }
         let transport = try await chooseTransport(plan: plan, host: host, admin: admin, report: &report)
         let ownerPassword = mintPassword()
 
@@ -530,9 +540,49 @@ public struct DatabaseProvisioner: Sendable {
             _ = try await chooseTransport(plan: plan, host: host, admin: admin, report: &report)
             return nil
         } catch {
-            return "database server '\(plan.serverApp)' is not reachable — \(error). "
-                + "Create it, or clone into an environment whose server exists; without it "
-                + "the database keys fall to the boot checklist."
+            return "database server '\(plan.serverApp)' does not exist yet — \(error). "
+                + "hatchery creates it during the clone when the stack has a docker network "
+                + "and an admin channel; otherwise the database keys fall to the boot checklist."
+        }
+    }
+
+    /// Creates the plan's server when the box has no such container, and waits for its
+    /// postgres to answer. Convergent: an existing server is left exactly alone.
+    private func ensureServer(
+        _ plan: DatabaseClonePlan, host: String, admin: String, network: String,
+        report: inout [String]
+    ) async throws {
+        do {
+            _ = try await psql("SELECT 1", plan: plan, host: host, via: .adminExec(admin))
+            return
+        } catch let error as DatabaseProvisionError {
+            // psql() wraps transport failures; unwrap to see whether this is the one
+            // failure we exist to fix.
+            guard case .statementFailed(_, let message) = error,
+                message.contains("No such container")
+            else { return }  // Anything else: chooseTransport will surface it properly.
+        } catch {
+            return
+        }
+
+        let create = "docker run -d --name \(plan.serverApp) --network \(network) "
+            + "--restart unless-stopped -e POSTGRES_PASSWORD=\(mintPassword()) "
+            + "-v \(plan.serverApp)-data:/var/lib/postgresql/data postgres:17-alpine"
+        let wait = "for i in $(seq 1 30); do "
+            + "docker exec \(plan.serverApp) pg_isready -h 127.0.0.1 -U postgres "
+            + ">/dev/null 2>&1 && exit 0; sleep 2; done; exit 1"
+        do {
+            _ = try await run([
+                "ssh", "-o", "BatchMode=yes", admin, "sh", "-c", Self.shellQuoted(create),
+            ])
+            _ = try await run([
+                "ssh", "-o", "BatchMode=yes", admin, "sh", "-c", Self.shellQuoted(wait),
+            ])
+            report.append(
+                "created database server \(plan.serverApp) on \(network) (postgres:17-alpine)")
+        } catch let failure as CommandFailure {
+            throw DatabaseProvisionError.statementFailed(
+                sql: "create server \(plan.serverApp)", message: failure.message)
         }
     }
 

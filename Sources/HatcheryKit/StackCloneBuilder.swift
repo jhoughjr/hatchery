@@ -204,7 +204,8 @@ public struct StackCloneBuilder: Sendable {
                                 + "credentials reused")
                     } else {
                         let provisioned = try await provisioner.provision(
-                            databasePlan, host: host, admin: settings["db_admin"])
+                            databasePlan, host: host, admin: settings["db_admin"],
+                            network: options.network ?? shape?.network)
                         minted = provisioned.credentials
                         databaseReport = provisioned.report
                         credentials[databasePlan.identity] = minted
