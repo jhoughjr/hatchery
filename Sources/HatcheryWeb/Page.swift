@@ -312,6 +312,11 @@ enum Page {
         }
 
         let lastStacks = [];
+        // Which stacks are folded to one line, remembered across reloads — a layout choice
+        // is a preference, not a session accident.
+        let collapsedStacks = {};
+        try { collapsedStacks = JSON.parse(localStorage.getItem('collapsedStacks') || '{}'); }
+        catch (e) {}
 
         // Buttons carry their target in data attributes and are dispatched by one delegated
         // listener below. An inline onclick would mean a JS string inside an HTML attribute
@@ -541,6 +546,12 @@ enum Page {
             case 'apply': applyStack(stack); break;
             case 'clone': cloneStack(stack); break;
             case 'destroy': destroyStack(stack); break;
+            case 'toggle-stack': {
+              collapsedStacks[stack] = !collapsedStacks[stack];
+              localStorage.setItem('collapsedStacks', JSON.stringify(collapsedStacks));
+              render(lastStacks);
+              break;
+            }
             case 'logs': showLogs(stack, service); break;
             case 'config': showConfig(stack, service); break;
             case 'edit-config': editConfig(stack, service); break;
@@ -664,40 +675,48 @@ enum Page {
             const stackWarn = incomplete
               ? '<span class="warn" title="' + incomplete + ' service(s) cannot boot as declared">'
                 + '&#9650;</span>' : '';
+            // Where the stack lives, as links: one domain per service, preferring the
+            // publicly-resolvable name — the .opi aliases are LAN conveniences, and a
+            // link nothing can resolve is furniture. A stack you cannot click through to
+            // is a stack you have to go find.
+            const pick = s => {
+              const domains = s.domains || [];
+              return domains.find(d => !d.endsWith('.opi')) || domains[0];
+            };
+            const doors = [...new Set(stack.services.map(pick).filter(Boolean))]
+              .map(d => '<a class="meta" target="_blank" rel="noopener" href="https://'
+                        + escapeHTML(d) + '">' + escapeHTML(d) + '</a>').join('  ');
+
+            // Collapsed, a stack is one line: name, links, state. The header's caret
+            // toggles it and the choice sticks per stack — a page of open service tables
+            // stops scaling at about the third stack.
+            const collapsed = collapsedStacks[stack.name] === true;
             return '<section class="stack"><header>'
+              // A real button, not a decorated span: the click dispatcher matches
+              // button[data-action] only, and the wiring tests hold every case to having one.
+              + button('toggle-stack', collapsed ? '▸' : '▾', stack.name, null, 'add')
               + icon(stack.backend)
               + '<h2>' + escapeHTML(stack.name) + stackWarn + '</h2>'
               + '<span class="meta">' + escapeHTML(stack.backend) + ' · '
               + escapeHTML(stack.environment) + '</span>' + badge
+              + (collapsed ? '<span class="meta">' + doors + '</span>' : '')
               + '<span class="meta state ' + escapeHTML(stack.state || '')
               + '" style="margin-left:auto">' + escapeHTML(stack.state || '') + '</span>'
               + '</header>'
-              // Where the stack lives, as links: one domain per service, preferring the
-              // publicly-resolvable name — the .opi aliases are LAN conveniences, and a
-              // link nothing can resolve is furniture. A stack you cannot click through to
-              // is a stack you have to go find.
-              + (() => {
-                  const pick = s => {
-                    const domains = s.domains || [];
-                    return domains.find(d => !d.endsWith('.opi')) || domains[0];
-                  };
-                  const doors = [...new Set(stack.services.map(pick).filter(Boolean))];
-                  return doors.length
+              + (collapsed
+                ? ''
+                : (doors
                     ? '<div class="detail" style="border-top:0;padding:0.35rem 1rem">'
-                      + doors.map(d =>
-                          '<a class="meta" target="_blank" rel="noopener" href="https://'
-                          + escapeHTML(d) + '">' + escapeHTML(d) + '</a>').join('  ')
-                      + '</div>'
-                    : '';
-                })()
-              + '<table>' + rows + '</table>'
-              + '<div class="stack-actions">'
-              +   button('new-service', '+ service', stack.name, null, 'add')
-              +   button('clone', 'clone', stack.name, null, 'add')
-              +   button('apply', 'apply', stack.name, null, 'add')
-              // + stack belongs to the backend group header, not to every stack's own row.
-              +   button('destroy', 'destroy', stack.name, null, 'add')
-              + '</div></section>';
+                      + doors + '</div>'
+                    : '')
+                  + '<table>' + rows + '</table>'
+                  + '<div class="stack-actions">'
+                  +   button('new-service', '+ service', stack.name, null, 'add')
+                  +   button('clone', 'clone', stack.name, null, 'add')
+                  +   button('apply', 'apply', stack.name, null, 'add')
+                  // + stack belongs to the backend group header, not every stack's row.
+                  +   button('destroy', 'destroy', stack.name, null, 'add')
+                  + '</div>');
           };
 
           // + stack lives once per backend group (or once at the foot for a single-backend
