@@ -671,7 +671,21 @@ enum Page {
               + escapeHTML(stack.environment) + '</span>' + badge
               + '<span class="meta state ' + escapeHTML(stack.state || '')
               + '" style="margin-left:auto">' + escapeHTML(stack.state || '') + '</span>'
-              + '</header><table>' + rows + '</table>'
+              + '</header>'
+              // Where the stack lives, as links: the first domain of every service, once.
+              // A stack you cannot click through to is a stack you have to go find.
+              + (() => {
+                  const doors = [...new Set(stack.services
+                    .map(s => (s.domains || [])[0]).filter(Boolean))];
+                  return doors.length
+                    ? '<div class="detail" style="border-top:0;padding:0.35rem 1rem">'
+                      + doors.map(d =>
+                          '<a class="meta" target="_blank" rel="noopener" href="https://'
+                          + escapeHTML(d) + '">' + escapeHTML(d) + '</a>').join('  ')
+                      + '</div>'
+                    : '';
+                })()
+              + '<table>' + rows + '</table>'
               + '<div class="stack-actions">'
               +   button('new-service', '+ service', stack.name, null, 'add')
               +   button('clone', 'clone', stack.name, null, 'add')
