@@ -19,6 +19,21 @@ private func source() -> StackSpec {
     )
 }
 
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
+
 @Suite("The stack-level clone planner")
 struct StackClonePlannerTests {
     private func plan(
@@ -55,6 +70,41 @@ struct StackClonePlannerTests {
         let origin = try #require(planned.origins["mwlab-2"])
         #expect(origin.hasPrefix("declared file — live read failed"))
         #expect(origin.contains("the box may disagree"))
+    }
+
+    @Test("an unreachable database server is a warning on the plan, probed once per server")
+    func warnsAboutTheDatabaseServer() async throws {
+        let probes = Counter()
+        let planned = try await StackClonePlanner(
+            readLive: { _, _ in
+                ["DATABASE_URL": "postgresql://mwserver:pw@mwstack-pg-dev:5432/mwserver"]
+            },
+            probe: { plan, _, _ in
+                probes.increment()
+                return "database server '\(plan.serverApp)' is not reachable"
+            }
+        ).plan(
+            stack: source(), into: "mwlab-2", environment: .staging,
+            manifestPath: "/infra/hatchery.json")
+
+        // One warning naming the server; the environment rewrite of the server name itself
+        // is the database planner's behaviour, covered in its own tests.
+        #expect(planned.warnings.count == 1)
+        #expect(planned.warnings.first?.contains("not reachable") == true)
+        #expect(probes.value == 1)
+    }
+
+    @Test("a reachable server adds no warning")
+    func quietWhenTheServerAnswers() async throws {
+        let planned = try await StackClonePlanner(
+            readLive: { _, _ in
+                ["DATABASE_URL": "postgresql://mwserver:pw@mwstack-pg-dev:5432/mwserver"]
+            },
+            probe: { _, _, _ in nil }
+        ).plan(
+            stack: source(), into: "mwlab-2", environment: .staging,
+            manifestPath: "/infra/hatchery.json")
+        #expect(planned.warnings.isEmpty)
     }
 
     @Test("an unreadable sidecar refuses rather than planning from nothing")

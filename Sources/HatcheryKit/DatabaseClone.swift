@@ -318,6 +318,26 @@ public struct DatabaseProvisioner: Sendable {
         return (DatabaseCredentials(ownerPassword: ownerPassword, appPassword: appPassword), report)
     }
 
+    /// Whether the plan's server can be reached at all, without creating anything.
+    ///
+    /// For the plan screen: a staging clone targets staging's database server by name, and
+    /// discovering that the server does not exist belongs on the plan — where the person
+    /// still has the form in front of them — not in the wreckage after the create click.
+    /// Nil when reachable; otherwise one sentence saying what to do about it.
+    public func probe(
+        _ plan: DatabaseClonePlan, host: String, admin: String?
+    ) async -> String? {
+        var report: [String] = []
+        do {
+            _ = try await chooseTransport(plan: plan, host: host, admin: admin, report: &report)
+            return nil
+        } catch {
+            return "database server '\(plan.serverApp)' is not reachable — \(error). "
+                + "Create it, or clone into an environment whose server exists; without it "
+                + "the database keys fall to the boot checklist."
+        }
+    }
+
     /// One probe decides the road for every statement after it.
     ///
     /// `dokku enter` first, because that is the shape the onboarding guide describes. When

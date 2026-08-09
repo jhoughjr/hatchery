@@ -730,10 +730,11 @@ public struct HatcheryAPI: Sendable {
                 stack: stack, into: body.target, environment: environment,
                 manifestPath: manifestPath())
 
-            // The same check the create would make, made now. Failing it after the create
-            // click cost a whole trip through the wizard; a full directory belongs on the
-            // plan screen, where the person still has the form in front of them.
-            var warning: String?
+            // The same checks the create would make, made now. Failing them after the
+            // create click cost a whole trip through the wizard; a full directory or an
+            // unreachable database server belongs on the plan screen, where the person
+            // still has the form in front of them.
+            var warnings = planned.warnings
             if let dir = body.tofuDir, !dir.isEmpty {
                 var settings = stack.settings ?? [:]
                 let host = stack.host ?? settings["host"] ?? ""
@@ -744,10 +745,13 @@ public struct HatcheryAPI: Sendable {
                         tofuDir: dir, environment: environment, settings: settings,
                         into: manifest, manifestPath: manifestPath())
                 } catch {
-                    warning = "\(error)"
+                    warnings.insert("\(error)", at: 0)
                 }
             }
-            return .json(view(of: planned, environment: environment, warning: warning))
+            return .json(
+                view(
+                    of: planned, environment: environment,
+                    warning: warnings.isEmpty ? nil : warnings.joined(separator: "\n")))
         } catch {
             return .failure(400, "\(error)")
         }

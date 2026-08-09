@@ -142,6 +142,13 @@ extension Stack {
 
             }
 
+            if !planned.warnings.isEmpty {
+                print("")
+                for warning in planned.warnings {
+                    print("  WARNING  \(warning)")
+                }
+            }
+
             let carried = planned.plan.carriedCount
             let unresolved = planned.plan.unresolvedCount
             print("")
