@@ -326,6 +326,7 @@ enum Page {
           restart: 'Restart this service. Asks you to type its name first',
           deploy: 'Plan a deploy and show the diff. Applies nothing on its own',
           apply: 'Apply the pending plan to this stack. Refused for production',
+          destroy: 'Tear this stack down and forget it. Shows the plan first; refused for production',
           clone: 'Plan a copy of this stack into another environment, then create it',
           'new-service': 'Add a service to this stack: writes its declaration and config',
           'new-stack': 'Create a stack on a provider, from nothing',
@@ -539,6 +540,7 @@ enum Page {
             case 'new-stack': newStack(); break;
             case 'apply': applyStack(stack); break;
             case 'clone': cloneStack(stack); break;
+            case 'destroy': destroyStack(stack); break;
             case 'logs': showLogs(stack, service); break;
             case 'config': showConfig(stack, service); break;
             case 'edit-config': editConfig(stack, service); break;
@@ -659,6 +661,7 @@ enum Page {
               +   button('new-service', '+ service', stack.name, null, 'add')
               +   button('clone', 'clone', stack.name, null, 'add')
               +   button('apply', 'apply', stack.name, null, 'add')
+              +   button('destroy', 'destroy', stack.name, null, 'add')
               +   button('new-stack', '+ stack', null, null, 'add last')
               + '</div></section>';
           };
@@ -1091,6 +1094,42 @@ enum Page {
           for (const s of (res.data.services || [])) {
             if ((s.missing || []).length) await fillSecrets(target, s.name, s.missing);
           }
+        }
+
+        // The browser's `stack rm`: what would be destroyed first, then the name typed back.
+        // Destroy had no web path at all, which made every abandoned clone a CLI errand.
+        async function destroyStack(name) {
+          busy = true;
+          const plan = await send('/api/stack/destroy/plan', {stack: name});
+          busy = false;
+          if (!plan.ok) { log(plan.data.error || 'destroy plan failed', true); return; }
+
+          const p = plan.data;
+          if (p.isProduction) {
+            log(name + ' is ' + p.environment + '; destroy it from the CLI', true);
+            return;
+          }
+          const body = (p.noop
+            ? '<div class="hint">Nothing to destroy on the box — this stack owns no '
+              + 'infrastructure. Removing it drops the declaration only.</div>'
+            : '<div class="err">would destroy: ' + escapeHTML(p.headline) + '</div>'
+              + '<pre class="out">'
+              + p.services.map(s => escapeHTML(s.name + '  ' + s.image)).join('\\n')
+              + '</pre>')
+            + field('d-confirm', 'Type ' + name + ' to confirm', '',
+                    'The one action with no undo. The tofu directory and its config files '
+                    + 'stay on disk — state and secrets are records, not clutter.');
+          const ok = await step('Destroy ' + name,
+            p.backend + ' · ' + p.environment, body, 'destroy');
+          if (!ok) { log('nothing destroyed'); return; }
+
+          const confirm = $('d-confirm').value.trim();
+          busy = true;
+          const res = await send('/api/stack/destroy', {stack: name, confirm});
+          busy = false;
+          log(res.data.message || res.data.error, !res.ok);
+          if (res.data.detail) log('  ' + res.data.detail);
+          await refresh();
         }
 
         // The half `doctor` cannot do for you: getting dokku onto a box in the first place.
