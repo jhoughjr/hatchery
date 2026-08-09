@@ -24,11 +24,94 @@ struct Hatchery: AsyncParsableCommand {
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
-            Config.self, Deploy.self, Doctor.self, Events.self, Host.self, Serve.self, Service.self,
-            Setup.self, Stack.self, State.self, Status.self,
+            Box.self, Config.self, Deploy.self, Doctor.self, Events.self, Host.self, Serve.self,
+            Service.self, Setup.self, Stack.self, State.self, Status.self,
             Up.self, Down.self, Restart.self,
         ]
     )
+}
+
+/// Preparing machines to host stacks.
+struct Box: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Prepare machines to host stacks.",
+        subcommands: [Init.self]
+    )
+
+    /// The onboarding guide, executed: point it at an empty Debian/Ubuntu box and it
+    /// asserts the dokku prerequisites onto it, convergently.
+    struct Init: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Assert the dokku prerequisites onto an empty box.",
+            discussion: """
+                The setup guide, run instead of read. Each prerequisite is an assertion: \
+                checked first, fixed only if missing, re-checked after — so a half-prepared \
+                box finishes rather than starting over, and running twice changes nothing.
+
+                The target must accept this machine's key non-interactively and be able to \
+                run installers: root on a fresh box, or a user with passwordless sudo. \
+                Nothing is written without --yes.
+                """
+        )
+
+        @Argument(help: "The box, as user@host — root@ on a fresh machine.")
+        var host: String
+
+        @Option(name: .long, help: "Public key to authorize for the dokku user. Defaults to ~/.ssh/id_rsa.pub.")
+        var key: String = "~/.ssh/id_rsa.pub"
+
+        @Option(name: .long, help: "Shared docker network for apps and their databases.")
+        var network: String = "hatchery-net"
+
+        @Flag(name: .long, help: "Actually run the fixes. Without it, only the checks run.")
+        var yes: Bool = false
+
+        func run() async throws {
+            let keyPath = Paths.expanded(key)
+            guard let operatorKey = try? String(contentsOfFile: keyPath, encoding: .utf8),
+                !operatorKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw ValidationError("no public key at \(keyPath); pass --key")
+            }
+
+            let assertions = BoxInitializer.dokkuAssertions(
+                operatorKey: operatorKey, network: network)
+            print("\(host)  [\(assertions.count) assertion(s)]")
+
+            let initializer = BoxInitializer()
+            let steps: [BoxStep]
+            if yes {
+                steps = await initializer.run(host: host, assertions: assertions) {
+                    print("  \($0)")
+                }
+            } else {
+                // Check-only: the same assertions with their fixes withheld, so the report
+                // says what --yes would do without touching the box.
+                let checks = assertions.map {
+                    BoxAssertion(
+                        name: $0.name, check: $0.check,
+                        remedy: $0.fix.isEmpty ? $0.remedy : "would fix with --yes")
+                }
+                steps = await initializer.run(host: host, assertions: checks) {
+                    print("  \($0)")
+                }
+            }
+
+            let failed = steps.filter { $0.outcome == .failed }
+            print("")
+            if failed.isEmpty && steps.count == assertions.count {
+                print("  \(host) is ready: hatchery stack new <name> --host dokku@\(bare(host))")
+            } else if !yes {
+                print("  re-run with --yes to make it so")
+            } else {
+                throw ExitCode(1)
+            }
+        }
+
+        private func bare(_ host: String) -> String {
+            host.split(separator: "@").last.map(String.init) ?? host
+        }
+    }
 }
 
 /// Shared by the lifecycle verbs, which differ only in the action they perform.
