@@ -24,7 +24,8 @@ if command -v node >/dev/null 2>&1; then
   node --check "$out"
   echo "page script parses (node)"
 elif docker info >/dev/null 2>&1; then
-  docker run --rm -i node:20-alpine node --check /dev/stdin < "$out"
+  # Mounted, not piped: node cannot --check a stdin pipe through docker's fd relay.
+  docker run --rm -v "$out":/page.js:ro node:20-alpine node --check /page.js
   echo "page script parses (node via docker)"
 else
   echo "::warning::neither node nor docker available — page script NOT syntax-checked"
