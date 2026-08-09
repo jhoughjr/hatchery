@@ -254,7 +254,16 @@ public struct Deployer: Sendable {
         guard plan.needsWrite else {
             // Nothing to write, but the plan still runs: the variable can already read the target
             // while the box runs something else, and that is exactly what a person wants to know.
-            return DeployResult(plan: plan, outcome: try await tofuPlan(in: stack))
+            let outcome = try await tofuPlan(in: stack)
+            // And when they asked to apply, knowing is not enough: a mutable tag that moved
+            // leaves the declaration identical while the box runs older code, and the only
+            // way through is to converge whatever the plan found. Deploy means make it so,
+            // not make it so only when the image string changed.
+            guard apply, outcome.verdict == .changes else {
+                return DeployResult(plan: plan, outcome: outcome)
+            }
+            return DeployResult(
+                plan: plan, outcome: outcome, applied: try await tofuApply(in: stack))
         }
 
         let original = try write(plan, in: stack)
