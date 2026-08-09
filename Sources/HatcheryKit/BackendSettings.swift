@@ -114,6 +114,17 @@ extension BackendSetting {
         required: false,
         defaultValue: "~/.ssh/id_rsa")
 
+    public static let dbAdmin = BackendSetting(
+        key: "db_admin",
+        label: "Database admin SSH target",
+        help: """
+            A shell account that can `docker exec` the database container, as user@host — only \
+            needed when the stack's postgres is not a dokku app, because the dokku account \
+            cannot reach a container dokku does not manage. Optional: without it, database \
+            provisioning works only for dokku-app databases.
+            """,
+        required: false)
+
     public static func region(default value: String, help: String) -> BackendSetting {
         BackendSetting(key: "region", label: "Region", help: help, defaultValue: value)
     }

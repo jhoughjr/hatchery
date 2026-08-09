@@ -233,13 +233,16 @@ struct DatabaseProvisionerTests {
         }
     }
 
-    @Test("a statement failure names the statement, not just the error")
+    @Test("a statement failure names the statement, with the password redacted")
     func namesTheStatement() async throws {
         let provisioner = DatabaseProvisioner(
-            run: { _ in
-                throw CommandFailure(command: "ssh", status: 255, message: "connection refused")
+            run: { argv in
+                if argv.last?.contains("CREATE ROLE") == true {
+                    throw CommandFailure(command: "ssh", status: 255, message: "connection refused")
+                }
+                return Data()
             },
-            mintPassword: { "minted" })
+            mintPassword: { "s3cretminted" })
 
         do {
             _ = try await provisioner.provision(plan(appUser: nil), host: "192.168.0.103")
@@ -247,6 +250,58 @@ struct DatabaseProvisionerTests {
         } catch let error as DatabaseProvisionError {
             #expect("\(error)".contains("CREATE ROLE"))
             #expect("\(error)".contains("connection refused"))
+            // The failed statement carries the minted password; the error must not.
+            #expect(!"\(error)".contains("s3cretminted"))
+        }
+    }
+
+    @Test("falls back to the admin's docker exec when the server is not a dokku app")
+    func fallsBackToAdmin() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                if argv.contains("enter") {
+                    throw CommandFailure(
+                        command: "ssh", status: 20,
+                        message: "!     App mwstack-pg-dev does not exist")
+                }
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        let (credentials, report) = try await provisioner.provision(
+            plan(appUser: nil), host: "192.168.0.103", admin: "jimmy@opi.local")
+
+        #expect(credentials.ownerPassword == "minted")
+        #expect(report.contains { $0.contains("via jimmy@opi.local") })
+        // Exactly one dokku attempt — the probe — and everything else through the admin.
+        let dokku = recorded.all().filter { $0.contains("enter") }
+        #expect(dokku.count == 1)
+        let admin = recorded.all().filter { $0.contains("docker") }
+        for command in admin {
+            #expect(Array(command.prefix(4)) == ["ssh", "-o", "BatchMode=yes", "jimmy@opi.local"])
+            #expect(command.contains("exec"))
+            #expect(command.contains("mwstack-pg-dev"))
+        }
+        #expect(admin.contains { $0.last?.contains("CREATE ROLE") == true })
+    }
+
+    @Test("a non-dokku server with no admin configured names the missing setting")
+    func namesTheMissingAdmin() async throws {
+        let provisioner = DatabaseProvisioner(
+            run: { _ in
+                throw CommandFailure(
+                    command: "ssh", status: 20, message: "!     App mwstack-pg-dev does not exist")
+            },
+            mintPassword: { "minted" })
+
+        do {
+            _ = try await provisioner.provision(plan(appUser: nil), host: "dokku@192.168.0.103")
+            Issue.record("expected provisioning to fail")
+        } catch let error as DatabaseProvisionError {
+            #expect("\(error)".contains("db_admin"))
+            #expect("\(error)".contains("mwstack-pg-dev"))
         }
     }
 }

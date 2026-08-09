@@ -216,13 +216,34 @@ public enum DatabaseClonePlanner {
 
 public enum DatabaseProvisionError: Error, CustomStringConvertible, Equatable {
     case statementFailed(sql: String, message: String)
+    /// The server is not a dokku app and no admin target is configured to reach it another way.
+    case unreachableServer(app: String, hint: String)
 
     public var description: String {
         switch self {
         case .statementFailed(let sql, let message):
-            return "database provisioning failed at `\(sql)`: \(message)"
+            return "database provisioning failed at `\(Self.redacted(sql))`: \(Self.redacted(message))"
+        case .unreachableServer(let app, let hint):
+            return "cannot reach the database server '\(app)': \(hint)"
         }
     }
+
+    /// A failed CREATE ROLE carries its password; an error message ends up on a terminal and
+    /// in logs, which are exactly the places a password must not be.
+    static func redacted(_ text: String) -> String {
+        text.replacingOccurrences(
+            of: "PASSWORD '[^']*'", with: "PASSWORD '\u{2026}'", options: .regularExpression)
+    }
+}
+
+/// How provisioning statements reach psql on the database server.
+///
+/// The onboarding guide's shape — postgres as a plain dokku app — goes through `dokku enter`.
+/// The lab's actual shape — postgres as a compose container dokku has never heard of — needs a
+/// real shell that can `docker exec`, which is what the stack's `db_admin` setting names.
+enum DatabaseTransport: Sendable, Equatable {
+    case dokkuEnter
+    case adminExec(String)
 }
 
 /// Creates a plan's database and roles on the stack's postgres app, over ssh.
@@ -244,83 +265,126 @@ public struct DatabaseProvisioner: Sendable {
 
     /// Asserts the plan's database, roles and grants on the box, and returns the credentials
     /// it minted plus one line per assertion for the person watching.
+    ///
+    /// `admin` is the stack's `db_admin` setting: a real shell target that can `docker exec`
+    /// the database container, for the (lab's actual) case where postgres is not a dokku app.
     public func provision(
-        _ plan: DatabaseClonePlan, host: String
+        _ plan: DatabaseClonePlan, host: String, admin: String? = nil
     ) async throws -> (credentials: DatabaseCredentials, report: [String]) {
         var report: [String] = []
+        let transport = try await chooseTransport(plan: plan, host: host, admin: admin, report: &report)
         let ownerPassword = mintPassword()
 
         try await assertRole(
-            plan.owner, password: ownerPassword, plan: plan, host: host, report: &report)
+            plan.owner, password: ownerPassword, plan: plan, host: host, via: transport,
+            report: &report)
 
         var appPassword: String?
         if let appUser = plan.appUser {
             let minted = mintPassword()
-            try await assertRole(appUser, password: minted, plan: plan, host: host, report: &report)
+            try await assertRole(
+                appUser, password: minted, plan: plan, host: host, via: transport, report: &report)
             appPassword = minted
         }
 
         do {
             _ = try await psql(
                 "CREATE DATABASE \"\(plan.database)\" OWNER \"\(plan.owner)\"",
-                plan: plan, host: host)
+                plan: plan, host: host, via: transport)
             report.append("created database \(plan.database), owner \(plan.owner)")
         } catch let failure as CommandFailure where failure.message.contains("already exists") {
             _ = try await psql(
                 "ALTER DATABASE \"\(plan.database)\" OWNER TO \"\(plan.owner)\"",
-                plan: plan, host: host)
+                plan: plan, host: host, via: transport)
             report.append("database \(plan.database) already existed; owner asserted")
         }
 
         if let appUser = plan.appUser {
             _ = try await psql(
                 "GRANT CONNECT ON DATABASE \"\(plan.database)\" TO \"\(appUser)\"",
-                plan: plan, host: host)
+                plan: plan, host: host, via: transport)
             _ = try await psql(
                 "GRANT USAGE ON SCHEMA public TO \"\(appUser)\"",
-                plan: plan, host: host, database: plan.database)
+                plan: plan, host: host, via: transport, database: plan.database)
             // Tables the owner's migrations create later are readable by the app role without
             // anyone coming back to re-grant.
             _ = try await psql(
                 "ALTER DEFAULT PRIVILEGES FOR ROLE \"\(plan.owner)\" IN SCHEMA public "
                     + "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO \"\(appUser)\"",
-                plan: plan, host: host, database: plan.database)
+                plan: plan, host: host, via: transport, database: plan.database)
             report.append("granted \(appUser) connect and table access on \(plan.database)")
         }
 
         return (DatabaseCredentials(ownerPassword: ownerPassword, appPassword: appPassword), report)
     }
 
+    /// One probe decides the road for every statement after it.
+    ///
+    /// `dokku enter` first, because that is the shape the onboarding guide describes. When
+    /// dokku answers that the app does not exist — the lab's postgres is a compose container
+    /// dokku has never heard of — the admin target takes over, probed before it is trusted.
+    /// No admin configured is a sentence naming the setting, not a mystery.
+    private func chooseTransport(
+        plan: DatabaseClonePlan, host: String, admin: String?, report: inout [String]
+    ) async throws -> DatabaseTransport {
+        do {
+            _ = try await psql("SELECT 1", plan: plan, host: host, via: .dokkuEnter)
+            return .dokkuEnter
+        } catch let error as DatabaseProvisionError {
+            guard case .statementFailed(_, let message) = error,
+                message.contains("does not exist")
+            else { throw error }
+            guard let admin, !admin.isEmpty else {
+                throw DatabaseProvisionError.unreachableServer(
+                    app: plan.serverApp,
+                    hint: "it is not a dokku app, and the stack sets no db_admin. Set db_admin "
+                        + "to a shell target that can docker-exec it (e.g. jimmy@\(bareHost(host)))")
+            }
+            _ = try await psql("SELECT 1", plan: plan, host: host, via: .adminExec(admin))
+            report.append("reached \(plan.serverApp) via \(admin) (not a dokku app)")
+            return .adminExec(admin)
+        }
+    }
+
+    private func bareHost(_ host: String) -> String {
+        host.split(separator: "@").last.map(String.init) ?? host
+    }
+
     private func assertRole(
         _ role: String, password: String, plan: DatabaseClonePlan, host: String,
-        report: inout [String]
+        via transport: DatabaseTransport, report: inout [String]
     ) async throws {
         do {
             _ = try await psql(
-                "CREATE ROLE \"\(role)\" LOGIN PASSWORD '\(password)'", plan: plan, host: host)
+                "CREATE ROLE \"\(role)\" LOGIN PASSWORD '\(password)'",
+                plan: plan, host: host, via: transport)
             report.append("created role \(role), minted password")
         } catch let failure as CommandFailure where failure.message.contains("already exists") {
             // Converged rather than left alone: an existing role with an unknown password is a
             // service that cannot connect, which is the exact failure this exists to prevent.
             _ = try await psql(
-                "ALTER ROLE \"\(role)\" WITH LOGIN PASSWORD '\(password)'", plan: plan, host: host)
+                "ALTER ROLE \"\(role)\" WITH LOGIN PASSWORD '\(password)'",
+                plan: plan, host: host, via: transport)
             report.append("role \(role) already existed; password re-minted")
         }
     }
 
     private func psql(
-        _ sql: String, plan: DatabaseClonePlan, host: String, database: String? = nil
+        _ sql: String, plan: DatabaseClonePlan, host: String, via transport: DatabaseTransport,
+        database: String? = nil
     ) async throws -> Data {
         let output: Data
         do {
-            output = try await run(Self.command(sql, plan: plan, host: host, database: database))
+            output = try await run(
+                Self.command(sql, plan: plan, host: host, via: transport, database: database))
         } catch let failure as CommandFailure {
             if failure.message.contains("already exists") { throw failure }
             throw DatabaseProvisionError.statementFailed(sql: sql, message: failure.message)
         }
-        // `dokku enter` stands between psql and this process, and an exec chain that long is
-        // not trusted to carry an exit status faithfully. These statements print nothing on
-        // success, so an ERROR in the output is an error whatever the status said.
+        // `dokku enter` or a docker exec stands between psql and this process, and an exec
+        // chain that long is not trusted to carry an exit status faithfully. These statements
+        // print nothing consequential on success, so an ERROR in the output is an error
+        // whatever the status said.
         let text = String(decoding: output, as: UTF8.self)
         if text.contains("ERROR:") {
             let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -332,23 +396,30 @@ public struct DatabaseProvisioner: Sendable {
         return output
     }
 
-    /// The whole path from here to a psql prompt: ssh as dokku, `enter` the postgres app's
-    /// running container, run psql as the in-container superuser over the local socket.
+    /// The whole path from here to a psql prompt, by transport: ssh as dokku and `enter` the
+    /// postgres app, or ssh as the admin and `docker exec` the container of the same name.
+    /// Either way psql runs as the in-container superuser over the local socket.
     ///
     /// The SQL travels through two shells (ssh's remote command joins arguments with spaces),
     /// so it is single-quoted for the remote one. Identifiers were folded to `[a-z0-9_]` by the
     /// planner and passwords are minted base64url, so nothing inside needs further escaping —
     /// but the quoting is done properly anyway rather than relying on that.
     static func command(
-        _ sql: String, plan: DatabaseClonePlan, host: String, database: String? = nil
+        _ sql: String, plan: DatabaseClonePlan, host: String, via transport: DatabaseTransport,
+        database: String? = nil
     ) -> [String] {
-        var remote = [
-            "enter", plan.serverApp, "web",
-            "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-tA",
-        ]
-        if let database { remote += ["-d", database] }
-        remote += ["-c", shellQuoted(sql)]
-        return ["ssh", "-o", "BatchMode=yes", DokkuProvider.sshTarget(host)] + remote
+        var psql = ["psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-tA"]
+        if let database { psql += ["-d", database] }
+        psql += ["-c", shellQuoted(sql)]
+
+        switch transport {
+        case .dokkuEnter:
+            return ["ssh", "-o", "BatchMode=yes", DokkuProvider.sshTarget(host)]
+                + ["enter", plan.serverApp, "web"] + psql
+        case .adminExec(let admin):
+            return ["ssh", "-o", "BatchMode=yes", admin]
+                + ["docker", "exec", "-i", plan.serverApp] + psql
+        }
     }
 
     static func shellQuoted(_ value: String) -> String {
