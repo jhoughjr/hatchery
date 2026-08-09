@@ -386,6 +386,7 @@ public struct HatcheryAPI: Sendable {
     private let provisioner: DatabaseProvisioner
     private let removeDirectory: @Sendable (String) throws -> Void
     private let stream: LineStream.Runner
+    private let drift: ImageDrift
     private let jobs = JobStore()
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
@@ -413,6 +414,7 @@ public struct HatcheryAPI: Sendable {
             try FileManager.default.removeItem(atPath: Paths.expanded($0))
         },
         stream: @escaping LineStream.Runner = LineStream.live,
+        drift: ImageDrift = ImageDrift(),
         readConfig: @escaping @Sendable (URL) throws -> [String: String] = {
             (try? ConfigSync.readDeclared(at: $0)) ?? [:]
         },
@@ -445,6 +447,7 @@ public struct HatcheryAPI: Sendable {
         self.provisioner = provisioner
         self.removeDirectory = removeDirectory
         self.stream = stream
+        self.drift = drift
         self.readConfig = readConfig
         self.writeConfig = writeConfig
         self.sealState = sealState
@@ -1060,7 +1063,14 @@ public struct HatcheryAPI: Sendable {
         let runner = stream
         jobs.append(id, "tofu apply in \(directory)")
         let poller = progressPoller(stack: stack, id: id, store: store)
+        let driftChecker = drift
         Task.detached {
+            // Said before the apply, because after is too late to decide: a mutable tag
+            // that moved makes this apply a code deploy, and the person clicking should
+            // know which kind of click this is.
+            for line in await driftChecker.check(stack: stack) {
+                store.append(id, "note: \(line)")
+            }
             let status = await runner(Deployer.applyCommand(), directory) { line in
                 // Blank lines pad tofu's narration for a terminal; the job log is denser.
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
