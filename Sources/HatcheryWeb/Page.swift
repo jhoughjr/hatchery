@@ -672,11 +672,16 @@ enum Page {
               + '<span class="meta state ' + escapeHTML(stack.state || '')
               + '" style="margin-left:auto">' + escapeHTML(stack.state || '') + '</span>'
               + '</header>'
-              // Where the stack lives, as links: the first domain of every service, once.
-              // A stack you cannot click through to is a stack you have to go find.
+              // Where the stack lives, as links: one domain per service, preferring the
+              // publicly-resolvable name — the .opi aliases are LAN conveniences, and a
+              // link nothing can resolve is furniture. A stack you cannot click through to
+              // is a stack you have to go find.
               + (() => {
-                  const doors = [...new Set(stack.services
-                    .map(s => (s.domains || [])[0]).filter(Boolean))];
+                  const pick = s => {
+                    const domains = s.domains || [];
+                    return domains.find(d => !d.endsWith('.opi')) || domains[0];
+                  };
+                  const doors = [...new Set(stack.services.map(pick).filter(Boolean))];
                   return doors.length
                     ? '<div class="detail" style="border-top:0;padding:0.35rem 1rem">'
                       + doors.map(d =>
