@@ -76,10 +76,10 @@ public struct DatabaseClonePlan: Sendable, Equatable {
         "database \(database) on \(serverApp), minted credentials, \(mode.carrying)"
     }
 
-    /// A copy has a source, and both databases sit on the same server. Piping a dump across
-    /// two servers is not built yet, and pretending otherwise would fail after create.
-    var copyable: Bool {
-        mode != .none && sourceDatabase != nil && sourceServer == serverApp
+    /// Whether the copy stays inside one server. A same-server copy pipes inside the
+    /// container; a cross-server copy needs the admin transport to bridge two containers.
+    var sameServerCopy: Bool {
+        sourceServer == serverApp
     }
 
     /// The config values this database resolves, once its credentials exist.
@@ -393,20 +393,41 @@ public struct DatabaseProvisioner: Sendable {
     ) async throws {
         guard plan.mode != .none else { return }
         guard let sourceDatabase = plan.sourceDatabase else { return }
-        guard plan.copyable else {
+        // The dump pipeline interpolates these into a remote shell; the clone-side names were
+        // folded by the planner, but the source's came from config and get checked here.
+        guard Self.isPlainName(sourceDatabase), plan.sourceServer.map(Self.isPlainName) != false
+        else {
             report.append(
-                "\(plan.mode.rawValue) copy skipped: the source database lives on "
-                    + "\(plan.sourceServer ?? "another server"), not \(plan.serverApp) — "
-                    + "cross-server copies are not built yet; created empty")
+                "\(plan.mode.rawValue) copy skipped: the source database's name is not a "
+                    + "plain identifier; created empty")
             return
         }
 
         let flags = plan.mode == .schema ? "--schema-only " : ""
-        let pipeline = "pg_dump -U postgres --no-owner \(flags)-d \(sourceDatabase) | "
-            + "psql -q -v ON_ERROR_STOP=1 -U \(plan.owner) -d \(plan.database)"
+        let restore = "psql -q -v ON_ERROR_STOP=1 -U \(plan.owner) -d \(plan.database)"
+        let command: [String]
+        if plan.sameServerCopy {
+            let pipeline =
+                "pg_dump -U postgres --no-owner \(flags)-d \(sourceDatabase) | " + restore
+            command = Self.shellCommand(pipeline, plan: plan, host: host, via: transport)
+        } else if case .adminExec(let admin) = transport, let sourceServer = plan.sourceServer {
+            // Two servers, one box, one admin: the dump leaves the source's container and
+            // pipes straight into the target's — which is how a staging clone fills its
+            // database from dev's server once staging's exists.
+            let pipeline =
+                "docker exec \(sourceServer) pg_dump -U postgres --no-owner \(flags)"
+                + "-d \(sourceDatabase) | docker exec -i \(plan.serverApp) " + restore
+            command = ["ssh", "-o", "BatchMode=yes", admin, "sh", "-c", Self.shellQuoted(pipeline)]
+        } else {
+            report.append(
+                "\(plan.mode.rawValue) copy skipped: the source database lives on "
+                    + "\(plan.sourceServer ?? "another server") and the dokku channel cannot "
+                    + "bridge servers — set db_admin to copy across them; created empty")
+            return
+        }
+
         do {
-            _ = try await run(
-                Self.shellCommand(pipeline, plan: plan, host: host, via: transport))
+            _ = try await run(command)
         } catch let failure as CommandFailure {
             throw DatabaseProvisionError.statementFailed(
                 sql: "pg_dump \(sourceDatabase) → \(plan.database)", message: failure.message)
@@ -423,8 +444,18 @@ public struct DatabaseProvisioner: Sendable {
                 "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO \"\(appUser)\"",
                 plan: plan, host: host, via: transport, database: plan.database)
         }
-        report.append(
-            "\(plan.mode == .schema ? "schema" : "schema and data") copied from \(sourceDatabase)")
+        let what = plan.mode == .schema ? "schema" : "schema and data"
+        let whence = plan.sameServerCopy
+            ? sourceDatabase : "\(sourceDatabase) on \(plan.sourceServer ?? "?")"
+        report.append("\(what) copied from \(whence)")
+    }
+
+    /// A name safe to place in a remote shell pipeline: letters, digits, underscore, dash.
+    static func isPlainName(_ name: String) -> Bool {
+        !name.isEmpty
+            && name.allSatisfy {
+                ($0.isASCII && ($0.isLetter || $0.isNumber)) || $0 == "_" || $0 == "-"
+            }
     }
 
     /// A shell pipeline on the database server, through whichever transport is in use — the
