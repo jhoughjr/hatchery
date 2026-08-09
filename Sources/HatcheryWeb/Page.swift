@@ -618,9 +618,20 @@ enum Page {
                   + '">&#9650;</span>' : '';
               const warnLine = (cfg && !cfg.complete)
                 ? '<div class="warn-line">&#9650; ' + escapeHTML(cfg.summary || '') + '</div>' : '';
+              // What is actually deployed, at a glance: the image tag carries the build, the
+              // rev is what the box reports it is running, and the db line says where its
+              // data lives — no more inferring any of the three from boot failures.
+              const tag = (svc.image || '').split(':').pop();
+              const rev = svc.gitRev ? 'rev ' + svc.gitRev.slice(0, 9) : '';
+              const build = [tag, rev].filter(Boolean).join(' · ');
+              const buildLine = build
+                ? '<div class="kind">' + escapeHTML(build) + '</div>' : '';
+              const dbLine = svc.database
+                ? '<div class="kind">db ' + escapeHTML(svc.database) + '</div>' : '';
               return '<tr>'
                 + '<td><div class="name">' + escapeHTML(svc.name) + warn + '</div>'
-                +   '<div class="kind">' + escapeHTML(svc.kind) + '</div></td>'
+                +   '<div class="kind">' + escapeHTML(svc.kind) + '</div>'
+                +   buildLine + dbLine + '</td>'
                 + '<td><span class="state ' + escapeHTML(state) + '">' + escapeHTML(state)
                 +   '</span>' + reasons + warnLine + '</td>'
                 + '<td class="num">' + latency + '</td>'

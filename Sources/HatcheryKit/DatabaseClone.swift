@@ -256,6 +256,25 @@ public enum DatabaseClonePlanner {
     }
 }
 
+/// Where a service's config says its database lives, as one displayable line.
+public enum DatabaseTarget {
+    /// "mwserver @ mwstack-pg-dev:5432", from the connection string or the discrete keys —
+    /// nil when the config names no database at all. Never includes credentials.
+    public static func describe(_ config: [String: String]) -> String? {
+        if let parts = DatabaseClonePlanner.components(of: config["DATABASE_URL"] ?? ""),
+            let host = parts.host {
+            let database = parts.database ?? "?"
+            let port = parts.port.map { ":\($0)" } ?? ""
+            return "\(database) @ \(host)\(port)"
+        }
+        let host = config["DATABASE_HOST"] ?? ""
+        let database = config["DATABASE_DB"] ?? ""
+        guard !host.isEmpty, !database.isEmpty else { return nil }
+        let port = (config["DATABASE_PORT"] ?? "").isEmpty ? "" : ":\(config["DATABASE_PORT"]!)"
+        return "\(database) @ \(host)\(port)"
+    }
+}
+
 public enum DatabaseProvisionError: Error, CustomStringConvertible, Equatable {
     case statementFailed(sql: String, message: String)
     /// The server is not a dokku app and no admin target is configured to reach it another way.
