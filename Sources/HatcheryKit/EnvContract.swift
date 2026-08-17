@@ -182,6 +182,7 @@ extension EnvContract {
     /// needed, such as the temporal pair. That is a true statement about the lab being behind,
     /// and it is the drift worth seeing rather than noise worth hiding.
     static func mwserver(backend: Backend) -> EnvContract {
+        // MWServer opts into object storage. No other kind does yet, so no other kind may set its keys.
         EnvContract(
             required: mwserverRequired,
             optional: backend == .dokku
@@ -191,6 +192,7 @@ extension EnvContract {
             retired: backend == .dokku ? [] : discreteDatabaseKeys,
             ignored: dokkuInjected
         )
+        .uses(.vault)
     }
 
     static func paymentGateway(backend: Backend) -> EnvContract {
@@ -235,5 +237,46 @@ extension EnvContract {
             contract.optional.insert("DATABASE_PORT")
         }
         return contract
+    }
+}
+
+// MARK: - Capabilities
+
+extension EnvContract {
+    /// A group of keys a service takes on by choice, rather than by being a particular kind.
+    ///
+    /// A kind says what a service *is*. A capability says what it *does*, and several kinds can do the same thing.
+    /// Keeping the keys here means every kind that opts in agrees on their names, and a kind that never opts in still refuses them, which is the whole reason the contract rejects a key it does not know.
+    public struct Capability: Sendable, Equatable {
+        public let required: Set<String>
+        public let optional: Set<String>
+        public let secret: Set<String>
+
+        public init(required: Set<String> = [], optional: Set<String> = [], secret: Set<String> = []) {
+            self.required = required
+            self.optional = optional
+            self.secret = secret
+        }
+
+        /// Object storage collected from vault at start.
+        ///
+        /// Every key is optional, because a service that stores nothing boots and serves every route as before.
+        /// The app key is the root credential: it collects the S3 key, so whatever holds it reaches everything that key reaches.
+        public static let vault = Capability(
+            optional: ["VAULT_BASE_URL", "VAULT_APP", "VAULT_APP_KEY"],
+            secret: ["VAULT_APP_KEY"]
+        )
+    }
+
+    /// The same contract, with one capability's keys recognised.
+    public func uses(_ capability: Capability) -> EnvContract {
+        EnvContract(
+            required: self.required.union(capability.required),
+            optional: self.optional.union(capability.optional),
+            secret: self.secret.union(capability.secret),
+            retired: self.retired,
+            ignored: self.ignored,
+            ignoredPrefixes: self.ignoredPrefixes
+        )
     }
 }

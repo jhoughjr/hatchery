@@ -1385,10 +1385,27 @@ struct Stack: ParsableCommand {
             }
 
             for stack in parsed.stacks {
+                let environment = stack.environment.map { " \($0.rawValue)" } ?? ""
                 let target = stack.host.map { " \($0)" } ?? ""
-                print("\(stack.name)  [\(stack.backend.rawValue)]\(target)")
+                print("\(stack.name)  [\(stack.backend.rawValue)]\(environment)\(target)")
+
+                // The manifest and the tofu variables file are two declarations of the same image.
+                // `config sync` exists because they drift, and a drift nobody prints is one nobody fixes.
+                let variables: TofuVariableFile? = stack.tofu.flatMap { binding in
+                    (try? String(contentsOfFile: binding.variablesPath, encoding: .utf8))
+                        .map { TofuVariableFile(path: binding.variablesPath, contents: $0) }
+                }
                 for service in stack.services {
                     print("  \(service.name)  \(service.kind.rawValue)  \(service.image)")
+                    guard let variables, let variable = service.imageVariable, !variable.isEmpty else { continue }
+                    guard let inTofu = variables.defaultValue(of: variable) else {
+                        print("    tofu       \(variable) declares no default")
+                        continue
+                    }
+                    if inTofu != service.image {
+                        // The apply is what the box follows, so the tofu value is what is deployed.
+                        print("    DRIFT      tofu has \(inTofu)")
+                    }
                 }
             }
         }
