@@ -22,6 +22,10 @@ public struct ImageDrift: Sendable {
     /// One sentence per service whose next apply would (or might) change its code.
     /// Empty when everything checkable is in sync.
     public func check(stack: StackSpec) async -> [String] {
+        // The platform answers its own question, through its API rather than a box.
+        if stack.backend == .appPlatform {
+            return await AppPlatformDrift(run: run).check(stack: stack)
+        }
         guard stack.backend == .dokku, let host = stack.hostAddress else { return [] }
         let admin = stack.settings?["exposure_admin"] ?? stack.settings?["db_admin"]
 
