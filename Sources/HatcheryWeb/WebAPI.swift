@@ -1,5 +1,6 @@
 import Foundation
 import HatcheryKit
+import ScanKit
 
 /// One HTTP request, reduced to what the API needs.
 ///
@@ -152,6 +153,55 @@ enum Wire {
         let service: String
         let values: [String: String]
         let confirm: String
+    }
+
+    struct BoxScanBody: Decodable {
+        /// user@host for a box, appPlatform for the platform. Absent means the platform.
+        let target: String?
+    }
+
+    struct BoxScanView: Encodable {
+        let provider: String
+        let target: String
+        let apps: [FoundAppView]
+        /// False when the target cannot list them: a dokku box without the postgres plugin.
+        let databasesListable: Bool
+        let databases: [String]
+
+        struct FoundAppView: Encodable {
+            let name: String
+            let running: Bool
+            let image: String?
+            let databases: [String]
+            /// declared, hatchery-shaped, or foreign.
+            let claim: String
+            /// The stack that declares it, when one does.
+            let stack: String?
+        }
+    }
+
+    struct BoxAdoptBody: Decodable {
+        let target: String
+        let app: String
+        let stack: String
+        let kind: String?
+        /// The app's name again to write; absent is a dry run.
+        let confirm: String?
+    }
+
+    struct BoxAdoptView: Encodable {
+        let app: String
+        let box: String
+        let image: String
+        let kind: String
+        let domains: [String]
+        let port: Int
+        let network: String?
+        let configKeys: Int
+        let files: [String]
+        let importCommand: String
+        /// True when the files and the manifest were written.
+        let written: Bool
     }
 
     struct ClonePlanBody: Decodable {
@@ -399,6 +449,8 @@ public struct HatcheryAPI: Sendable {
     private let removeDirectory: @Sendable (String) throws -> Void
     private let stream: LineStream.Runner
     private let drift: ImageDrift
+    private let scanner: ScanKit.Scanner
+    private let adopter: Adopter
     private let jobs = JobStore()
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
@@ -427,6 +479,8 @@ public struct HatcheryAPI: Sendable {
         },
         stream: @escaping LineStream.Runner = LineStream.live,
         drift: ImageDrift = ImageDrift(),
+        scanner: ScanKit.Scanner = ScanKit.Scanner(),
+        adopter: Adopter = Adopter(),
         readConfig: @escaping @Sendable (URL) throws -> [String: String] = {
             (try? ConfigSync.readDeclared(at: $0)) ?? [:]
         },
@@ -460,6 +514,8 @@ public struct HatcheryAPI: Sendable {
         self.removeDirectory = removeDirectory
         self.stream = stream
         self.drift = drift
+        self.scanner = scanner
+        self.adopter = adopter
         self.readConfig = readConfig
         self.writeConfig = writeConfig
         self.sealState = sealState
@@ -478,6 +534,10 @@ public struct HatcheryAPI: Sendable {
             return .html(Page.markup)
         case ("GET", "/api/stacks"):
             return stacks()
+        case ("POST", "/api/box/scan"):
+            return await boxScan(request)
+        case ("POST", "/api/box/adopt"):
+            return await boxAdopt(request)
         case ("GET", "/api/status"):
             return await status()
         case ("POST", "/api/lifecycle"):
@@ -807,6 +867,91 @@ public struct HatcheryAPI: Sendable {
                 .failure(400, "'\(target)' already exists; clone to a name that does not"))
         }
         return .ok(manifest, stack)
+    }
+
+    /// Reads a target and says whose each app is, against the manifest.
+    private func boxScan(_ request: WebRequest) async -> WebResponse {
+        let body = (try? JSONDecoder().decode(Wire.BoxScanBody.self, from: request.body))
+            ?? Wire.BoxScanBody(target: nil)
+        let manifest = try? loadManifest()
+        do {
+            let inventory = try await scanner.scan(body.target)
+            let claims = ScanKit.Scanner.classify(inventory, against: manifest)
+            return .json(
+                Wire.BoxScanView(
+                    provider: inventory.provider.rawValue,
+                    target: inventory.target,
+                    apps: claims.map { entry in
+                        let (claim, stack): (String, String?) = {
+                            switch entry.claim {
+                            case .declared(let stack): return ("declared", stack)
+                            case .hatcheryShaped: return ("hatchery-shaped", nil)
+                            case .foreign: return ("foreign", nil)
+                            }
+                        }()
+                        return Wire.BoxScanView.FoundAppView(
+                            name: entry.app.name, running: entry.app.running,
+                            image: entry.app.image, databases: entry.app.databases,
+                            claim: claim, stack: stack)
+                    },
+                    databasesListable: inventory.databases != nil,
+                    databases: inventory.databases ?? []))
+        } catch ScanError.noProviderAnswered(let target, let tried) {
+            return .failure(
+                400, "nothing answered at '\(target)': \(tried.joined(separator: "; "))")
+        } catch {
+            return .failure(400, "\(error)")
+        }
+    }
+
+    /// A find becomes a manifest entry: a dry run without `confirm`, the write with it.
+    private func boxAdopt(_ request: WebRequest) async -> WebResponse {
+        guard let body = try? JSONDecoder().decode(Wire.BoxAdoptBody.self, from: request.body)
+        else {
+            return .failure(400, "expected {target, app, stack, kind?, confirm?}")
+        }
+        let manifest: StackManifest
+        do { manifest = try loadManifest() } catch { return .failure(500, "\(error)") }
+        guard let stack = manifest.stack(named: body.stack) else {
+            return .failure(404, "no stack named '\(body.stack)'")
+        }
+        do {
+            let (provider, box) = try await scanner.identify(body.target)
+            guard provider == .dokku else {
+                return .failure(400, "adopt reads dokku boxes only for now; \(box) is \(provider.rawValue)")
+            }
+            let facts = try await adopter.facts(for: body.app, on: box)
+            let kind: ServiceKind
+            if let given = body.kind, !given.isEmpty {
+                kind = ServiceKind(rawValue: given)
+            } else if let inferred = Adopter.inferKind(fromImage: facts.image) {
+                kind = inferred
+            } else {
+                return .failure(400, AdoptError.kindUnknown(app: body.app, image: facts.image).description)
+            }
+            let result = try await adopter.plan(
+                facts, kind: kind, into: body.stack, box: box, manifest: manifest)
+
+            var written = false
+            if body.confirm == body.app {
+                let scaffolded = ScaffoldResult(
+                    service: result.service, files: result.files, secrets: [], manifest: result.manifest)
+                _ = try scaffolder.write(scaffolded, in: stack)
+                try saveManifest(result.manifest, manifestPath())
+                _ = await sealState(manifestPath())
+                written = true
+            }
+            return .json(
+                Wire.BoxAdoptView(
+                    app: facts.name, box: box, image: facts.image, kind: kind.rawValue,
+                    domains: facts.domains, port: facts.containerPort, network: facts.network,
+                    configKeys: facts.config.count, files: result.files.map(\.path),
+                    importCommand: result.importCommand, written: written))
+        } catch let error as AdoptError {
+            return .failure(400, error.description)
+        } catch {
+            return .failure(400, "\(error)")
+        }
     }
 
     /// The destination of a clone and the cluster its databases go in, from the body or the
