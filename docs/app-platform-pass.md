@@ -17,7 +17,7 @@ DockerHub frozen pending cutover). hatchery's job is to drive what already exist
 | clone: config/keys | Backend-agnostic already (contract, minting, rewrite). Live-config reads stay refused (`EV[…]` ciphertext) — clones plan from the declared sidecar, which the plan already says out loud. | shipped |
 | clone: database | `ManagedPostgresProvisioner`: database + roles in the existing cluster via the DO API, ownership and grants as doadmin over local psql (reported as pending without psql), URLs with `sslmode=require` from the cluster's own endpoint. Copies (`full`/`schema`) need a psql path to the cluster: the opi as a trusted source running the same dump-pipe the dokku path uses. | shipped, copies queued |
 | exposure | `platform` provider already answers (default `ondigitalocean.app` domains); custom domains later via `cloudflare-api`. | shipped / queued |
-| drift warning | Better than dokku's: the App Platform API reports the deployed digest directly — compare against DOCR's tag digest, no wrappers, no root. | designed |
+| drift warning | `AppPlatformDrift`: the deployment's `source_image_digest` against the registry's tag digest, DOCR or Docker Hub, no wrappers, no root. | shipped |
 | jobs / narration | Provider-agnostic already. | shipped |
 
 ## Prerequisites to gather (operator decisions, not code)
@@ -35,5 +35,5 @@ DockerHub frozen pending cutover). hatchery's job is to drive what already exist
 2. ~~DO managed-database provider: create/converge db + roles via API; URLs into the clone;
    refusal messages name the missing cluster/token.~~ Shipped: `stack clone --backend appPlatform --cluster NAME`, `ManagedPostgresProvisioner`. Copies stay in slice 5. The clone's addresses are platform-shaped too (`PlatformShape`): a sibling becomes its public domain (or its component on the private network, when the provider authors one app), a box-local host with no sibling behind it is refused by name, and box-local domains drop off.
 3. ~~Cost lines on the plan screen for platform-billed backends.~~ Shipped: `PlatformCost`, `PlannedClone.costs`, printed by `stack clone`. The web plan view still has to show them.
-4. Digest-drift via the App Platform + DOCR APIs.
+4. ~~Digest-drift via the App Platform + DOCR APIs.~~ Shipped: `AppPlatformDrift`, reached through `ImageDrift.check` for an App Platform stack. DOCR through the DO API, Docker Hub through its tag API, other registries said to be not checkable.
 5. Copies through the trusted-source psql path; then `cloudflare-api` custom domains.
