@@ -421,6 +421,7 @@ enum Page {
         // the tooltip is where the consequence goes, especially for the ones that change things.
         const TIPS = {
           logs: 'Read the last 200 lines this service logged',
+          'scan-box': "Read what runs on a box or the platform, and say which of it is hatchery's",
           config: 'Show what it is running with, secrets redacted, and the contract issues',
           'edit-config': 'Change config values. Secrets left blank keep their current value',
           restart: 'Restart this service. Asks you to type its name first',
@@ -653,6 +654,7 @@ enum Page {
               render(lastStacks);
               break;
             }
+            case 'scan-box': scanBox(); break;
             case 'logs': showLogs(stack, service); break;
             case 'config': showConfig(stack, service); break;
             case 'edit-config': editConfig(stack, service); break;
@@ -842,7 +844,8 @@ enum Page {
           $('boxes').innerHTML = boxStrip
             ? boxStrip + '&nbsp;&nbsp;&nbsp;<span class="meta hint">control plane: this machine</span>'
               + '&nbsp;&nbsp;' + button('toggle-map', mapOpen ? 'hide map' : 'map', null, null, 'add')
-            : '';
+              + '&nbsp;' + button('scan-box', 'scan', null, null, 'add')
+            : button('scan-box', 'scan a box', null, null, 'add');
           drawMap(stacks);
 
           // + stack lives once per backend group (or once at the foot for a single-backend
@@ -983,6 +986,88 @@ enum Page {
           const res = await fetch(path, {method: 'POST', headers, body: JSON.stringify(body)});
           const data = await res.json().catch(() => ({}));
           return {ok: res.ok, data};
+        }
+
+        // The inverse of the manifest: read what a target runs, say whose it is, and adopt a
+        // find into a stack. The same scanner and adopter the CLI's box scan and box adopt use.
+        async function scanBox() {
+          const known = (lastStacks || []).map(s => s.host).filter(Boolean);
+          const suggested = known.length ? known[0] : 'appPlatform';
+          const ok = await step('Scan a box', 'Step 1 of 3 — where',
+              field('sb-target', 'Target', suggested,
+                    'user@host or a bare address for a dokku box. appPlatform reads the '
+                    + 'platform through DIGITALOCEAN_TOKEN. Nothing is written.'),
+            'scan');
+          if (!ok) { log('cancelled'); return; }
+          const target = $('sb-target').value.trim() || null;
+
+          busy = true;
+          const scan = await send('/api/box/scan', {target});
+          busy = false;
+          if (!scan.ok) { log(scan.data.error || 'scan failed', true); return; }
+          const inv = scan.data;
+          const cls = {declared: '', 'hatchery-shaped': 'd-change', foreign: 'hint'};
+          const rows = inv.apps.map(a => {
+            let line = a.name.padEnd(24) + (a.running ? 'running' : 'stopped').padEnd(9);
+            line += a.claim === 'declared' ? 'declared by ' + a.stack
+                  : a.claim === 'hatchery-shaped' ? 'hatchery-shaped, undeclared' : 'foreign';
+            if (a.image) line += '  ' + a.image;
+            if (a.databases.length) line += '  db: ' + a.databases.join(', ');
+            return '<div class="' + (cls[a.claim] || '') + '">' + escapeHTML(line) + '</div>';
+          }).join('');
+          const dbLine = !inv.databasesListable
+            ? '<div class="hint">databases not listable as the dokku user</div>'
+            : '<div class="hint">' + inv.databases.length + ' database(s)</div>';
+          const candidates = inv.apps.filter(a => a.claim !== 'declared').map(a => a.name);
+          const stacks = (lastStacks || [])
+            .filter(s => s.backend === inv.provider && (!s.host || inv.target.endsWith(s.host.split('@').pop())))
+            .map(s => s.name);
+          const canAdopt = inv.provider === 'dokku' && candidates.length && stacks.length;
+
+          const pick = await step('Scan — ' + inv.target + '  [' + inv.provider + ']',
+            'Step 2 of 3 — ' + inv.apps.length + ' app(s)',
+            '<pre class="out">' + rows + dbLine + '</pre>'
+            + (canAdopt
+               ? select('sb-app', 'Adopt', candidates, 'An app no stack declares yet.')
+                 + select('sb-stack', 'Into stack', stacks, 'A dokku stack on this box.')
+                 + field('sb-kind', 'Kind', '', 'Blank reads the kind off the image. One of: '
+                         + 'mwserver, payment-gateway, communication-gateway, gsx-gateway.')
+               : '<div class="hint">' + (inv.provider !== 'dokku'
+                   ? 'adopt reads dokku boxes only for now'
+                   : !candidates.length ? 'every app here is declared already'
+                   : 'no stack of the manifest lives on this box; create one first') + '</div>'),
+            canAdopt ? 'plan adoption' : 'close');
+          if (!pick || !canAdopt) { log('scan only; nothing written'); return; }
+          const app = $('sb-app').value;
+          const stack = $('sb-stack').value;
+          const kind = $('sb-kind').value.trim() || null;
+
+          busy = true;
+          const dry = await send('/api/box/adopt', {target, app, stack, kind});
+          busy = false;
+          if (!dry.ok) { log(dry.data.error || 'adopt plan failed', true); return; }
+          const d = dry.data;
+          const facts = [
+            'image    ' + d.image, 'kind     ' + d.kind, 'domains  ' + d.domains.join(' '),
+            'port     ' + d.port, d.network ? 'network  ' + d.network : null,
+            'config   ' + d.configKeys + ' key(s)', '',
+          ].filter(x => x !== null).map(l => '<div>' + escapeHTML(l) + '</div>').join('')
+          + d.files.map(f => '<div class="d-add">' + escapeHTML('write    ' + f) + '</div>').join('');
+          const write = await step('Adopt ' + app + ' into ' + stack, 'Step 3 of 3 — the plan',
+            '<pre class="out">' + facts + '</pre>'
+            + '<div class="hint">Adopt writes the declaration, a config file holding the '
+            + "box's real values, and the manifest line. The declaration then needs this import "
+            + 'before plan agrees the app exists: <code>' + escapeHTML(d.importCommand)
+            + '</code></div>',
+            'adopt');
+          if (!write) { log('adopt planned; nothing written'); return; }
+
+          busy = true;
+          const done = await send('/api/box/adopt', {target, app, stack, kind, confirm: app});
+          busy = false;
+          if (!done.ok) { log(done.data.error || 'adopt failed', true); return; }
+          log('adopted ' + app + ' into ' + stack + '; next: ' + done.data.importCommand);
+          refresh();
         }
 
         async function newStack(chosenBackend) {
