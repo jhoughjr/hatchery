@@ -101,8 +101,11 @@ public struct CloudSQLProvisioner: Sendable {
             "ownership and grants are pending: run as the postgres user of \(instance.name), "
                 + "for example through gcloud sql connect \(instance.name) --user=postgres:")
         statements.forEach { report.append("  \($0);") }
-        let endpoint = instance.address.map { DatabaseEndpoint(host: $0, port: "5432") }
-            ?? DatabaseEndpoint(host: "/cloudsql/\(instance.connectionName)", port: "5432")
+        // The app reaches the instance through the socket Cloud Run mounts, whatever the
+        // public address is. The address stays on the endpoint for the trusted source's copy.
+        let endpoint = DatabaseEndpoint(
+            host: instance.address ?? "", port: "5432",
+            socket: "/cloudsql/\(instance.connectionName)")
         let credentials = DatabaseCredentials(
             ownerPassword: ownerPassword, appPassword: appPassword, endpoint: endpoint)
         try await self.copyContents(

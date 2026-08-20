@@ -71,14 +71,14 @@ struct CloudSQLTests {
         let (credentials, report) = try await provisioner.provision(plan)
 
         #expect(credentials.ownerPassword == "minted")
-        #expect(credentials.endpoint == DatabaseEndpoint(host: "34.1.2.3", port: "5432"))
+        #expect(credentials.endpoint == DatabaseEndpoint(host: "34.1.2.3", port: "5432", socket: "/cloudsql/mws-lab:us-central1:mws-sql"))
         #expect(fake.calls.contains("sql databases create mwgcp_mwserver --instance mws-sql --quiet"))
         #expect(fake.calls.contains("sql users set-password mwserver --instance mws-sql --password minted --quiet"))
         #expect(fake.calls.contains("sql users create mwserver_app --instance mws-sql --password minted --quiet"))
         #expect(report.contains("created database mwgcp_mwserver"))
         #expect(report.contains("user mwserver already existed; password reset"))
         #expect(report.contains { $0.contains("gcloud sql connect mws-sql --user=postgres") })
-        #expect(plan.values(credentials)["DATABASE_URL"] == "postgresql://mwserver:minted@34.1.2.3:5432/mwgcp_mwserver?sslmode=require")
+        #expect(plan.values(credentials)["DATABASE_URL"] == "postgresql://mwserver:minted@/mwgcp_mwserver?host=/cloudsql/mws-lab:us-central1:mws-sql")
     }
 
     @Test("an unknown instance and a missing gcloud are named")

@@ -92,17 +92,24 @@ public struct DatabaseClonePlan: Sendable, Equatable {
     /// The config values this database resolves, once its credentials exist.
     public func values(_ credentials: DatabaseCredentials) -> [String: String] {
         var out: [String: String] = [:]
-        // A managed cluster answers with its own host and port, and insists on TLS.
+        // A managed cluster answers with its own host and port, and insists on TLS. A
+        // platform that mounts the database as a socket is addressed through the socket,
+        // with no host and no TLS, because the socket is already private.
         let host = credentials.endpoint?.host ?? serverApp
         let port = credentials.endpoint?.port ?? self.port
-        let query = managed ? "?sslmode=require" : ""
-        let base = "\(scheme)://\(owner):\(credentials.ownerPassword)@\(host):\(port)/\(database)\(query)"
+        func url(_ user: String, _ password: String) -> String {
+            if let socket = credentials.endpoint?.socket {
+                return "\(scheme)://\(user):\(password)@/\(database)?host=\(socket)"
+            }
+            let query = managed ? "?sslmode=require" : ""
+            return "\(scheme)://\(user):\(password)@\(host):\(port)/\(database)\(query)"
+        }
+        let base = url(owner, credentials.ownerPassword)
         if emitted.contains("DATABASE_URL") { out["DATABASE_URL"] = base }
         if emitted.contains("DATABASE_OWNER_URL") { out["DATABASE_OWNER_URL"] = base }
         if let appUser, let appPassword = credentials.appPassword {
             if emitted.contains("DATABASE_APP_URL") {
-                out["DATABASE_APP_URL"] =
-                    "\(scheme)://\(appUser):\(appPassword)@\(host):\(port)/\(database)\(query)"
+                out["DATABASE_APP_URL"] = url(appUser, appPassword)
             }
             if emitted.contains("DATABASE_APP_USER") { out["DATABASE_APP_USER"] = appUser }
             if emitted.contains("DATABASE_APP_PASSWORD") {
@@ -136,10 +143,14 @@ public struct DatabaseCredentials: Sendable, Equatable {
 public struct DatabaseEndpoint: Sendable, Equatable {
     public let host: String
     public let port: String
+    /// A Unix socket directory the platform mounts, when the app reaches the database that
+    /// way rather than over an address: Cloud Run's `/cloudsql/<connection>`.
+    public let socket: String?
 
-    public init(host: String, port: String) {
+    public init(host: String, port: String, socket: String? = nil) {
         self.host = host
         self.port = port
+        self.socket = socket
     }
 }
 

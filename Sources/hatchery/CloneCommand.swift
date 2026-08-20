@@ -216,7 +216,7 @@ extension Stack {
 
             try await build(
                 planned: planned, from: spec, manifest: parsed, at: path,
-                environment: env, backend: destination)
+                environment: env, backend: destination, cluster: clusterName)
         }
 
         /// Creates the stack through the shared builder — the same code path the dashboard
@@ -227,7 +227,8 @@ extension Stack {
             manifest: StackManifest,
             at path: String,
             environment: Environment,
-            backend: Backend?
+            backend: Backend?,
+            cluster: String?
         ) async throws {
             print("")
             let outcome = try await StackCloneBuilder().build(
@@ -235,7 +236,7 @@ extension Stack {
                 options: StackCloneBuilder.Options(
                     target: target, tofuDir: tofuDir!, host: host, environment: environment,
                     port: port, network: network, gated: gated ? true : nil, apply: apply,
-                    backend: backend))
+                    backend: backend, cluster: cluster))
 
             print("  created \(target) in \(tofuDir!)")
             print("  tofu init: ok")

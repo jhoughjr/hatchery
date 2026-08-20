@@ -21,13 +21,17 @@ public struct StackCloneBuilder: Sendable {
         public let apply: Bool
         /// Where the clone runs, when not where the source runs.
         public let backend: Backend?
+        /// The managed database cluster or instance the clone's databases go in. Recorded on
+        /// the clone as its db_cluster setting, so the declaration can mount it.
+        public let cluster: String?
 
         public init(
             target: String, tofuDir: String, host: String? = nil, environment: Environment,
             port: Int? = nil, network: String? = nil, gated: Bool? = nil, apply: Bool = false,
-            backend: Backend? = nil
+            backend: Backend? = nil, cluster: String? = nil
         ) {
             self.backend = backend
+            self.cluster = cluster
             self.target = target
             self.tofuDir = tofuDir
             self.host = host
@@ -143,6 +147,7 @@ public struct StackCloneBuilder: Sendable {
         var settings = source.settings ?? [:]
         let host = options.host ?? source.host ?? settings["host"] ?? ""
         settings["host"] = host
+        if let cluster = options.cluster, !cluster.isEmpty { settings["db_cluster"] = cluster }
 
         let plan = try bootstrapper.plan(
             name: options.target, backend: options.backend ?? source.backend, host: host,
