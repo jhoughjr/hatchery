@@ -35,7 +35,32 @@ public enum PlatformCost {
         backend: Backend, services: Int, size: String = appPlatformDefaultSize,
         instances: Int = 1, managedDatabases: Int = 0, cluster: String? = nil
     ) -> [CostLine] {
-        guard backend == .appPlatform, services > 0 else { return [] }
+        guard services > 0 else { return [] }
+        if backend == .cloudRun {
+            // Cloud Run bills per request and per CPU-second, with no charge at zero
+            // traffic when min instances is zero, which is what the declaration authors.
+            // There is no flat figure to state, so the floor is stated instead.
+            var lines = [
+                CostLine(
+                    text: "\(services) service(s) on Cloud Run, billed per request: $0/mo at no "
+                        + "traffic, min instances 0",
+                    monthlyUSD: 0)
+            ]
+            if managedDatabases > 0 {
+                let where_ = cluster.map { " in the existing instance \($0)" } ?? " in the existing instance"
+                lines.append(
+                    CostLine(
+                        text: "\(managedDatabases) database(s)\(where_): no added charge",
+                        monthlyUSD: 0))
+            }
+            lines.append(
+                CostLine(
+                    text: "a floor of $0/mo, Cloud Run list pricing as of \(tableDate); the "
+                        + "console is the authority once traffic flows",
+                    monthlyUSD: 0))
+            return lines
+        }
+        guard backend == .appPlatform else { return [] }
         var lines: [CostLine] = []
         if let each = appPlatformSizes[size] {
             let total = each * Double(services * instances)

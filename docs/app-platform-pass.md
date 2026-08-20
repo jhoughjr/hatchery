@@ -46,7 +46,7 @@ Google signs its API calls in ways curl alone cannot, and a bearer token from
 `gcloud auth print-access-token` is all the REST calls need.
 
 1. ~~Platform checks as `box init --backend cloudRun [--project P] [--cluster INSTANCE]`.~~ Shipped.
-2. Cloud SQL database provider: create and converge database and users through the admin API, URLs into the clone.
-3. Cost lines for Cloud Run's per-request billing, said as a floor.
+2. ~~Cloud SQL database provider.~~ Shipped: `stack clone --backend cloudRun --cluster INSTANCE`, `CloudSQLProvisioner` through gcloud. Hatchery mints the passwords. Ownership and grants are reported as pending statements for the instance's postgres user, because that credential is the operator's. The URL uses the instance's public address with TLS; the `/cloudsql/` socket and the declaration's Cloud SQL volume are a follow-up.
+3. ~~Cost lines for Cloud Run's per-request billing, said as a floor.~~ Shipped with slice 2.
 4. Digest drift through the Cloud Run service's image digest against Artifact Registry.
 5. Copies through the trusted-source path, with the Cloud SQL Auth Proxy or an authorized network.
