@@ -120,6 +120,52 @@ struct BoxInitTests {
         #expect(argv.contains("sh"))
     }
 
+    @Test("a local command is a bare sh -c with no ssh in front")
+    func localCommandShape() async {
+        let recorded = RecordedArgv()
+        let initializer = BoxInitializer(execute: { argv, _ in
+            recorded.note(argv)
+            return CommandOutput(status: 0, standardOutput: "")
+        })
+        _ = await initializer.run(
+            at: .local,
+            assertions: [BoxAssertion(name: "x", check: "true")],
+            onProgress: { _ in })
+
+        #expect(recorded.all.first == ["sh", "-c", "true"])
+    }
+
+    @Test("the App Platform recipe is check-only and names the cluster it was given")
+    func appPlatformRecipeShape() {
+        let anyCluster = BoxInitializer.appPlatformAssertions()
+        #expect(anyCluster.allSatisfy { $0.fix.isEmpty })
+        #expect(anyCluster.map(\.name).contains("DIGITALOCEAN_TOKEN is set"))
+        #expect(anyCluster.last?.check.contains("\"pg\"") == true)
+
+        let named = BoxInitializer.appPlatformAssertions(cluster: "mws-pg")
+        #expect(named.last?.name == "managed Postgres cluster 'mws-pg' is visible")
+        #expect(named.last?.check.contains("mws-pg") == true)
+        #expect(named.last?.remedy.contains("mws-pg") == true)
+    }
+
+    @Test("a missing token stops the platform run at the token step and says the export")
+    func missingTokenStops() async {
+        let initializer = BoxInitializer(execute: { argv, _ in
+            let command = argv.last ?? ""
+            // curl is present. The token is not, so the token check and anything after fail.
+            let status = command.contains("command -v curl") ? 0 : 1
+            return CommandOutput(status: Int32(status), standardOutput: "")
+        })
+        let steps = await initializer.run(
+            at: .local,
+            assertions: BoxInitializer.appPlatformAssertions(),
+            onProgress: { _ in })
+
+        #expect(steps.map(\.outcome) == [.held, .failed])
+        #expect(steps.last?.name == "DIGITALOCEAN_TOKEN is set")
+        #expect(steps.last?.detail.contains("export DIGITALOCEAN_TOKEN") == true)
+    }
+
     private final class RecordedArgv: @unchecked Sendable {
         private let lock = NSLock()
         private var log: [[String]] = []
