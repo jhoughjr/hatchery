@@ -185,6 +185,13 @@ extension Stack {
                 }
             }
 
+            if !planned.costs.isEmpty {
+                print("")
+                for line in planned.costs {
+                    print("  cost     \(line.text)")
+                }
+            }
+
             if !planned.warnings.isEmpty {
                 print("")
                 for warning in planned.warnings {
