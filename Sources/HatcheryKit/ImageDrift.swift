@@ -26,6 +26,9 @@ public struct ImageDrift: Sendable {
         if stack.backend == .appPlatform {
             return await AppPlatformDrift(run: run).check(stack: stack)
         }
+        if stack.backend == .cloudRun {
+            return await CloudRunDrift(run: run).check(stack: stack)
+        }
         guard stack.backend == .dokku, let host = stack.hostAddress else { return [] }
         let admin = stack.settings?["exposure_admin"] ?? stack.settings?["db_admin"]
 

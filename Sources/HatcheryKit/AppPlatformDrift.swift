@@ -150,7 +150,7 @@ public struct ImageReference: Equatable, Sendable {
         }
     }
 
-    var registryName: String {
+    public var registryName: String {
         switch registry {
         case .docr: return "DOCR"
         case .dockerHub: return "Docker Hub"
@@ -158,7 +158,7 @@ public struct ImageReference: Equatable, Sendable {
         }
     }
 
-    var tagLabel: String { "tag \(tag)" }
+    public var tagLabel: String { "tag \(tag)" }
 
     /// `repo:tag` → (repo, tag). A digest reference or a bare name gets `latest`.
     static func split(_ image: String) -> (String, String) {
