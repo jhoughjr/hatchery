@@ -1212,6 +1212,13 @@ enum Page {
             + select('c-env', 'Environment', envs,
                      'Where the copy is headed. Values naming ' + source + "'s environment "
                      + 'are rewritten to match.')
+            + select('c-backend', 'Backend', ['same', 'appPlatform'],
+                     "Where the copy runs. same keeps the source's backend. appPlatform puts "
+                     + 'each service in its own DigitalOcean app, with databases in a managed '
+                     + 'cluster, and the plan says what that bills.')
+            + field('c-cluster', 'Managed Postgres cluster', '',
+                    "appPlatform only: the cluster the copy's databases are created in. Blank "
+                    + "uses the source's db_cluster setting.")
             + field('c-dir', 'Tofu directory', '~/infra-state/',
                     'A directory for this clone alone — it must be empty or not exist. '
                     + 'End with / and the stack name is appended, so the default becomes '
@@ -1241,10 +1248,12 @@ enum Page {
           const network = $('c-network').value.trim() || null;
           const apply = $('c-apply').value === 'yes';
           const db = $('c-db').value;
+          const backend = $('c-backend').value;
+          const cluster = $('c-cluster').value.trim() || null;
 
           busy = true;
           const plan = await send('/api/stack/clone/plan',
-            {source, target, environment: env, tofuDir: dir, db});
+            {source, target, environment: env, tofuDir: dir, db, backend, cluster});
           busy = false;
           if (!plan.ok) { log(plan.data.error || 'plan failed', true); return; }
 
@@ -1279,14 +1288,21 @@ enum Page {
             + '<span class="hint">  — ' + escapeHTML(e.action) + '</span></div>').join('');
           const doorBlock = doors ? '<div>&nbsp;</div>' + doors : '';
 
+          // Money beside the data: a platform bills per app the moment the create runs,
+          // so the plan says so here, where the person still has the form in front of them.
+          const costs = (p.costs || []).map(c =>
+            '<div class="hint">' + escapeHTML('cost     ' + c) + '</div>').join('');
+          const costBlock = costs ? '<div>&nbsp;</div>' + costs : '';
+
           const blocked = p.warning
             ? '<div class="err" style="margin-bottom:0.5rem">' + escapeHTML(p.warning)
               + '</div>'
             : '';
-          const create = await step('Clone plan — ' + source + ' → ' + target,
+          const create = await step('Clone plan — ' + source + ' → ' + target
+              + (p.backend ? '  [' + p.backend + ']' : ''),
             p.carried + ' key(s) resolved, ' + p.unresolved + ' still need a person',
             blocked
-            + '<pre class="out">' + html + doorBlock + '</pre>'
+            + '<pre class="out">' + html + doorBlock + costBlock + '</pre>'
             + '<div class="hint" style="margin-top:0.5rem">Create writes the new stack into '
             + escapeHTML(dir) + ' and runs tofu init. Nothing touches '
             + escapeHTML(source) + '.</div>',
@@ -1298,6 +1314,7 @@ enum Page {
           // when the apply runs. The log advances the entire time.
           const started = await send('/api/jobs/clone',
             {source, target, environment: env, tofuDir: dir, port, network, apply, db,
+             backend, cluster,
              confirm: target});
           if (!started.ok) { log(started.data.error || 'clone refused', true); return; }
           log('cloning ' + source + ' → ' + target + '…');

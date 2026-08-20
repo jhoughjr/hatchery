@@ -89,6 +89,46 @@ struct CloneRouteTests {
         #expect(entry("PRIVATE_KEY_PEM")?["action"] as? String == "mint")
     }
 
+    @Test("a plan onto App Platform carries the backend, the managed database, and the cost lines")
+    func planOntoThePlatform() async throws {
+        let api = HatcheryAPI(
+            loadManifest: { StackManifest(stacks: [self.stack()]) },
+            manifestPath: { "/infra/hatchery.json" },
+            clonePlanner: planner(config: [
+                "DATABASE_URL": "postgresql://mwserver:x@mwstack-pg-dev:5432/mwserver",
+                "PAYMENT_GATEWAY_URL": "http://paylab.web.1:8080",
+            ]))
+
+        let response = await api.handle(
+            post("/api/stack/clone/plan",
+                 ["source": "mwlab", "target": "mwcloud", "backend": "appPlatform", "cluster": "mws-pg"]))
+
+        #expect(response.status == 200)
+        let plan = try decoded(response)
+        #expect(plan["backend"] as? String == "appPlatform")
+        let costs = try #require(plan["costs"] as? [String])
+        #expect(costs.first == "1 app(s) at basic-xxs, $5/mo each: $5/mo")
+        let services = try #require(plan["services"] as? [[String: Any]])
+        // The box-local domain is gone, and nothing public was declared in its place.
+        #expect((services.first?["domains"] as? [String]) == [])
+        let keys = try #require(services.first?["keys"] as? [[String: Any]])
+        let database = keys.first { $0["key"] as? String == "DATABASE_URL" }
+        #expect(database?["action"] as? String == "db")
+        #expect((database?["detail"] as? String)?.contains("managed cluster mws-pg") == true)
+    }
+
+    @Test("a plan onto App Platform without a cluster is refused with the reason")
+    func planOntoThePlatformNeedsACluster() async throws {
+        let api = HatcheryAPI(
+            loadManifest: { StackManifest(stacks: [self.stack()]) },
+            clonePlanner: planner(config: [:]))
+        let response = await api.handle(
+            post("/api/stack/clone/plan",
+                 ["source": "mwlab", "target": "mwcloud", "backend": "appPlatform"]))
+        #expect(response.status == 400)
+        #expect(String(decoding: response.body, as: UTF8.self).contains("db_cluster"))
+    }
+
     @Test("a source that does not exist is a 404, not an empty plan")
     func planUnknownSource() async throws {
         let api = HatcheryAPI(loadManifest: { StackManifest(stacks: [self.stack()]) })
