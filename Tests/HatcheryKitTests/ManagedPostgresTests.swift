@@ -13,7 +13,7 @@ struct ManagedPostgresTests {
         "DATABASE_HOST": "mwstack-pg-dev", "DATABASE_USER": "mwserver", "DATABASE_DB": "mwserver",
     ]
 
-    @Test("a clone onto App Platform plans a managed database, URLs only, no copy")
+    @Test("a clone onto App Platform plans a managed database, URLs only, copy as asked")
     func plansManaged() {
         let plan = DatabaseClonePlanner.plan(
             service: .mwserver, backend: .dokku, sourceConfig: config, source: source,
@@ -24,7 +24,12 @@ struct ManagedPostgresTests {
         #expect(unwrapped.serverApp == "mws-pg")
         #expect(unwrapped.owner == "mwserver")
         #expect(unwrapped.appUser == "mwserver_app")
-        #expect(unwrapped.mode == .none)
+        #expect(unwrapped.mode == .full)
+        let schemaOnly = DatabaseClonePlanner.plan(
+            service: .mwserver, backend: .dokku, sourceConfig: config, source: source,
+            target: "mwcloud", environment: Environment(rawValue: "staging"), mode: .schema,
+            targetBackend: .appPlatform, cluster: "mws-pg")
+        #expect(schemaOnly?.mode == .schema)
         #expect(unwrapped.emitted == ["DATABASE_URL", "DATABASE_APP_URL"])
         #expect(unwrapped.summary.contains("managed cluster mws-pg"))
     }
@@ -64,6 +69,10 @@ struct ManagedPostgresTests {
         func handle(_ argv: [String]) -> CommandOutput {
             lock.lock(); defer { lock.unlock() }
             if argv.first == "sh" { return CommandOutput(status: 1, standardOutput: "") }
+            if argv.first == "ssh" {
+                calls.append("ssh " + argv.dropFirst(4).joined(separator: " "))
+                return CommandOutput(status: 0, standardOutput: "")
+            }
             let url = argv.last ?? ""
             let method = argv[argv.firstIndex(of: "-X").map { $0 + 1 } ?? 0]
             let path = url.replacingOccurrences(of: "https://api.digitalocean.com/v2/", with: "")
@@ -127,5 +136,41 @@ struct ManagedPostgresTests {
         await #expect(throws: ManagedPostgresError.clusterNotFound("other-pg")) {
             try await wrongCluster.provision(plan)
         }
+    }
+
+    @Test("a full copy runs from the trusted source into the cluster, as the owner, after a schema reset")
+    func copiesThroughTheTrustedSource() async throws {
+        let fake = FakeDO()
+        let provisioner = ManagedPostgresProvisioner(
+            execute: { argv, _ in fake.handle(argv) },
+            environment: ["DIGITALOCEAN_TOKEN": "dop_v1_x"])
+        let plan = DatabaseClonePlan(
+            serverApp: "mws-pg", port: "25060", scheme: "postgresql", database: "mwcloud_mwserver",
+            owner: "mwserver", appUser: "mwserver_app",
+            emitted: ["DATABASE_URL"], mode: .full,
+            sourceDatabase: "mwserver", sourceServer: "mwstack-pg-dev", managed: true)
+        let (_, report) = try await provisioner.provision(plan, admin: "jimmy@192.168.0.103")
+
+        let ssh = fake.calls.filter { $0.hasPrefix("ssh") }
+        #expect(ssh.first == "ssh command -v psql")
+        #expect(ssh.contains { $0.contains("DROP SCHEMA IF EXISTS public CASCADE") })
+        #expect(ssh.contains { $0.hasPrefix("ssh sh -c") })
+        #expect(ssh.contains { $0.contains("GRANT USAGE ON SCHEMA public") })
+        #expect(report.contains("schema and data copied from mwserver on mwstack-pg-dev, through jimmy@192.168.0.103"))
+    }
+
+    @Test("without an admin channel the copy is skipped and the plan says created empty")
+    func copyNeedsAdmin() async throws {
+        let fake = FakeDO()
+        let provisioner = ManagedPostgresProvisioner(
+            execute: { argv, _ in fake.handle(argv) },
+            environment: ["DIGITALOCEAN_TOKEN": "dop_v1_x"])
+        let plan = DatabaseClonePlan(
+            serverApp: "mws-pg", port: "25060", scheme: "postgresql", database: "mwcloud_mwserver",
+            owner: "mwserver", appUser: nil, emitted: ["DATABASE_URL"], mode: .full,
+            sourceDatabase: "mwserver", sourceServer: "mwstack-pg-dev", managed: true)
+        let (_, report) = try await provisioner.provision(plan)
+        #expect(report.contains { $0.contains("full copy skipped") && $0.contains("db_admin") })
+        #expect(!fake.calls.contains { $0.hasPrefix("ssh") })
     }
 }
