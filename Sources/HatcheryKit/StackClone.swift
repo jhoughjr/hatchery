@@ -171,12 +171,34 @@ public struct StackCloner: Sendable {
             source: source, target: targetName, environment: environment, mode: databaseMode,
             targetBackend: targetBackend, cluster: cluster)
 
+        // On a platform there is no box network. Siblings meet at the addresses the
+        // platform gives them, and box-local domains cannot be served, so they drop off.
+        let platform = targetBackend == .appPlatform
+        let domains = platform ? PlatformShape.publicDomains(domains) : domains
+        var siblingDomains: [String: [String]] = [:]
+        var siblingNames: [String: String] = [:]
+        if platform {
+            for sibling in source.services {
+                siblingDomains[sibling.name] = PlatformShape.publicDomains(
+                    sibling.domains.map {
+                        Self.rewrite($0, from: source, to: targetName, environment: environment) ?? $0
+                    })
+                siblingNames[sibling.name] =
+                    Self.rewrite(sibling.name, from: source, to: targetName, environment: environment)
+                    ?? "\(targetName)-\(sibling.name)"
+            }
+        }
+        let shape = platform
+            ? PlatformContext(layout: .appPerService, siblingDomains: siblingDomains, siblingNames: siblingNames)
+            : nil
+
         for key in (contract?.required ?? []).sorted() {
             keys.append(
                 classify(
                     key, required: true, secret: secretKeys.contains(key),
                     sourceConfig: sourceConfig, source: source,
-                    targetName: targetName, environment: environment, database: database))
+                    targetName: targetName, environment: environment, database: database,
+                    platform: shape))
         }
 
         // Optional keys ride along only when the source actually sets them. An unset optional
@@ -189,7 +211,8 @@ public struct StackCloner: Sendable {
                 classify(
                     key, required: false, secret: secretKeys.contains(key),
                     sourceConfig: sourceConfig, source: source,
-                    targetName: targetName, environment: environment, database: database))
+                    targetName: targetName, environment: environment, database: database,
+                    platform: shape))
         }
 
         // The clone-side name, through the same substitution the domains and URLs already
@@ -219,7 +242,8 @@ public struct StackCloner: Sendable {
         source: StackSpec,
         targetName: String,
         environment: Environment,
-        database: DatabaseClonePlan?
+        database: DatabaseClonePlan?,
+        platform: PlatformContext? = nil
     ) -> ClonedKey {
         // 1. The stack's keypair, minted as a *pair* by the scaffolder at create. The plan
         // deliberately carries no value here: an earlier version minted a JWKS per service at
@@ -263,6 +287,28 @@ public struct StackCloner: Sendable {
             return ClonedKey(
                 key: key, disposition: .refused("not set on \(source.name) either"),
                 value: nil, secret: secret, required: required)
+        }
+
+        // 3. Values that address the source's box, when the clone is headed for a platform
+        // that has no such network. A sibling becomes its platform address. A box-local
+        // host with no sibling behind it is refused, because no rewrite makes it reachable.
+        if let platform,
+            let outcome = PlatformShape.rewrite(
+                value, source: source, layout: platform.layout,
+                siblingDomains: platform.siblingDomains, siblingNames: platform.siblingNames)
+        {
+            switch outcome {
+            case .sibling(let address):
+                return ClonedKey(
+                    key: key, disposition: .rewritten(from: value, to: address),
+                    value: address, secret: secret, required: required)
+            case .boxLocal(let host):
+                return ClonedKey(
+                    key: key,
+                    disposition: .refused(
+                        "names \(host), a host on the source's box; the platform has no such network"),
+                    value: nil, secret: secret, required: required)
+            }
         }
 
         // 3. Values that name the source stack, its services, or its environment.
@@ -324,4 +370,12 @@ public struct StackCloner: Sendable {
         }
         return out == value ? nil : out
     }
+}
+
+/// What a platform-bound clone needs to rewrite addresses: the layout, and each source
+/// service's clone-side public domains and component name.
+struct PlatformContext: Sendable {
+    let layout: PlatformShape.Layout
+    let siblingDomains: [String: [String]]
+    let siblingNames: [String: String]
 }
