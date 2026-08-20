@@ -58,8 +58,11 @@ public struct ManagedPostgresProvisioner: Sendable {
 
     /// Asserts the plan's database and roles in the cluster the plan names, and returns the
     /// credentials the platform minted, with the cluster's endpoint, plus one line per step.
+    ///
+    /// `admin` is the source box's `db_admin` channel: the trusted source a copy runs from,
+    /// because it can `docker exec` the source's container and reach the cluster over TLS.
     public func provision(
-        _ plan: DatabaseClonePlan
+        _ plan: DatabaseClonePlan, admin: String? = nil
     ) async throws -> (credentials: DatabaseCredentials, report: [String]) {
         guard let token = self.environment["DIGITALOCEAN_TOKEN"], !token.isEmpty else {
             throw ManagedPostgresError.noToken
@@ -109,7 +112,90 @@ public struct ManagedPostgresProvisioner: Sendable {
         let credentials = DatabaseCredentials(
             ownerPassword: ownerPassword, appPassword: appPassword,
             endpoint: DatabaseEndpoint(host: cluster.host, port: String(cluster.port)))
+        try await self.copyContents(
+            of: plan, credentials: credentials, cluster: cluster, admin: admin, report: &report)
         return (credentials, report)
+    }
+
+    /// Fills the new database from the source's, as the mode asks, from the trusted source.
+    ///
+    /// The same pipe the dokku path uses, with the cluster at the far end: the dump leaves
+    /// the source's container on the box and goes straight into psql against the cluster,
+    /// as the clone's owner, so every copied object belongs to the clone's role. The schema
+    /// is reset first so a re-run converges, and the app role's grants are re-asserted
+    /// after, because the reset took them.
+    private func copyContents(
+        of plan: DatabaseClonePlan, credentials: DatabaseCredentials, cluster: Cluster,
+        admin: String?, report: inout [String]
+    ) async throws {
+        guard plan.mode != .none else { return }
+        guard let sourceDatabase = plan.sourceDatabase, let sourceServer = plan.sourceServer
+        else { return }
+        guard let admin else {
+            report.append(
+                "\(plan.mode.rawValue) copy skipped: a copy into the cluster runs from the "
+                    + "source box's admin channel, and the stack has no db_admin; created empty")
+            return
+        }
+        guard DatabaseProvisioner.isPlainName(sourceDatabase),
+            DatabaseProvisioner.isPlainName(sourceServer)
+        else {
+            report.append(
+                "\(plan.mode.rawValue) copy skipped: the source database or server name is "
+                    + "not a plain identifier; created empty")
+            return
+        }
+        let which = try? await self.execute(
+            ["ssh", "-o", "BatchMode=yes", admin, "command", "-v", "psql"], nil)
+        guard which?.status == 0 else {
+            report.append(
+                "\(plan.mode.rawValue) copy skipped: \(admin) has no psql to reach the cluster "
+                    + "with; install postgresql-client there, and allow its address on the "
+                    + "cluster; created empty")
+            return
+        }
+
+        let ownerURL = "postgresql://\(plan.owner):\(credentials.ownerPassword)@\(cluster.host):\(cluster.port)/\(plan.database)?sslmode=require"
+        let adminURL = "postgresql://\(cluster.adminUser):\(cluster.adminPassword)@\(cluster.host):\(cluster.port)/\(plan.database)?sslmode=require"
+        func remote(_ sql: String, as url: String) async throws {
+            let output = try await self.execute(
+                ["ssh", "-o", "BatchMode=yes", admin, "psql", url, "-q", "-v", "ON_ERROR_STOP=1", "-c", sql], nil)
+            guard output.status == 0 else {
+                throw DatabaseProvisionError.statementFailed(sql: sql, message: output.combined)
+            }
+        }
+
+        try await remote("DROP SCHEMA IF EXISTS public CASCADE", as: adminURL)
+        try await remote("CREATE SCHEMA public", as: adminURL)
+        try await remote("ALTER SCHEMA public OWNER TO \"\(plan.owner)\"", as: adminURL)
+
+        let flags = plan.mode == .schema ? "--schema-only " : ""
+        let pipeline =
+            "docker exec \(sourceServer) pg_dump -U postgres --no-owner --no-acl \(flags)"
+            + "-d \(sourceDatabase) | psql -q -v ON_ERROR_STOP=1 '\(ownerURL)'"
+        let copy = try await self.execute(
+            ["ssh", "-o", "BatchMode=yes", admin, "sh", "-c", DatabaseProvisioner.shellQuoted(pipeline)], nil)
+        guard copy.status == 0 else {
+            throw DatabaseProvisionError.statementFailed(
+                sql: "pg_dump \(sourceDatabase) → \(plan.database)",
+                message: DatabaseProvisionError.redacted(copy.combined))
+        }
+
+        if let appUser = plan.appUser {
+            try await remote("GRANT USAGE ON SCHEMA public TO \"\(appUser)\"", as: adminURL)
+            try await remote(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO \"\(appUser)\"",
+                as: adminURL)
+            try await remote(
+                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO \"\(appUser)\"",
+                as: adminURL)
+            try await remote(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"\(plan.owner)\" IN SCHEMA public "
+                    + "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO \"\(appUser)\"",
+                as: adminURL)
+        }
+        let what = plan.mode == .schema ? "schema" : "schema and data"
+        report.append("\(what) copied from \(sourceDatabase) on \(sourceServer), through \(admin)")
     }
 
     // MARK: the cluster

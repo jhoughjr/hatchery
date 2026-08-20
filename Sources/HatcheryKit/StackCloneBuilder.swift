@@ -210,7 +210,8 @@ public struct StackCloneBuilder: Sendable {
                             "database \(databasePlan.database) shared with an earlier service; "
                                 + "credentials reused")
                     } else if databasePlan.managed {
-                        let provisioned = try await managedProvisioner.provision(databasePlan)
+                        let provisioned = try await managedProvisioner.provision(
+                            databasePlan, admin: settings["db_admin"])
                         minted = provisioned.credentials
                         databaseReport = provisioned.report
                         credentials[databasePlan.identity] = minted

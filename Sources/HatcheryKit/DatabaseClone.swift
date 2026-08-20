@@ -181,7 +181,7 @@ public enum DatabaseClonePlanner {
             guard let cluster, !cluster.isEmpty else { return nil }
             return managedPlan(
                 service: kind, sourceConfig: sourceConfig, source: source, target: target,
-                environment: environment, cluster: cluster)
+                environment: environment, cluster: cluster, mode: mode)
         case .aws, .cloudRun: return nil
         }
         guard let contract = EnvContract.contract(for: kind, backend: backend) else { return nil }
@@ -264,11 +264,11 @@ public enum DatabaseClonePlanner {
     ///
     /// The cluster is another server by definition, so role names are kept verbatim, the
     /// same reason a cross-server dokku clone keeps them: MWServer's policies bind roles by
-    /// name. The copy is `.none` for now. A managed cluster is not a container hatchery can
-    /// pipe a dump into, and the trusted-source path is its own slice.
+    /// name. The copy runs from a trusted source, the box's admin channel, which can reach
+    /// both the source's container and the cluster.
     static func managedPlan(
         service kind: ServiceKind, sourceConfig: [String: String], source: StackSpec,
-        target: String, environment: Environment, cluster: String
+        target: String, environment: Environment, cluster: String, mode: DatabaseCloneMode
     ) -> DatabaseClonePlan? {
         guard let contract = EnvContract.contract(for: kind, backend: .appPlatform) else { return nil }
         let needed = contract.required.intersection(plannable)
@@ -296,7 +296,7 @@ public enum DatabaseClonePlanner {
             owner: identifier(sourceOwner),
             appUser: appUser,
             emitted: emitted,
-            mode: .none,
+            mode: mode,
             sourceDatabase: sourceDB,
             sourceServer: url?.host ?? sourceConfig["DATABASE_HOST"],
             managed: true)
