@@ -163,6 +163,10 @@ enum Wire {
         let tofuDir: String?
         /// What each database starts with: full, schema, or none. Absent means full.
         let db: String?
+        /// Where the clone runs, when not where the source runs.
+        let backend: String?
+        /// appPlatform: the managed Postgres cluster the clone's databases go in.
+        let cluster: String?
     }
 
     struct CloneBody: Decodable {
@@ -177,6 +181,10 @@ enum Wire {
         let confirm: String
         /// Run `tofu apply` after a clean plan, so the clone ends running rather than written.
         let apply: Bool?
+        /// Where the clone runs, when not where the source runs.
+        let backend: String?
+        /// appPlatform: the managed Postgres cluster the clone's databases go in.
+        let cluster: String?
         /// What each database starts with: full, schema, or none. Absent means full.
         let db: String?
     }
@@ -218,6 +226,10 @@ enum Wire {
         let warning: String?
         /// What happens to each domain's reachability — the front door is part of the plan.
         let exposure: [ExposureView]
+        /// What the platform bills per month for the create. Empty for a self-hosted clone.
+        let costs: [String]
+        /// Where the clone runs.
+        let backend: String
 
         struct ExposureView: Encodable {
             let domain: String
@@ -797,6 +809,34 @@ public struct HatcheryAPI: Sendable {
         return .ok(manifest, stack)
     }
 
+    /// The destination of a clone and the cluster its databases go in, from the body or the
+    /// source's settings. A platform clone without a cluster has nowhere for its data.
+    private enum Destination {
+        case ok(Backend?, String?)
+        case refused(WebResponse)
+    }
+
+    private func destination(
+        backend: String?, cluster: String?, source: StackSpec
+    ) -> Destination {
+        var target: Backend?
+        if let backend, !backend.isEmpty, backend != "same" {
+            guard let parsed = Backend(rawValue: backend) else {
+                return .refused(.failure(400, "unknown backend '\(backend)'"))
+            }
+            target = parsed
+        }
+        let name = (cluster?.isEmpty == false ? cluster : nil) ?? source.settings?["db_cluster"]
+        if target == .appPlatform, (name ?? "").isEmpty {
+            return .refused(
+                .failure(
+                    400,
+                    "a clone onto appPlatform needs a managed Postgres cluster: name it, or "
+                        + "set db_cluster on the source stack"))
+        }
+        return .ok(target, name)
+    }
+
     private func clonePlan(_ request: WebRequest) async -> WebResponse {
         guard let body = try? JSONDecoder().decode(Wire.ClonePlanBody.self, from: request.body)
         else {
@@ -815,10 +855,19 @@ public struct HatcheryAPI: Sendable {
         guard let databaseMode = DatabaseCloneMode(rawValue: body.db ?? "full") else {
             return .failure(400, "db must be one of: full, schema, none")
         }
+        let targetBackend: Backend?
+        let cluster: String?
+        switch destination(backend: body.backend, cluster: body.cluster, source: stack) {
+        case .refused(let response): return response
+        case .ok(let resolvedBackend, let resolvedCluster):
+            targetBackend = resolvedBackend
+            cluster = resolvedCluster
+        }
         do {
             let planned = try await clonePlanner.plan(
                 stack: stack, into: body.target, environment: environment,
-                manifestPath: manifestPath(), databaseMode: databaseMode)
+                manifestPath: manifestPath(), databaseMode: databaseMode,
+                targetBackend: targetBackend, cluster: cluster)
 
             // The same checks the create would make, made now. Failing them after the
             // create click cost a whole trip through the wizard; a full directory or an
@@ -842,7 +891,7 @@ public struct HatcheryAPI: Sendable {
                 view(
                     of: planned, environment: environment,
                     warning: warnings.isEmpty ? nil : warnings.joined(separator: "\n"),
-                    exposure: planned.exposure))
+                    exposure: planned.exposure, backend: targetBackend ?? stack.backend))
         } catch {
             return .failure(400, "\(error)")
         }
@@ -850,7 +899,7 @@ public struct HatcheryAPI: Sendable {
 
     private func view(
         of planned: PlannedClone, environment: Environment, warning: String? = nil,
-        exposure: [ExposurePlan] = []
+        exposure: [ExposurePlan] = [], backend: Backend
     ) -> Wire.ClonePlanView {
         Wire.ClonePlanView(
             source: planned.plan.source,
@@ -901,7 +950,9 @@ public struct HatcheryAPI: Sendable {
             exposure: exposure.map {
                 Wire.ClonePlanView.ExposureView(
                     domain: $0.domain, action: $0.action, actionable: $0.actionable)
-            })
+            },
+            costs: planned.costs.map(\.text),
+            backend: backend.rawValue)
     }
 
     /// The browser's `--create`: bootstraps the stack, scaffolds each service, and layers the
@@ -936,11 +987,20 @@ public struct HatcheryAPI: Sendable {
         guard let databaseMode = DatabaseCloneMode(rawValue: body.db ?? "full") else {
             return .failure(400, "db must be one of: full, schema, none")
         }
+        let targetBackend: Backend?
+        let cluster: String?
+        switch destination(backend: body.backend, cluster: body.cluster, source: sourceStack) {
+        case .refused(let response): return response
+        case .ok(let resolvedBackend, let resolvedCluster):
+            targetBackend = resolvedBackend
+            cluster = resolvedCluster
+        }
         let planned: PlannedClone
         do {
             planned = try await clonePlanner.plan(
                 stack: sourceStack, into: body.target, environment: environment,
-                manifestPath: manifestPath(), databaseMode: databaseMode)
+                manifestPath: manifestPath(), databaseMode: databaseMode,
+                targetBackend: targetBackend, cluster: cluster)
         } catch {
             return .failure(400, "\(error)")
         }
@@ -958,7 +1018,7 @@ public struct HatcheryAPI: Sendable {
                 options: StackCloneBuilder.Options(
                     target: body.target, tofuDir: body.tofuDir, host: body.host,
                     environment: environment, port: body.port, network: body.network,
-                    gated: body.gated, apply: body.apply ?? false))
+                    gated: body.gated, apply: body.apply ?? false, backend: targetBackend))
 
             let summaries = outcome.services.map { service in
                 Wire.CloneCreated.ClonedSummary(
@@ -1139,11 +1199,20 @@ public struct HatcheryAPI: Sendable {
 
         // Planned before the job starts, so a plan that cannot be made is a refusal now
         // rather than a dead transcript.
+        let targetBackend: Backend?
+        let cluster: String?
+        switch destination(backend: body.backend, cluster: body.cluster, source: sourceStack) {
+        case .refused(let response): return response
+        case .ok(let resolvedBackend, let resolvedCluster):
+            targetBackend = resolvedBackend
+            cluster = resolvedCluster
+        }
         let planned: PlannedClone
         do {
             planned = try await clonePlanner.plan(
                 stack: sourceStack, into: body.target, environment: environment,
-                manifestPath: manifestPath(), databaseMode: databaseMode)
+                manifestPath: manifestPath(), databaseMode: databaseMode,
+                targetBackend: targetBackend, cluster: cluster)
         } catch {
             return .failure(400, "\(error)")
         }
@@ -1165,7 +1234,7 @@ public struct HatcheryAPI: Sendable {
                     options: StackCloneBuilder.Options(
                         target: body.target, tofuDir: body.tofuDir, host: body.host,
                         environment: environment, port: body.port, network: body.network,
-                        gated: body.gated, apply: false),
+                        gated: body.gated, apply: false, backend: targetBackend),
                     onProgress: { line in store.append(id, line) })
 
                 let missing = outcome.services.flatMap { service in
