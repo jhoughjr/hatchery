@@ -37,3 +37,16 @@ DockerHub frozen pending cutover). hatchery's job is to drive what already exist
 3. ~~Cost lines on the plan screen for platform-billed backends.~~ Shipped: `PlatformCost`, `PlannedClone.costs`, printed by `stack clone`. The web plan view still has to show them.
 4. ~~Digest-drift via the App Platform + DOCR APIs.~~ Shipped: `AppPlatformDrift`, reached through `ImageDrift.check` for an App Platform stack. DOCR through the DO API, Docker Hub through its tag API, other registries said to be not checkable.
 5. ~~Copies through the trusted-source psql path~~ Shipped: a managed copy runs from the source box's `db_admin` channel, `docker exec … pg_dump --no-owner --no-acl | psql <cluster URL as the owner>`, schema reset before and grants after. The trusted source needs `postgresql-client` and its address allowed on the cluster, and the report says so when either is missing. Still queued: `cloudflare-api` custom domains.
+
+## The third verse: Cloud Run
+
+Started 2026-08-20, the same five slices in the same order, with Cloud SQL for the
+managed database and Artifact Registry for digests. gcloud is the channel, because
+Google signs its API calls in ways curl alone cannot, and a bearer token from
+`gcloud auth print-access-token` is all the REST calls need.
+
+1. ~~Platform checks as `box init --backend cloudRun [--project P] [--cluster INSTANCE]`.~~ Shipped.
+2. Cloud SQL database provider: create and converge database and users through the admin API, URLs into the clone.
+3. Cost lines for Cloud Run's per-request billing, said as a floor.
+4. Digest drift through the Cloud Run service's image digest against Artifact Registry.
+5. Copies through the trusted-source path, with the Cloud SQL Auth Proxy or an authorized network.

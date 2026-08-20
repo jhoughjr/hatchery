@@ -176,6 +176,61 @@ public struct BoxInitializer: Sendable {
         ]
     }
 
+    /// The Cloud Run recipe. Like App Platform, nothing to prepare, so every assertion is a
+    /// check-only platform fact, asked through gcloud on this machine: the CLI is present and
+    /// signed in, a project is set, the Run and Artifact Registry APIs are enabled, and a
+    /// Cloud SQL Postgres instance is visible. `project` overrides the CLI's configured
+    /// project, and `instance` names the Cloud SQL instance clones may create databases in.
+    public static func cloudRunAssertions(
+        project: String? = nil, instance: String? = nil
+    ) -> [BoxAssertion] {
+        let scope = project.map { " --project \($0)" } ?? ""
+        let instanceCheck: String
+        let instanceName: String
+        let instanceRemedy: String
+        if let instance, !instance.isEmpty {
+            instanceCheck = "gcloud sql instances describe '\(instance)'\(scope) --format='value(databaseVersion)' | grep -q POSTGRES"
+            instanceName = "Cloud SQL Postgres instance '\(instance)' is visible"
+            instanceRemedy = "no Postgres instance named '\(instance)' in the project. "
+                + "Check the name in the console, or drop --cluster to accept any"
+        } else {
+            instanceCheck = "gcloud sql instances list\(scope) --filter='databaseVersion:POSTGRES' --format='value(name)' | grep -q ."
+            instanceName = "a Cloud SQL Postgres instance is visible"
+            instanceRemedy = "clones need an existing instance to create databases in. "
+                + "Create one, or pass --cluster to name the one clones may use"
+        }
+        return [
+            BoxAssertion(
+                name: "gcloud is present",
+                check: "command -v gcloud >/dev/null",
+                remedy: "the platform checks speak to Google Cloud through gcloud: "
+                    + "brew install --cask google-cloud-sdk"),
+            BoxAssertion(
+                name: "gcloud is signed in",
+                check: "gcloud auth print-access-token >/dev/null 2>&1",
+                remedy: "gcloud auth login, then gcloud auth application-default login for tofu"),
+            BoxAssertion(
+                name: "a project is set",
+                check: project.map { "gcloud projects describe '\($0)' >/dev/null 2>&1" }
+                    ?? "[ -n \"$(gcloud config get-value project 2>/dev/null)\" ]",
+                remedy: project.map { "the token cannot see project '\($0)'" }
+                    ?? "gcloud config set project <id>, or pass --project"),
+            BoxAssertion(
+                name: "the Cloud Run API is enabled",
+                check: "gcloud services list --enabled\(scope) --filter='config.name=run.googleapis.com' --format='value(config.name)' | grep -q run",
+                remedy: "gcloud services enable run.googleapis.com\(scope)"),
+            BoxAssertion(
+                name: "the Artifact Registry API is enabled",
+                check: "gcloud services list --enabled\(scope) --filter='config.name=artifactregistry.googleapis.com' --format='value(config.name)' | grep -q artifactregistry",
+                remedy: "gcloud services enable artifactregistry.googleapis.com\(scope)"),
+            BoxAssertion(
+                name: "the Cloud SQL Admin API is enabled",
+                check: "gcloud services list --enabled\(scope) --filter='config.name=sqladmin.googleapis.com' --format='value(config.name)' | grep -q sqladmin",
+                remedy: "gcloud services enable sqladmin.googleapis.com\(scope)"),
+            BoxAssertion(name: instanceName, check: instanceCheck, remedy: instanceRemedy),
+        ]
+    }
+
     /// Runs every assertion against the box, in order, narrating as it goes. A failed
     /// assertion stops the run: later steps depend on earlier ones, and continuing would
     /// bury the one line that matters under its consequences.
