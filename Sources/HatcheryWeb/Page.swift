@@ -996,7 +996,8 @@ enum Page {
           const ok = await step('Scan a box', 'Step 1 of 3 — where',
               field('sb-target', 'Target', suggested,
                     'user@host or a bare address for a dokku box. appPlatform reads the '
-                    + 'platform through DIGITALOCEAN_TOKEN. Nothing is written.'),
+                    + "platform through DIGITALOCEAN_TOKEN, cloudRun reads gcloud's project. "
+                    + 'Nothing is written.'),
             'scan');
           if (!ok) { log('cancelled'); return; }
           const target = $('sb-target').value.trim() || null;
@@ -1016,7 +1017,8 @@ enum Page {
             return '<div class="' + (cls[a.claim] || '') + '">' + escapeHTML(line) + '</div>';
           }).join('');
           const dbLine = !inv.databasesListable
-            ? '<div class="hint">databases not listable as the dokku user</div>'
+            ? '<div class="hint">' + (inv.provider === 'dokku'
+                ? 'databases not listable as the dokku user' : 'databases not tracked by the platform') + '</div>'
             : '<div class="hint">' + inv.databases.length + ' database(s)</div>';
           const candidates = inv.apps.filter(a => a.claim !== 'declared').map(a => a.name);
           const stacks = (lastStacks || [])

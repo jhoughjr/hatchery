@@ -87,6 +87,21 @@ public struct Scanner: Sendable {
 
     /// Which provider a target is, by asking it.
     public func identify(_ target: String?) async throws -> (Backend, String) {
+        if target == Backend.cloudRun.rawValue {
+            let which = try? await self.execute(["sh", "-c", "command -v gcloud"], nil)
+            guard which?.status == 0 else {
+                throw ScanError.noProviderAnswered(
+                    target: target!, tried: ["Cloud Run: gcloud is not on this machine"])
+            }
+            let project = try? await self.execute(
+                ["gcloud", "config", "get-value", "project"], nil)
+            let name = project?.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard project?.status == 0, !name.isEmpty, name != "(unset)" else {
+                throw ScanError.noProviderAnswered(
+                    target: target!, tried: ["Cloud Run: gcloud has no project set"])
+            }
+            return (.cloudRun, name)
+        }
         if target == nil || target == Backend.appPlatform.rawValue {
             guard let token = self.environment["DIGITALOCEAN_TOKEN"], !token.isEmpty else {
                 throw ScanError.noProviderAnswered(
@@ -110,7 +125,8 @@ public struct Scanner: Sendable {
         switch provider {
         case .dokku: return try await self.scanDokku(box: address)
         case .appPlatform: return try await self.scanAppPlatform()
-        case .aws, .cloudRun:
+        case .cloudRun: return try await self.scanCloudRun(project: address)
+        case .aws:
             throw ScanError.providerRefused("scan has no reader for \(provider.rawValue) yet")
         }
     }
@@ -194,6 +210,45 @@ public struct Scanner: Sendable {
         text.split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.hasPrefix("=====>") && !$0.hasPrefix("NAME") }
+    }
+
+    // MARK: Cloud Run
+
+    private func scanCloudRun(project: String) async throws -> Inventory {
+        let output: CommandOutput
+        do {
+            output = try await self.execute(
+                ["gcloud", "run", "services", "list", "--project", project, "--format", "json"], nil)
+        } catch {
+            throw ScanError.providerRefused("\(error)")
+        }
+        guard output.status == 0 else { throw ScanError.providerRefused(output.combined) }
+        return try Self.cloudRunInventory(from: Data(output.standardOutput.utf8), project: project)
+    }
+
+    /// The inventory a `gcloud run services list --format json` body describes. Cloud Run
+    /// keeps no database attachments of its own, so databases are unknown rather than none.
+    static func cloudRunInventory(from body: Data, project: String) throws -> Inventory {
+        guard let services = try JSONSerialization.jsonObject(with: body) as? [[String: Any]] else {
+            throw ScanError.providerRefused("services list was not a JSON array")
+        }
+        let apps = services.compactMap { service -> FoundApp? in
+            guard let metadata = service["metadata"] as? [String: Any],
+                let name = metadata["name"] as? String
+            else { return nil }
+            let spec = service["spec"] as? [String: Any]
+            let template = spec?["template"] as? [String: Any]
+            let templateSpec = template?["spec"] as? [String: Any]
+            let containers = templateSpec?["containers"] as? [[String: Any]] ?? []
+            let image = containers.first?["image"] as? String
+            let status = service["status"] as? [String: Any]
+            let conditions = status?["conditions"] as? [[String: Any]] ?? []
+            let ready = conditions.contains {
+                $0["type"] as? String == "Ready" && $0["status"] as? String == "True"
+            }
+            return FoundApp(name: name, image: image, running: ready)
+        }
+        return Inventory(provider: .cloudRun, target: project, apps: apps, databases: nil)
     }
 
     // MARK: App Platform
