@@ -15,15 +15,19 @@ public struct PlannedClone: Sendable {
     /// What will happen to each domain's reachability — the front door is part of the
     /// clone, and a domain that will resolve nowhere says so here, not after health polls.
     public let exposure: [ExposurePlan]
+    /// What the platform will bill per month for what the create makes. Empty for a
+    /// self-hosted backend, which bills nothing per app.
+    public let costs: [CostLine]
 
     public init(
         plan: ClonePlan, origins: [String: String], warnings: [String] = [],
-        exposure: [ExposurePlan] = []
+        exposure: [ExposurePlan] = [], costs: [CostLine] = []
     ) {
         self.plan = plan
         self.origins = origins
         self.warnings = warnings
         self.exposure = exposure
+        self.costs = costs
     }
 }
 
@@ -155,12 +159,18 @@ public struct StackClonePlanner: Sendable {
         let exposure = await Exposure.provider(for: source)
             .plan(domains: services.flatMap(\.domains), stack: source)
 
+        // Money, before the create: a platform bills per app the moment it exists.
+        let costs = PlatformCost.lines(
+            backend: targetBackend ?? source.backend, services: services.count,
+            managedDatabases: Set(services.compactMap { $0.database?.identity }).count,
+            cluster: cluster)
+
         return PlannedClone(
             plan: ClonePlan(
                 source: source.name, target: target, environment: environment,
                 services: services),
             origins: origins,
             warnings: warnings,
-            exposure: exposure)
+            exposure: exposure, costs: costs)
     }
 }

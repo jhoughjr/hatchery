@@ -34,6 +34,6 @@ DockerHub frozen pending cutover). hatchery's job is to drive what already exist
 1. ~~Platform checks as `box init --backend appPlatform` (pure engine reuse, no spend).~~ Shipped.
 2. ~~DO managed-database provider: create/converge db + roles via API; URLs into the clone;
    refusal messages name the missing cluster/token.~~ Shipped: `stack clone --backend appPlatform --cluster NAME`, `ManagedPostgresProvisioner`. Copies stay in slice 5. The clone's addresses are platform-shaped too (`PlatformShape`): a sibling becomes its public domain (or its component on the private network, when the provider authors one app), a box-local host with no sibling behind it is refused by name, and box-local domains drop off.
-3. Cost lines on the plan screen for platform-billed backends.
+3. ~~Cost lines on the plan screen for platform-billed backends.~~ Shipped: `PlatformCost`, `PlannedClone.costs`, printed by `stack clone`. The web plan view still has to show them.
 4. Digest-drift via the App Platform + DOCR APIs.
 5. Copies through the trusted-source psql path; then `cloudflare-api` custom domains.
