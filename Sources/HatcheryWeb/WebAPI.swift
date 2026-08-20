@@ -1164,7 +1164,8 @@ public struct HatcheryAPI: Sendable {
                 options: StackCloneBuilder.Options(
                     target: body.target, tofuDir: body.tofuDir, host: body.host,
                     environment: environment, port: body.port, network: body.network,
-                    gated: body.gated, apply: body.apply ?? false, backend: targetBackend))
+                    gated: body.gated, apply: body.apply ?? false, backend: targetBackend,
+                    cluster: cluster))
 
             let summaries = outcome.services.map { service in
                 Wire.CloneCreated.ClonedSummary(
@@ -1380,7 +1381,8 @@ public struct HatcheryAPI: Sendable {
                     options: StackCloneBuilder.Options(
                         target: body.target, tofuDir: body.tofuDir, host: body.host,
                         environment: environment, port: body.port, network: body.network,
-                        gated: body.gated, apply: false, backend: targetBackend),
+                        gated: body.gated, apply: false, backend: targetBackend,
+                        cluster: cluster),
                     onProgress: { line in store.append(id, line) })
 
                 let missing = outcome.services.flatMap { service in

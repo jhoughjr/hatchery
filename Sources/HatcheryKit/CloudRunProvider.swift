@@ -69,6 +69,27 @@ public struct CloudRunProvider: ServiceProvider {
         let identifier = Self.identifier(service.name)
         let healthPath = service.healthPath ?? service.kind.defaultHealthPath
 
+        // A stack with a Cloud SQL instance mounts it at /cloudsql, which is how a Cloud Run
+        // service reaches Cloud SQL without a public address: the config's DATABASE_URL says
+        // host=/cloudsql/<connection>, and this volume is what makes that path exist.
+        let cluster = request.stack.settings?["db_cluster"] ?? ""
+        let mount = cluster.isEmpty ? "" : """
+
+                  volume_mounts {
+                    name       = "cloudsql"
+                    mount_path = "/cloudsql"
+                  }
+            """
+        let volume = cluster.isEmpty ? "" : """
+
+                volumes {
+                  name = "cloudsql"
+                  cloud_sql_instance {
+                    instances = ["${var.gcp_project}:${var.gcp_region}:\(cluster)"]
+                  }
+                }
+            """
+
         let body = """
             # \(service.kind.rawValue) service '\(service.name)', authored by hatchery.
             resource "google_cloud_run_v2_service" "\(identifier)" {
@@ -98,7 +119,7 @@ public struct CloudRunProvider: ServiceProvider {
                       cpu    = var.\(identifier)_cpu
                       memory = var.\(identifier)_memory
                     }
-                  }
+                  }\(mount)
 
                   # A startup probe rather than a liveness probe: a service that is slow to boot
                   # should be given time, not restarted in a loop.
@@ -117,7 +138,7 @@ public struct CloudRunProvider: ServiceProvider {
                 scaling {
                   min_instance_count = var.\(identifier)_min_instances
                   max_instance_count = var.\(identifier)_max_instances
-                }
+                }\(volume)
               }
 
               labels = {
