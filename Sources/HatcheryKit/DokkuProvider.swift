@@ -234,7 +234,7 @@ public struct DokkuProvider: ServiceProvider {
 
     /// A terraform identifier for a service name. Dokku app names allow characters that a
     /// resource label does not, so they are folded rather than passed through.
-    static func identifier(_ name: String) -> String {
+    public static func identifier(_ name: String) -> String {
         let folded = name.map { character -> Character in
             character.isLetter || character.isNumber || character == "_" ? character : "_"
         }
