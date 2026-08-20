@@ -110,11 +110,29 @@ jobs:
           # asset — verified from the outside, the same way a download would find it. The
           # first version trusted the POST and printed success over a draft nobody could
           # reach by tag.
-          curl -sf -H "$auth" "$api/releases/tags/rolling" | python3 -c '
+          #
+          # GitHub creates the tag for a new release after the POST returns, and until it
+          # lands the release is a draft and the by-tag route answers 404. The second
+          # version asked once, right after the upload, and lost that race. So: ask by id,
+          # which sees drafts, wait for the publish, and nudge it with a PATCH if it stays a
+          # draft past the first few tries.
+          verified=
+          for attempt in $(seq 1 12); do
+            if curl -sf -H "$auth" "$api/releases/$rid" | python3 -c '
           import sys, json
           release = json.load(sys.stdin)
           assert not release["draft"], "rolling release is a draft"
           names = [a["name"] for a in release["assets"]]
           assert "hatchery-linux-arm64" in names, f"asset missing, found {names}"
-          ' || { echo "::error::rolling release did not verify — draft, missing, or no asset"; exit 1; }
+          '; then verified=1; break; fi
+            if [ "$attempt" -eq 4 ]; then
+              curl -sf -X PATCH -H "$auth" "$api/releases/$rid" -d '{"draft":false}' >/dev/null || true
+            fi
+            echo "rolling release not published yet (try $attempt of 12), waiting"
+            sleep 5
+          done
+          [ -n "$verified" ] || { echo "::error::rolling release did not verify — draft, missing, or no asset"; exit 1; }
+          # And the route a download uses must answer too.
+          curl -sf -o /dev/null -H "$auth" "$api/releases/tags/rolling" \
+            || { echo "::error::rolling release is published but the tag route does not answer"; exit 1; }
           echo "published and verified hatchery-linux-arm64 as the rolling release for ${GITHUB_SHA}"
