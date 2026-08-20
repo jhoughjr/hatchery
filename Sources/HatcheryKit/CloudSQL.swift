@@ -101,19 +101,105 @@ public struct CloudSQLProvisioner: Sendable {
             "ownership and grants are pending: run as the postgres user of \(instance.name), "
                 + "for example through gcloud sql connect \(instance.name) --user=postgres:")
         statements.forEach { report.append("  \($0);") }
-        if plan.mode != .none {
-            report.append(
-                "\(plan.mode.rawValue) copy skipped: a copy into Cloud SQL needs the Auth Proxy "
-                    + "or an authorized network on the trusted source; created empty")
-        }
-
         let endpoint = instance.address.map { DatabaseEndpoint(host: $0, port: "5432") }
             ?? DatabaseEndpoint(host: "/cloudsql/\(instance.connectionName)", port: "5432")
-        return (
-            DatabaseCredentials(
-                ownerPassword: ownerPassword, appPassword: appPassword, endpoint: endpoint),
-            report
-        )
+        let credentials = DatabaseCredentials(
+            ownerPassword: ownerPassword, appPassword: appPassword, endpoint: endpoint)
+        try await self.copyContents(
+            of: plan, credentials: credentials, instance: instance, admin: admin, report: &report)
+        return (credentials, report)
+    }
+
+    /// Fills the new database from the source's, as the mode asks, from the trusted source.
+    ///
+    /// Cloud SQL grants every user it creates the cloudsqlsuperuser role, so the clone's
+    /// owner can reset its own schema and receive the dump without an admin credential.
+    /// What it needs is a path: the trusted source must be an authorized network on the
+    /// instance, or run the Auth Proxy, and the report says so when psql cannot connect.
+    private func copyContents(
+        of plan: DatabaseClonePlan, credentials: DatabaseCredentials, instance: Instance,
+        admin: String?, report: inout [String]
+    ) async throws {
+        guard plan.mode != .none else { return }
+        guard let sourceDatabase = plan.sourceDatabase, let sourceServer = plan.sourceServer
+        else { return }
+        guard let admin else {
+            report.append(
+                "\(plan.mode.rawValue) copy skipped: a copy into Cloud SQL runs from the "
+                    + "source box's admin channel, and the stack has no db_admin; created empty")
+            return
+        }
+        guard let address = instance.address else {
+            report.append(
+                "\(plan.mode.rawValue) copy skipped: \(instance.name) has no public address, so "
+                    + "the trusted source would need the Auth Proxy; created empty")
+            return
+        }
+        guard DatabaseProvisioner.isPlainName(sourceDatabase),
+            DatabaseProvisioner.isPlainName(sourceServer)
+        else {
+            report.append(
+                "\(plan.mode.rawValue) copy skipped: the source database or server name is "
+                    + "not a plain identifier; created empty")
+            return
+        }
+        let ownerURL = "postgresql://\(plan.owner):\(credentials.ownerPassword)@\(address):5432/\(plan.database)?sslmode=require"
+        func remote(_ sql: String) async throws -> CommandOutput {
+            try await self.execute(
+                ["ssh", "-o", "BatchMode=yes", admin, "psql", ownerURL, "-q", "-v", "ON_ERROR_STOP=1", "-c", sql], nil)
+        }
+
+        let which = try? await self.execute(
+            ["ssh", "-o", "BatchMode=yes", admin, "command", "-v", "psql"], nil)
+        guard which?.status == 0 else {
+            report.append(
+                "\(plan.mode.rawValue) copy skipped: \(admin) has no psql to reach the instance "
+                    + "with; install postgresql-client there; created empty")
+            return
+        }
+        let reach = try await remote("SELECT 1")
+        guard reach.status == 0 else {
+            report.append(
+                "\(plan.mode.rawValue) copy skipped: \(admin) cannot reach \(instance.name) at "
+                    + "\(address). Authorize its address on the instance, gcloud sql instances "
+                    + "patch \(instance.name) --authorized-networks=<its ip>/32, or run the Auth "
+                    + "Proxy there; created empty")
+            return
+        }
+
+        for sql in ["DROP SCHEMA IF EXISTS public CASCADE", "CREATE SCHEMA public"] {
+            let output = try await remote(sql)
+            guard output.status == 0 else {
+                throw DatabaseProvisionError.statementFailed(sql: sql, message: output.combined)
+            }
+        }
+        let flags = plan.mode == .schema ? "--schema-only " : ""
+        let pipeline =
+            "docker exec \(sourceServer) pg_dump -U postgres --no-owner --no-acl \(flags)"
+            + "-d \(sourceDatabase) | psql -q -v ON_ERROR_STOP=1 '\(ownerURL)'"
+        let copy = try await self.execute(
+            ["ssh", "-o", "BatchMode=yes", admin, "sh", "-c", DatabaseProvisioner.shellQuoted(pipeline)], nil)
+        guard copy.status == 0 else {
+            throw DatabaseProvisionError.statementFailed(
+                sql: "pg_dump \(sourceDatabase) → \(plan.database)",
+                message: DatabaseProvisionError.redacted(copy.combined))
+        }
+        if let appUser = plan.appUser {
+            for sql in [
+                "GRANT USAGE ON SCHEMA public TO \"\(appUser)\"",
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO \"\(appUser)\"",
+                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO \"\(appUser)\"",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"\(plan.owner)\" IN SCHEMA public "
+                    + "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO \"\(appUser)\"",
+            ] {
+                let output = try await remote(sql)
+                guard output.status == 0 else {
+                    throw DatabaseProvisionError.statementFailed(sql: sql, message: output.combined)
+                }
+            }
+        }
+        let what = plan.mode == .schema ? "schema" : "schema and data"
+        report.append("\(what) copied from \(sourceDatabase) on \(sourceServer), through \(admin)")
     }
 
     func instance(named name: String) async throws -> Instance {
