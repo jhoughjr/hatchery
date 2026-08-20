@@ -49,12 +49,17 @@ public struct DatabaseClonePlan: Sendable, Equatable {
     /// The server the source's database lives on — pre-rewrite, so a cross-environment
     /// clone knows its copy would have to cross servers.
     public let sourceServer: String?
+    /// A managed cluster rather than a postgres app on a box. `serverApp` is then the
+    /// cluster's name as the operator knows it, and the host and port the URLs need come
+    /// back from provisioning, because only the platform knows them.
+    public let managed: Bool
 
     public init(
         serverApp: String, port: String, scheme: String, database: String, owner: String,
         appUser: String?, emitted: Set<String>, mode: DatabaseCloneMode = .full,
-        sourceDatabase: String? = nil, sourceServer: String? = nil
+        sourceDatabase: String? = nil, sourceServer: String? = nil, managed: Bool = false
     ) {
+        self.managed = managed
         self.serverApp = serverApp
         self.port = port
         self.scheme = scheme
@@ -73,7 +78,9 @@ public struct DatabaseClonePlan: Sendable, Equatable {
 
     /// What one sentence in a plan display should say this will do.
     public var summary: String {
-        "database \(database) on \(serverApp), minted credentials, \(mode.carrying)"
+        managed
+            ? "database \(database) in managed cluster \(serverApp), minted credentials, \(mode.carrying)"
+            : "database \(database) on \(serverApp), minted credentials, \(mode.carrying)"
     }
 
     /// Whether the copy stays inside one server. A same-server copy pipes inside the
@@ -85,20 +92,24 @@ public struct DatabaseClonePlan: Sendable, Equatable {
     /// The config values this database resolves, once its credentials exist.
     public func values(_ credentials: DatabaseCredentials) -> [String: String] {
         var out: [String: String] = [:]
-        let base = "\(scheme)://\(owner):\(credentials.ownerPassword)@\(serverApp):\(port)/\(database)"
+        // A managed cluster answers with its own host and port, and insists on TLS.
+        let host = credentials.endpoint?.host ?? serverApp
+        let port = credentials.endpoint?.port ?? self.port
+        let query = managed ? "?sslmode=require" : ""
+        let base = "\(scheme)://\(owner):\(credentials.ownerPassword)@\(host):\(port)/\(database)\(query)"
         if emitted.contains("DATABASE_URL") { out["DATABASE_URL"] = base }
         if emitted.contains("DATABASE_OWNER_URL") { out["DATABASE_OWNER_URL"] = base }
         if let appUser, let appPassword = credentials.appPassword {
             if emitted.contains("DATABASE_APP_URL") {
                 out["DATABASE_APP_URL"] =
-                    "\(scheme)://\(appUser):\(appPassword)@\(serverApp):\(port)/\(database)"
+                    "\(scheme)://\(appUser):\(appPassword)@\(host):\(port)/\(database)\(query)"
             }
             if emitted.contains("DATABASE_APP_USER") { out["DATABASE_APP_USER"] = appUser }
             if emitted.contains("DATABASE_APP_PASSWORD") {
                 out["DATABASE_APP_PASSWORD"] = appPassword
             }
         }
-        if emitted.contains("DATABASE_HOST") { out["DATABASE_HOST"] = serverApp }
+        if emitted.contains("DATABASE_HOST") { out["DATABASE_HOST"] = host }
         if emitted.contains("DATABASE_PORT") { out["DATABASE_PORT"] = port }
         if emitted.contains("DATABASE_USER") { out["DATABASE_USER"] = owner }
         if emitted.contains("DATABASE_PASSWORD") { out["DATABASE_PASSWORD"] = credentials.ownerPassword }
@@ -111,10 +122,24 @@ public struct DatabaseClonePlan: Sendable, Equatable {
 public struct DatabaseCredentials: Sendable, Equatable {
     public let ownerPassword: String
     public let appPassword: String?
+    /// Where the database answers, when provisioning learned that rather than the plan
+    /// knowing it: a managed cluster's host and port.
+    public let endpoint: DatabaseEndpoint?
 
-    public init(ownerPassword: String, appPassword: String?) {
+    public init(ownerPassword: String, appPassword: String?, endpoint: DatabaseEndpoint? = nil) {
         self.ownerPassword = ownerPassword
         self.appPassword = appPassword
+        self.endpoint = endpoint
+    }
+}
+
+public struct DatabaseEndpoint: Sendable, Equatable {
+    public let host: String
+    public let port: String
+
+    public init(host: String, port: String) {
+        self.host = host
+        self.port = port
     }
 }
 
@@ -134,6 +159,10 @@ public enum DatabaseClonePlanner {
     /// database is managed elsewhere, a contract that never asks for one — not every stack
     /// has a database, and the contract already says which do — or a server address that is
     /// not a dokku app hatchery can reach (an RDS hostname has dots; `dokku enter` does not).
+    ///
+    /// `targetBackend` is where the clone will run when that differs from the source. An
+    /// App Platform clone gets its database in the managed cluster `cluster` names, and the
+    /// plan is nil without a cluster name, because there is nowhere else for it to go.
     public static func plan(
         service kind: ServiceKind,
         backend: Backend,
@@ -141,9 +170,20 @@ public enum DatabaseClonePlanner {
         source: StackSpec,
         target: String,
         environment: Environment,
-        mode: DatabaseCloneMode = .full
+        mode: DatabaseCloneMode = .full,
+        targetBackend: Backend? = nil,
+        cluster: String? = nil
     ) -> DatabaseClonePlan? {
-        guard backend == .dokku else { return nil }
+        let destination = targetBackend ?? backend
+        switch destination {
+        case .dokku: break
+        case .appPlatform:
+            guard let cluster, !cluster.isEmpty else { return nil }
+            return managedPlan(
+                service: kind, sourceConfig: sourceConfig, source: source, target: target,
+                environment: environment, cluster: cluster)
+        case .aws, .cloudRun: return nil
+        }
         guard let contract = EnvContract.contract(for: kind, backend: backend) else { return nil }
         let needed = contract.required.intersection(plannable)
         guard !needed.isEmpty else { return nil }
@@ -218,6 +258,48 @@ public enum DatabaseClonePlanner {
             mode: mode,
             sourceDatabase: sourceDB,
             sourceServer: host)
+    }
+
+    /// The plan for a database in a managed cluster.
+    ///
+    /// The cluster is another server by definition, so role names are kept verbatim, the
+    /// same reason a cross-server dokku clone keeps them: MWServer's policies bind roles by
+    /// name. The copy is `.none` for now. A managed cluster is not a container hatchery can
+    /// pipe a dump into, and the trusted-source path is its own slice.
+    static func managedPlan(
+        service kind: ServiceKind, sourceConfig: [String: String], source: StackSpec,
+        target: String, environment: Environment, cluster: String
+    ) -> DatabaseClonePlan? {
+        guard let contract = EnvContract.contract(for: kind, backend: .appPlatform) else { return nil }
+        let needed = contract.required.intersection(plannable)
+        guard !needed.isEmpty else { return nil }
+
+        let url = Self.components(of: sourceConfig["DATABASE_URL"] ?? "")
+        let sourceDB = url?.database ?? sourceConfig["DATABASE_DB"] ?? ""
+        let sourceOwner = url?.user ?? sourceConfig["DATABASE_USER"] ?? ""
+        guard !sourceDB.isEmpty, !sourceOwner.isEmpty else { return nil }
+        let appComponents = Self.components(of: sourceConfig["DATABASE_APP_URL"] ?? "")
+        let sourceApp = appComponents?.user ?? sourceConfig["DATABASE_APP_USER"] ?? ""
+
+        // The platform contract retired the discrete keys, so only the URLs travel.
+        var emitted = needed
+        if !(sourceConfig["DATABASE_APP_URL"] ?? "").isEmpty { emitted.insert("DATABASE_APP_URL") }
+        if !(sourceConfig["DATABASE_OWNER_URL"] ?? "").isEmpty { emitted.insert("DATABASE_OWNER_URL") }
+        let appUser: String? = sourceApp.isEmpty ? nil : identifier(sourceApp)
+        if appUser == nil { emitted.remove("DATABASE_APP_URL") }
+
+        return DatabaseClonePlan(
+            serverApp: cluster,
+            port: "25060",
+            scheme: url?.scheme ?? "postgresql",
+            database: derived(sourceDB, source: source, target: target, environment: environment),
+            owner: identifier(sourceOwner),
+            appUser: appUser,
+            emitted: emitted,
+            mode: .none,
+            sourceDatabase: sourceDB,
+            sourceServer: url?.host ?? sourceConfig["DATABASE_HOST"],
+            managed: true)
     }
 
     /// A postgres name for the clone's copy of a source-side name.

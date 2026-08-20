@@ -43,6 +43,12 @@ extension Stack {
         @Option(name: .long, help: "Tofu directory for the clone. Required with --create.")
         var tofuDir: String?
 
+        @Option(name: .long, help: "Backend for the clone. Defaults to the source's. appPlatform needs --cluster.")
+        var backend: String?
+
+        @Option(name: .long, help: "appPlatform: the managed Postgres cluster the clone's databases are created in. Defaults to the source's db_cluster setting.")
+        var cluster: String?
+
         @Option(name: .long, help: "Host for the clone. Defaults to the source's.")
         var host: String?
 
@@ -102,7 +108,24 @@ extension Stack {
                     "'\(target)' already exists in \(path); clone to a name that does not")
             }
 
-            print("\(source) → \(target)  [\(spec.backend.rawValue) · \(env.rawValue)]")
+            let destination: Backend?
+            if let backend {
+                guard let parsedBackend = Backend(rawValue: backend) else {
+                    throw ValidationError("unknown backend '\(backend)'")
+                }
+                destination = parsedBackend
+            } else {
+                destination = nil
+            }
+            let clusterName = cluster ?? spec.settings?["db_cluster"]
+            if destination == .appPlatform, (clusterName ?? "").isEmpty {
+                throw ValidationError(
+                    "a clone onto appPlatform needs a managed Postgres cluster: pass --cluster, "
+                        + "or set db_cluster on the source stack")
+            }
+
+            let arrow = destination.map { " → \($0.rawValue)" } ?? ""
+            print("\(source) → \(target)  [\(spec.backend.rawValue)\(arrow) · \(env.rawValue)]")
 
             // The reading, rewriting and classifying live in the planner, shared with the
             // dashboard's clone — two implementations of this loop is how the CLI and the
@@ -111,7 +134,7 @@ extension Stack {
             do {
                 planned = try await StackClonePlanner().plan(
                     stack: spec, into: target, environment: env, manifestPath: path,
-                    databaseMode: databaseMode)
+                    databaseMode: databaseMode, targetBackend: destination, cluster: clusterName)
             } catch let error as StackClonePlanner.UnreadableConfig {
                 throw ValidationError("\(error)")
             }
@@ -185,7 +208,7 @@ extension Stack {
 
             try await build(
                 planned: planned, from: spec, manifest: parsed, at: path,
-                environment: env)
+                environment: env, backend: destination)
         }
 
         /// Creates the stack through the shared builder — the same code path the dashboard
@@ -195,14 +218,16 @@ extension Stack {
             from source: StackSpec,
             manifest: StackManifest,
             at path: String,
-            environment: Environment
+            environment: Environment,
+            backend: Backend?
         ) async throws {
             print("")
             let outcome = try await StackCloneBuilder().build(
                 planned: planned, source: source, manifest: manifest, manifestPath: path,
                 options: StackCloneBuilder.Options(
                     target: target, tofuDir: tofuDir!, host: host, environment: environment,
-                    port: port, network: network, gated: gated ? true : nil, apply: apply))
+                    port: port, network: network, gated: gated ? true : nil, apply: apply,
+                    backend: backend))
 
             print("  created \(target) in \(tofuDir!)")
             print("  tofu init: ok")

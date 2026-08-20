@@ -19,11 +19,15 @@ public struct StackCloneBuilder: Sendable {
         public let gated: Bool?
         /// Run `tofu apply` after a clean plan, so the clone ends running rather than written.
         public let apply: Bool
+        /// Where the clone runs, when not where the source runs.
+        public let backend: Backend?
 
         public init(
             target: String, tofuDir: String, host: String? = nil, environment: Environment,
-            port: Int? = nil, network: String? = nil, gated: Bool? = nil, apply: Bool = false
+            port: Int? = nil, network: String? = nil, gated: Bool? = nil, apply: Bool = false,
+            backend: Backend? = nil
         ) {
+            self.backend = backend
             self.target = target
             self.tofuDir = tofuDir
             self.host = host
@@ -81,6 +85,7 @@ public struct StackCloneBuilder: Sendable {
     private let scaffolder: Scaffolder
     private let deployer: Deployer
     private let provisioner: DatabaseProvisioner
+    private let managedProvisioner: ManagedPostgresProvisioner
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
     private let saveManifest: @Sendable (StackManifest, String) throws -> Void
@@ -92,6 +97,7 @@ public struct StackCloneBuilder: Sendable {
         scaffolder: Scaffolder = Scaffolder(),
         deployer: Deployer = Deployer(),
         provisioner: DatabaseProvisioner = DatabaseProvisioner(),
+        managedProvisioner: ManagedPostgresProvisioner = ManagedPostgresProvisioner(),
         readConfig: @escaping @Sendable (URL) throws -> [String: String] = {
             try ConfigSync.readDeclared(at: $0)
         },
@@ -112,6 +118,7 @@ public struct StackCloneBuilder: Sendable {
         self.scaffolder = scaffolder
         self.deployer = deployer
         self.provisioner = provisioner
+        self.managedProvisioner = managedProvisioner
         self.readConfig = readConfig
         self.writeConfig = writeConfig
         self.saveManifest = saveManifest
@@ -135,7 +142,7 @@ public struct StackCloneBuilder: Sendable {
         settings["host"] = host
 
         let plan = try bootstrapper.plan(
-            name: options.target, backend: source.backend, host: host,
+            name: options.target, backend: options.backend ?? source.backend, host: host,
             tofuDir: options.tofuDir, environment: options.environment, settings: settings,
             into: manifest, manifestPath: manifestPath)
         let created = try await bootstrapper.create(plan)
@@ -202,6 +209,11 @@ public struct StackCloneBuilder: Sendable {
                         databaseReport.append(
                             "database \(databasePlan.database) shared with an earlier service; "
                                 + "credentials reused")
+                    } else if databasePlan.managed {
+                        let provisioned = try await managedProvisioner.provision(databasePlan)
+                        minted = provisioned.credentials
+                        databaseReport = provisioned.report
+                        credentials[databasePlan.identity] = minted
                     } else {
                         let provisioned = try await provisioner.provision(
                             databasePlan, host: host, admin: settings["db_admin"],

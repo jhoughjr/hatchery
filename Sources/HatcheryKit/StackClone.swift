@@ -151,9 +151,14 @@ public struct StackCloner: Sendable {
         environment: Environment,
         sourceConfig: [String: String],
         domains: [String],
-        databaseMode: DatabaseCloneMode = .full
+        databaseMode: DatabaseCloneMode = .full,
+        targetBackend: Backend? = nil,
+        cluster: String? = nil
     ) async throws -> ClonedService {
-        let contract = EnvContract.contract(for: service.kind, backend: source.backend)
+        // The contract that rules the clone is the destination's: a clone headed for the
+        // platform answers the platform's keys, whatever the source answered.
+        let contract = EnvContract.contract(
+            for: service.kind, backend: targetBackend ?? source.backend)
         let secretKeys = Set(contract?.secret ?? [])
         var keys: [ClonedKey] = []
 
@@ -163,7 +168,8 @@ public struct StackCloner: Sendable {
         // through to their old dispositions and stay with a person.
         let database = DatabaseClonePlanner.plan(
             service: service.kind, backend: source.backend, sourceConfig: sourceConfig,
-            source: source, target: targetName, environment: environment, mode: databaseMode)
+            source: source, target: targetName, environment: environment, mode: databaseMode,
+            targetBackend: targetBackend, cluster: cluster)
 
         for key in (contract?.required ?? []).sorted() {
             keys.append(
