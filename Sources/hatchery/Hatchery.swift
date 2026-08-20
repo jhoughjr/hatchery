@@ -36,7 +36,7 @@ struct Hatchery: AsyncParsableCommand {
 struct Box: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Prepare machines to host stacks.",
-        subcommands: [Init.self, Scan.self]
+        subcommands: [Init.self, Scan.self, Adopt.self]
     )
 
     /// The onboarding guide, executed: point it at an empty Debian/Ubuntu box and it
@@ -210,6 +210,97 @@ struct Box: AsyncParsableCommand {
             if !orphans.isEmpty {
                 print("  unattached databases: \(orphans.joined(separator: ", "))")
             }
+        }
+    }
+    /// A find from a scan becomes a manifest entry.
+    struct Adopt: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Declare an app that already runs on a box, into a stack of the manifest.",
+            discussion: """
+                Reads the app as the dokku user: its domains, the image it was deployed from, \
+                its port, its network, and its config. Then it writes what hatchery would have \
+                written had it authored the app: the tofu declaration, a config file holding \
+                the box's real values, and the manifest line.
+
+                The stack must be a dokku stack on the same box. The declaration still needs a \
+                tofu import before plan agrees the app exists, and the command is printed at \
+                the end. Nothing is applied.
+                """
+        )
+
+        @Argument(help: "The box, as user@host or a bare address.")
+        var target: String
+
+        @Argument(help: "The app to adopt, as dokku names it.")
+        var app: String
+
+        @Option(name: .shortAndLong, help: "The dokku stack on that box to declare the app into.")
+        var stack: String
+
+        @Option(name: .shortAndLong, help: "Service kind, when the image does not say. One of: \(ServiceKind.known.map(\.rawValue).joined(separator: ", ")).")
+        var kind: ServiceKindArgument?
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        @Flag(name: .long, help: "Show what would be written without writing anything.")
+        var dryRun: Bool = false
+
+        func run() async throws {
+            let manifestPath = try ManifestLocator.resolve(manifest)
+            let data = try Data(contentsOf: URL(fileURLWithPath: manifestPath))
+            let parsed = try StackManifest.decode(from: data)
+
+            let scanner = ScanKit.Scanner()
+            let (provider, box) = try await scanner.identify(target)
+            guard provider == .dokku else {
+                throw ValidationError("adopt reads dokku boxes only for now; \(box) is \(provider.rawValue)")
+            }
+            let inventory = try await scanner.scan(target)
+            guard inventory.apps.contains(where: { $0.name == app }) else {
+                throw ValidationError(AdoptError.notOnBox(app: app, box: box).description)
+            }
+
+            let adopter = Adopter()
+            let facts = try await adopter.facts(for: app, on: box)
+            guard let resolvedKind = kind?.kind ?? Adopter.inferKind(fromImage: facts.image) else {
+                throw ValidationError(AdoptError.kindUnknown(app: app, image: facts.image).description)
+            }
+
+            print("\(app) on \(box)")
+            print("  image    \(facts.image)")
+            print("  kind     \(resolvedKind.rawValue)")
+            print("  domains  \(facts.domains.joined(separator: " "))")
+            print("  port     \(facts.containerPort)")
+            if let network = facts.network { print("  network  \(network)") }
+            print("  config   \(facts.config.count) key(s)")
+
+            let result: AdoptResult
+            do {
+                result = try await adopter.plan(
+                    facts, kind: resolvedKind, into: stack, box: box, manifest: parsed)
+            } catch let error as AdoptError {
+                throw ValidationError(error.description)
+            }
+            for file in result.files {
+                let verb = file.role == .variableAppend ? "append to" : "write"
+                print("  \(verb) \(file.path)")
+            }
+            if dryRun {
+                print("  dry run; nothing written")
+                return
+            }
+
+            guard let spec = parsed.stack(named: stack) else { return }
+            let scaffolded = ScaffoldResult(
+                service: result.service, files: result.files, secrets: [], manifest: result.manifest)
+            let written = try Scaffolder().write(scaffolded, in: spec)
+            print("  wrote \(written.count) file(s)")
+            try result.manifest.encoded().write(to: URL(fileURLWithPath: manifestPath))
+            print("  manifest updated")
+            if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
+            print("")
+            print("  next, in \(spec.tofu?.directory ?? "the stack directory"): \(result.importCommand)")
         }
     }
 }
