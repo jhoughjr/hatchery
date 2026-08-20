@@ -173,7 +173,7 @@ public struct StackCloner: Sendable {
 
         // On a platform there is no box network. Siblings meet at the addresses the
         // platform gives them, and box-local domains cannot be served, so they drop off.
-        let platform = targetBackend == .appPlatform
+        let platform = targetBackend == .appPlatform || targetBackend == .cloudRun
         let domains = platform ? PlatformShape.publicDomains(domains) : domains
         var siblingDomains: [String: [String]] = [:]
         var siblingNames: [String: String] = [:]

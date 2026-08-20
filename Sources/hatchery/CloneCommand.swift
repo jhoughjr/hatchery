@@ -43,10 +43,10 @@ extension Stack {
         @Option(name: .long, help: "Tofu directory for the clone. Required with --create.")
         var tofuDir: String?
 
-        @Option(name: .long, help: "Backend for the clone. Defaults to the source's. appPlatform needs --cluster.")
+        @Option(name: .long, help: "Backend for the clone. Defaults to the source's. appPlatform and cloudRun need --cluster.")
         var backend: String?
 
-        @Option(name: .long, help: "appPlatform: the managed Postgres cluster the clone's databases are created in. Defaults to the source's db_cluster setting.")
+        @Option(name: .long, help: "appPlatform: the managed Postgres cluster, cloudRun: the Cloud SQL instance, the clone's databases are created in. Defaults to the source's db_cluster setting.")
         var cluster: String?
 
         @Option(name: .long, help: "Host for the clone. Defaults to the source's.")
@@ -118,9 +118,10 @@ extension Stack {
                 destination = nil
             }
             let clusterName = cluster ?? spec.settings?["db_cluster"]
-            if destination == .appPlatform, (clusterName ?? "").isEmpty {
+            if destination == .appPlatform || destination == .cloudRun, (clusterName ?? "").isEmpty {
                 throw ValidationError(
-                    "a clone onto appPlatform needs a managed Postgres cluster: pass --cluster, "
+                    "a clone onto \(destination!.rawValue) needs a managed Postgres "
+                        + "\(destination == .cloudRun ? "instance" : "cluster"): pass --cluster, "
                         + "or set db_cluster on the source stack")
             }
 

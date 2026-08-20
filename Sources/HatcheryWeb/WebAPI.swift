@@ -972,11 +972,12 @@ public struct HatcheryAPI: Sendable {
             target = parsed
         }
         let name = (cluster?.isEmpty == false ? cluster : nil) ?? source.settings?["db_cluster"]
-        if target == .appPlatform, (name ?? "").isEmpty {
+        if target == .appPlatform || target == .cloudRun, (name ?? "").isEmpty {
             return .refused(
                 .failure(
                     400,
-                    "a clone onto appPlatform needs a managed Postgres cluster: name it, or "
+                    "a clone onto \(target!.rawValue) needs a managed Postgres "
+                        + "\(target == .cloudRun ? "instance" : "cluster"): name it, or "
                         + "set db_cluster on the source stack"))
         }
         return .ok(target, name)

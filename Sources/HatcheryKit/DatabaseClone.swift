@@ -177,12 +177,12 @@ public enum DatabaseClonePlanner {
         let destination = targetBackend ?? backend
         switch destination {
         case .dokku: break
-        case .appPlatform:
+        case .appPlatform, .cloudRun:
             guard let cluster, !cluster.isEmpty else { return nil }
             return managedPlan(
                 service: kind, sourceConfig: sourceConfig, source: source, target: target,
-                environment: environment, cluster: cluster, mode: mode)
-        case .aws, .cloudRun: return nil
+                environment: environment, cluster: cluster, mode: mode, backend: destination)
+        case .aws: return nil
         }
         guard let contract = EnvContract.contract(for: kind, backend: backend) else { return nil }
         let needed = contract.required.intersection(plannable)
@@ -268,9 +268,10 @@ public enum DatabaseClonePlanner {
     /// both the source's container and the cluster.
     static func managedPlan(
         service kind: ServiceKind, sourceConfig: [String: String], source: StackSpec,
-        target: String, environment: Environment, cluster: String, mode: DatabaseCloneMode
+        target: String, environment: Environment, cluster: String, mode: DatabaseCloneMode,
+        backend: Backend = .appPlatform
     ) -> DatabaseClonePlan? {
-        guard let contract = EnvContract.contract(for: kind, backend: .appPlatform) else { return nil }
+        guard let contract = EnvContract.contract(for: kind, backend: backend) else { return nil }
         let needed = contract.required.intersection(plannable)
         guard !needed.isEmpty else { return nil }
 
@@ -290,13 +291,15 @@ public enum DatabaseClonePlanner {
 
         return DatabaseClonePlan(
             serverApp: cluster,
-            port: "25060",
+            port: backend == .cloudRun ? "5432" : "25060",
             scheme: url?.scheme ?? "postgresql",
             database: derived(sourceDB, source: source, target: target, environment: environment),
             owner: identifier(sourceOwner),
             appUser: appUser,
             emitted: emitted,
-            mode: mode,
+            // A copy into Cloud SQL needs the Auth Proxy or an authorized network on the
+            // trusted source, which is its own slice, so the plan says empty and means it.
+            mode: backend == .cloudRun ? .none : mode,
             sourceDatabase: sourceDB,
             sourceServer: url?.host ?? sourceConfig["DATABASE_HOST"],
             managed: true)

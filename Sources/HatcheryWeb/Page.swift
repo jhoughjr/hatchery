@@ -1297,13 +1297,14 @@ enum Page {
             + select('c-env', 'Environment', envs,
                      'Where the copy is headed. Values naming ' + source + "'s environment "
                      + 'are rewritten to match.')
-            + select('c-backend', 'Backend', ['same', 'appPlatform'],
+            + select('c-backend', 'Backend', ['same', 'appPlatform', 'cloudRun'],
                      "Where the copy runs. same keeps the source's backend. appPlatform puts "
-                     + 'each service in its own DigitalOcean app, with databases in a managed '
-                     + 'cluster, and the plan says what that bills.')
+                     + 'each service in its own DigitalOcean app, cloudRun in its own Cloud Run '
+                     + 'service, each with databases in a managed instance, and the plan says '
+                     + 'what that bills.')
             + field('c-cluster', 'Managed Postgres cluster', '',
-                    "appPlatform only: the cluster the copy's databases are created in. Blank "
-                    + "uses the source's db_cluster setting.")
+                    "appPlatform or cloudRun: the cluster or Cloud SQL instance the copy's "
+                    + "databases are created in. Blank uses the source's db_cluster setting.")
             + field('c-dir', 'Tofu directory', '~/infra-state/',
                     'A directory for this clone alone — it must be empty or not exist. '
                     + 'End with / and the stack name is appended, so the default becomes '

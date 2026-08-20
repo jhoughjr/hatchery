@@ -86,6 +86,7 @@ public struct StackCloneBuilder: Sendable {
     private let deployer: Deployer
     private let provisioner: DatabaseProvisioner
     private let managedProvisioner: ManagedPostgresProvisioner
+    private let cloudSQLProvisioner: CloudSQLProvisioner
     private let readConfig: @Sendable (URL) throws -> [String: String]
     private let writeConfig: @Sendable (URL, [String: String]) throws -> Void
     private let saveManifest: @Sendable (StackManifest, String) throws -> Void
@@ -98,6 +99,7 @@ public struct StackCloneBuilder: Sendable {
         deployer: Deployer = Deployer(),
         provisioner: DatabaseProvisioner = DatabaseProvisioner(),
         managedProvisioner: ManagedPostgresProvisioner = ManagedPostgresProvisioner(),
+        cloudSQLProvisioner: CloudSQLProvisioner = CloudSQLProvisioner(),
         readConfig: @escaping @Sendable (URL) throws -> [String: String] = {
             try ConfigSync.readDeclared(at: $0)
         },
@@ -119,6 +121,7 @@ public struct StackCloneBuilder: Sendable {
         self.deployer = deployer
         self.provisioner = provisioner
         self.managedProvisioner = managedProvisioner
+        self.cloudSQLProvisioner = cloudSQLProvisioner
         self.readConfig = readConfig
         self.writeConfig = writeConfig
         self.saveManifest = saveManifest
@@ -210,8 +213,12 @@ public struct StackCloneBuilder: Sendable {
                             "database \(databasePlan.database) shared with an earlier service; "
                                 + "credentials reused")
                     } else if databasePlan.managed {
-                        let provisioned = try await managedProvisioner.provision(
-                            databasePlan, admin: settings["db_admin"])
+                        // Which platform holds the cluster is the clone's backend.
+                        let provisioned = (options.backend ?? source.backend) == .cloudRun
+                            ? try await cloudSQLProvisioner.provision(
+                                databasePlan, admin: settings["db_admin"])
+                            : try await managedProvisioner.provision(
+                                databasePlan, admin: settings["db_admin"])
                         minted = provisioned.credentials
                         databaseReport = provisioned.report
                         credentials[databasePlan.identity] = minted
