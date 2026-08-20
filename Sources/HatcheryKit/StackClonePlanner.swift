@@ -84,7 +84,9 @@ public struct StackClonePlanner: Sendable {
         into target: String,
         environment: Environment,
         manifestPath: String,
-        databaseMode: DatabaseCloneMode = .full
+        databaseMode: DatabaseCloneMode = .full,
+        targetBackend: Backend? = nil,
+        cluster: String? = nil
     ) async throws -> PlannedClone {
         var services: [ClonedService] = []
         var origins: [String: String] = [:]
@@ -121,7 +123,8 @@ public struct StackClonePlanner: Sendable {
 
             let planned = try await cloner.plan(
                 service: service, from: source, into: target, environment: environment,
-                sourceConfig: config, domains: domains, databaseMode: databaseMode)
+                sourceConfig: config, domains: domains, databaseMode: databaseMode,
+                targetBackend: targetBackend, cluster: cluster)
             services.append(planned)
             // Keyed by the clone-side name, which is what every display looks services up by.
             origins[planned.name] = origin
@@ -136,6 +139,9 @@ public struct StackClonePlanner: Sendable {
         let admin = source.settings?["db_admin"]
         for service in services {
             guard let database = service.database else { continue }
+            // A managed cluster is not a dokku app to probe. Its existence is checked by
+            // name at provision time, and box init --backend appPlatform checks it up front.
+            guard !database.managed else { continue }
             let server = "\(database.serverApp):\(database.port)"
             guard !probed.contains(server) else { continue }
             probed.insert(server)
