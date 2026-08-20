@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import HatcheryKit
 import HatcheryWeb
+import ScanKit
 
 #if canImport(Glibc)
     import Glibc
@@ -35,7 +36,7 @@ struct Hatchery: AsyncParsableCommand {
 struct Box: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Prepare machines to host stacks.",
-        subcommands: [Init.self]
+        subcommands: [Init.self, Scan.self]
     )
 
     /// The onboarding guide, executed: point it at an empty Debian/Ubuntu box and it
@@ -143,6 +144,72 @@ struct Box: AsyncParsableCommand {
 
         private func bare(_ host: String) -> String {
             host.split(separator: "@").last.map(String.init) ?? host
+        }
+    }
+    /// The inverse of the manifest: read what a target runs, and say whose it is.
+    struct Scan: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Read what runs on a box or a platform, and say which of it is hatchery's.",
+            discussion: """
+                Point hatchery at a target and it works out which provider answers, reads \
+                every app that runs there, and sorts each one against the manifest: declared \
+                by a stack, hatchery-shaped but undeclared, or foreign.
+
+                A user@host target is probed as a dokku box. 'appPlatform', or no target with \
+                DIGITALOCEAN_TOKEN set, reads App Platform through its API. Nothing is written.
+                """
+        )
+
+        @Argument(help: "user@host for a box, 'appPlatform' for the platform. Defaults to the platform.")
+        var target: String?
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest. Classification is skipped without one.")
+        var manifest: String = "hatchery.json"
+
+        func run() async throws {
+            let parsed: StackManifest?
+            if let path = try? ManifestLocator.resolve(manifest),
+                let data = try? Data(contentsOf: URL(fileURLWithPath: path))
+            {
+                parsed = try? StackManifest.decode(from: data)
+            } else {
+                parsed = nil
+            }
+
+            let inventory: Inventory
+            do {
+                inventory = try await Scanner().scan(target)
+            } catch ScanError.noProviderAnswered(let target, let tried) {
+                print("nothing answered at '\(target)'")
+                tried.forEach { print("  \($0)") }
+                throw ExitCode(1)
+            }
+
+            let databases = inventory.databases.map { "\($0.count) database(s)" }
+                ?? "databases not listable as the dokku user"
+            print("\(inventory.target)  [\(inventory.provider.rawValue)]  "
+                + "\(inventory.apps.count) app(s), \(databases)")
+            if parsed == nil {
+                print("  no manifest found, so nothing is classified")
+            }
+            for (app, claim) in Scanner.classify(inventory, against: parsed) {
+                var line = "  \(app.name.padding(toLength: 24, withPad: " ", startingAt: 0))"
+                line += (app.running ? "running" : "stopped").padding(toLength: 9, withPad: " ", startingAt: 0)
+                switch claim {
+                case .declared(let stack): line += "declared by \(stack)"
+                case .hatcheryShaped: line += "hatchery-shaped, undeclared"
+                case .foreign: line += "foreign"
+                }
+                if let image = app.image { line += "  \(image)" }
+                if !app.databases.isEmpty { line += "  db: \(app.databases.joined(separator: ", "))" }
+                print(line)
+            }
+            let orphans = (inventory.databases ?? []).filter { name in
+                !inventory.apps.contains { $0.databases.contains(name) }
+            }
+            if !orphans.isEmpty {
+                print("  unattached databases: \(orphans.joined(separator: ", "))")
+            }
         }
     }
 }
