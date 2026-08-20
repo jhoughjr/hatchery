@@ -297,9 +297,7 @@ public enum DatabaseClonePlanner {
             owner: identifier(sourceOwner),
             appUser: appUser,
             emitted: emitted,
-            // A copy into Cloud SQL needs the Auth Proxy or an authorized network on the
-            // trusted source, which is its own slice, so the plan says empty and means it.
-            mode: backend == .cloudRun ? .none : mode,
+            mode: mode,
             sourceDatabase: sourceDB,
             sourceServer: url?.host ?? sourceConfig["DATABASE_HOST"],
             managed: true)

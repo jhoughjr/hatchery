@@ -21,8 +21,7 @@ struct CloudSQLTests {
         #expect(plan?.serverApp == "mws-sql")
         #expect(plan?.port == "5432")
         #expect(plan?.emitted == ["DATABASE_URL", "DATABASE_APP_URL"])
-        // Until the copy path lands, the plan says empty and means it.
-        #expect(plan?.mode == DatabaseCloneMode.none)
+        #expect(plan?.mode == .full)
     }
 
     @Test("Cloud Run's cost is a floor, and the instance adds nothing")
@@ -42,6 +41,11 @@ struct CloudSQLTests {
         func handle(_ argv: [String]) -> CommandOutput {
             lock.lock(); defer { lock.unlock() }
             if argv.first == "sh" { return CommandOutput(status: 0, standardOutput: "/usr/bin/gcloud") }
+            if argv.first == "ssh" {
+                calls.append("ssh " + argv.dropFirst(4).joined(separator: " "))
+                // psql is there, and the instance answers.
+                return CommandOutput(status: 0, standardOutput: "1")
+            }
             let joined = argv.dropFirst().joined(separator: " ")
             calls.append(joined)
             if joined.hasPrefix("sql instances describe mws-sql") {
@@ -87,5 +91,35 @@ struct CloudSQLTests {
         await #expect(throws: CloudSQLError.instanceNotFound("other")) { try await provisioner.provision(plan) }
         let none = CloudSQLProvisioner(execute: { _, _ in CommandOutput(status: 1, standardOutput: "") })
         await #expect(throws: CloudSQLError.noGcloud) { try await none.provision(plan) }
+    }
+
+    @Test("a full copy runs from the trusted source as the owner, once the instance answers")
+    func copies() async throws {
+        let fake = FakeGcloud()
+        let provisioner = CloudSQLProvisioner(
+            execute: { argv, _ in fake.handle(argv) }, mintPassword: { "minted" })
+        let plan = DatabaseClonePlan(
+            serverApp: "mws-sql", port: "5432", scheme: "postgresql", database: "mwgcp_mwserver",
+            owner: "mwserver", appUser: "mwserver_app", emitted: ["DATABASE_URL"], mode: .full,
+            sourceDatabase: "mwserver", sourceServer: "mwstack-pg-dev", managed: true)
+        let (_, report) = try await provisioner.provision(plan, admin: "jimmy@192.168.0.103")
+        let ssh = fake.calls.filter { $0.hasPrefix("ssh") }
+        #expect(ssh.first == "ssh command -v psql")
+        #expect(ssh.contains { $0.contains("-c SELECT 1") })
+        #expect(ssh.contains { $0.contains("DROP SCHEMA IF EXISTS public CASCADE") })
+        #expect(ssh.contains { $0.hasPrefix("ssh sh -c") && $0.contains("pg_dump") })
+        #expect(report.contains("schema and data copied from mwserver on mwstack-pg-dev, through jimmy@192.168.0.103"))
+    }
+
+    @Test("without an admin channel the copy is skipped and the plan says created empty")
+    func copyNeedsAdmin() async throws {
+        let fake = FakeGcloud()
+        let provisioner = CloudSQLProvisioner(execute: { argv, _ in fake.handle(argv) })
+        let plan = DatabaseClonePlan(
+            serverApp: "mws-sql", port: "5432", scheme: "postgresql", database: "mwgcp_mwserver",
+            owner: "mwserver", appUser: nil, emitted: ["DATABASE_URL"], mode: .full,
+            sourceDatabase: "mwserver", sourceServer: "mwstack-pg-dev", managed: true)
+        let (_, report) = try await provisioner.provision(plan)
+        #expect(report.contains { $0.contains("full copy skipped") && $0.contains("db_admin") })
     }
 }
