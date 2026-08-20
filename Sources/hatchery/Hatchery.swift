@@ -167,11 +167,12 @@ struct Box: AsyncParsableCommand {
                 by a stack, hatchery-shaped but undeclared, or foreign.
 
                 A user@host target is probed as a dokku box. 'appPlatform', or no target with \
-                DIGITALOCEAN_TOKEN set, reads App Platform through its API. Nothing is written.
+                DIGITALOCEAN_TOKEN set, reads App Platform through its API. 'cloudRun' reads \
+                gcloud's configured project. Nothing is written.
                 """
         )
 
-        @Argument(help: "user@host for a box, 'appPlatform' for the platform. Defaults to the platform.")
+        @Argument(help: "user@host for a box, 'appPlatform' or 'cloudRun' for a platform. Defaults to App Platform.")
         var target: String?
 
         @Option(name: .shortAndLong, help: "Path to the stack manifest. Classification is skipped without one.")
@@ -197,7 +198,9 @@ struct Box: AsyncParsableCommand {
             }
 
             let databases = inventory.databases.map { "\($0.count) database(s)" }
-                ?? "databases not listable as the dokku user"
+                ?? (inventory.provider == .dokku
+                    ? "databases not listable as the dokku user"
+                    : "databases not tracked by the platform")
             print("\(inventory.target)  [\(inventory.provider.rawValue)]  "
                 + "\(inventory.apps.count) app(s), \(databases)")
             if parsed == nil {

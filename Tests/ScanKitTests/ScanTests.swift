@@ -141,4 +141,40 @@ struct ScanTests {
         #expect(!inventory.apps[1].running)
         #expect(inventory.databases == ["db"])
     }
+
+    @Test("a Cloud Run services list becomes the same inventory shape, with databases unknown")
+    func readsCloudRunBody() throws {
+        let body = """
+            [{"metadata": {"name": "mwgcp"},
+              "spec": {"template": {"spec": {"containers": [{"image": "us-central1-docker.pkg.dev/p/i/mwserver:staging"}]}}},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}},
+             {"metadata": {"name": "sleepy"},
+              "spec": {"template": {"spec": {"containers": []}}},
+              "status": {"conditions": [{"type": "Ready", "status": "False"}]}}]
+            """
+        let inventory = try Scanner.cloudRunInventory(from: Data(body.utf8), project: "mws-lab")
+        #expect(inventory.provider == .cloudRun)
+        #expect(inventory.target == "mws-lab")
+        #expect(inventory.apps.map(\.name) == ["mwgcp", "sleepy"])
+        #expect(inventory.apps[0].image == "us-central1-docker.pkg.dev/p/i/mwserver:staging")
+        #expect(inventory.apps[0].running)
+        #expect(!inventory.apps[1].running)
+        #expect(inventory.databases == nil)
+    }
+
+    @Test("cloudRun as a target needs gcloud and a project, and says which is missing")
+    func identifiesCloudRun() async throws {
+        let none = Scanner(execute: { _, _ in CommandOutput(status: 1, standardOutput: "") }, environment: [:])
+        await #expect(throws: ScanError.self) { try await none.identify("cloudRun") }
+
+        let set = Scanner(
+            execute: { argv, _ in
+                argv.first == "sh"
+                    ? CommandOutput(status: 0, standardOutput: "/usr/bin/gcloud")
+                    : CommandOutput(status: 0, standardOutput: "mws-lab\n")
+            }, environment: [:])
+        let (provider, project) = try await set.identify("cloudRun")
+        #expect(provider == .cloudRun)
+        #expect(project == "mws-lab")
+    }
 }
