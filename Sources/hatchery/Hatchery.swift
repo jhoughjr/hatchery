@@ -58,17 +58,24 @@ struct Box: AsyncParsableCommand {
                 DIGITALOCEAN_TOKEN from the environment: the token answers, the container \
                 registry answers, and a managed Postgres cluster is visible. Nothing is fixed, \
                 because each is an operator decision.
+
+                For cloudRun the checks run here through gcloud: signed in, a project set, \
+                the Run, Artifact Registry, and Cloud SQL APIs enabled, and a Cloud SQL \
+                Postgres instance visible.
                 """
         )
 
         @Argument(help: "The box, as user@host — root@ on a fresh machine. Not used for appPlatform.")
         var host: String?
 
-        @Option(name: .shortAndLong, help: "Backend to assert. One of: dokku, appPlatform.")
+        @Option(name: .shortAndLong, help: "Backend to assert. One of: dokku, appPlatform, cloudRun.")
         var backend: String = Backend.dokku.rawValue
 
-        @Option(name: .long, help: "appPlatform: the managed Postgres cluster clones may create databases in.")
+        @Option(name: .long, help: "appPlatform: the managed Postgres cluster clones may create databases in. cloudRun: the Cloud SQL instance.")
         var cluster: String?
+
+        @Option(name: .long, help: "cloudRun: the project to check, instead of gcloud's configured one.")
+        var project: String?
 
         @Option(name: .long, help: "Public key to authorize for the dokku user. Defaults to ~/.ssh/id_rsa.pub.")
         var key: String = "~/.ssh/id_rsa.pub"
@@ -106,7 +113,11 @@ struct Box: AsyncParsableCommand {
                 locus = .local
                 assertions = BoxInitializer.appPlatformAssertions(cluster: cluster)
                 readyLine = "App Platform is ready: hatchery stack new <name> --backend appPlatform"
-            case .aws, .cloudRun:
+            case .cloudRun:
+                locus = .local
+                assertions = BoxInitializer.cloudRunAssertions(project: project, instance: cluster)
+                readyLine = "Cloud Run is ready: hatchery stack new <name> --backend cloudRun"
+            case .aws:
                 throw ValidationError("box init has no recipe for \(kind.rawValue) yet")
             }
             print("\(locus.label)  [\(assertions.count) assertion(s)]")

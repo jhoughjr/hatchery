@@ -148,6 +148,29 @@ struct BoxInitTests {
         #expect(named.last?.remedy.contains("mws-pg") == true)
     }
 
+    @Test("the Cloud Run recipe is check-only, scopes to a project, and names the instance it was given")
+    func cloudRunRecipeShape() {
+        let any = BoxInitializer.cloudRunAssertions()
+        #expect(any.allSatisfy { $0.fix.isEmpty })
+        #expect(any.first?.name == "gcloud is present")
+        #expect(any.last?.check.contains("databaseVersion:POSTGRES") == true)
+
+        let scoped = BoxInitializer.cloudRunAssertions(project: "mws-lab", instance: "mws-sql")
+        #expect(scoped.contains { $0.check == "gcloud projects describe 'mws-lab' >/dev/null 2>&1" })
+        #expect(scoped.contains { $0.name == "the Cloud Run API is enabled" && $0.check.contains("--project mws-lab") })
+        #expect(scoped.last?.name == "Cloud SQL Postgres instance 'mws-sql' is visible")
+        #expect(scoped.last?.remedy.contains("mws-sql") == true)
+    }
+
+    @Test("without gcloud the Cloud Run run stops at the first step and says how to install it")
+    func missingGcloudStops() async {
+        let initializer = BoxInitializer(execute: { _, _ in CommandOutput(status: 1, standardOutput: "") })
+        let steps = await initializer.run(
+            at: .local, assertions: BoxInitializer.cloudRunAssertions(), onProgress: { _ in })
+        #expect(steps.map(\.outcome) == [.failed])
+        #expect(steps.first?.detail.contains("brew install --cask google-cloud-sdk") == true)
+    }
+
     @Test("a missing token stops the platform run at the token step and says the export")
     func missingTokenStops() async {
         let initializer = BoxInitializer(execute: { argv, _ in
