@@ -44,6 +44,22 @@ public struct BoxStep: Sendable, Equatable {
     }
 }
 
+/// Where a recipe's commands run. A self-hosted box answers over ssh. A hosted platform
+/// has no box, so its facts are checked from this machine, with the operator's own
+/// environment and credentials.
+public enum BoxLocus: Sendable, Equatable {
+    case ssh(host: String)
+    case local
+
+    /// The name the narration and the ready line print for this locus.
+    public var label: String {
+        switch self {
+        case .ssh(let host): return host
+        case .local: return "this machine"
+        }
+    }
+}
+
 /// Points hatchery at an empty box and asserts the prerequisites onto it.
 ///
 /// The onboarding guide was a recipe a person typed; this executes the same recipe as
@@ -112,6 +128,54 @@ public struct BoxInitializer: Sendable {
         ]
     }
 
+    /// The App Platform recipe. There is no metal to prepare, so every assertion is
+    /// check-only: a platform fact the operator must supply, never one hatchery can make.
+    ///
+    /// The checks run on this machine and read `DIGITALOCEAN_TOKEN` from its environment,
+    /// the same way the tofu provider does. `cluster` names the managed Postgres cluster
+    /// that clones will create databases in. Without a name, any visible pg cluster holds.
+    public static func appPlatformAssertions(cluster: String? = nil) -> [BoxAssertion] {
+        let api = "https://api.digitalocean.com/v2"
+        let curl = "curl -fsS --max-time 10 -H \"Authorization: Bearer $DIGITALOCEAN_TOKEN\""
+        let clusterCheck: String
+        let clusterName: String
+        let clusterRemedy: String
+        if let cluster, !cluster.isEmpty {
+            clusterCheck = "\(curl) \(api)/databases | grep -q '\"name\": *\"\(cluster)\"'"
+            clusterName = "managed Postgres cluster '\(cluster)' is visible"
+            clusterRemedy = "the token sees no cluster named '\(cluster)'. "
+                + "Check the name in the DigitalOcean console, or drop --cluster to accept any"
+        } else {
+            clusterCheck = "\(curl) \(api)/databases | grep -q '\"engine\": *\"pg\"'"
+            clusterName = "a managed Postgres cluster is visible"
+            clusterRemedy = "clones need an existing cluster to create databases in. "
+                + "Create one, or pass --cluster to name the one clones may use"
+        }
+        return [
+            BoxAssertion(
+                name: "curl is present",
+                check: "command -v curl >/dev/null",
+                remedy: "the platform checks speak to the DigitalOcean API through curl"),
+            BoxAssertion(
+                name: "DIGITALOCEAN_TOKEN is set",
+                check: "[ -n \"$DIGITALOCEAN_TOKEN\" ]",
+                remedy: "export DIGITALOCEAN_TOKEN=<a personal access token with write scope>"),
+            BoxAssertion(
+                name: "the token answers",
+                check: "\(curl) \(api)/account >/dev/null",
+                remedy: "the API refused the token. It has expired, or it lacks read scope"),
+            BoxAssertion(
+                name: "the container registry answers",
+                check: "\(curl) \(api)/registry >/dev/null",
+                remedy: "no DOCR registry answers this token. "
+                    + "Create one, or grant the token registry scope"),
+            BoxAssertion(
+                name: clusterName,
+                check: clusterCheck,
+                remedy: clusterRemedy),
+        ]
+    }
+
     /// Runs every assertion against the box, in order, narrating as it goes. A failed
     /// assertion stops the run: later steps depend on earlier ones, and continuing would
     /// bury the one line that matters under its consequences.
@@ -119,9 +183,17 @@ public struct BoxInitializer: Sendable {
         host: String, assertions: [BoxAssertion],
         onProgress: @Sendable (String) -> Void
     ) async -> [BoxStep] {
+        await self.run(at: .ssh(host: host), assertions: assertions, onProgress: onProgress)
+    }
+
+    /// The same run, at any locus.
+    public func run(
+        at locus: BoxLocus, assertions: [BoxAssertion],
+        onProgress: @Sendable (String) -> Void
+    ) async -> [BoxStep] {
         var steps: [BoxStep] = []
         for assertion in assertions {
-            if await passes(assertion.check, on: host) {
+            if await passes(assertion.check, at: locus) {
                 steps.append(BoxStep(name: assertion.name, outcome: .held, detail: "already so"))
                 onProgress("hold   \(assertion.name)")
                 continue
@@ -135,13 +207,13 @@ public struct BoxInitializer: Sendable {
             onProgress("fixing \(assertion.name)…")
             var fixFailure: String?
             for command in assertion.fix {
-                let output = await runRemote(command, on: host)
+                let output = await self.run(command, at: locus)
                 if output.status != 0 {
                     fixFailure = output.combined
                     break
                 }
             }
-            if fixFailure == nil, await passes(assertion.check, on: host) {
+            if fixFailure == nil, await passes(assertion.check, at: locus) {
                 steps.append(BoxStep(name: assertion.name, outcome: .fixed, detail: "fixed"))
                 onProgress("fixed  \(assertion.name)")
             } else {
@@ -157,13 +229,21 @@ public struct BoxInitializer: Sendable {
         return steps
     }
 
-    private func passes(_ check: String, on host: String) async -> Bool {
-        (await runRemote(check, on: host)).status == 0
+    private func passes(_ check: String, at locus: BoxLocus) async -> Bool {
+        (await self.run(check, at: locus)).status == 0
     }
 
-    private func runRemote(_ command: String, on host: String) async -> CommandOutput {
-        let argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
+    /// One command at the locus. Over ssh it travels as one quoted `sh -c`. Locally it
+    /// is the same `sh -c`, with this process's environment.
+    private func run(_ command: String, at locus: BoxLocus) async -> CommandOutput {
+        let argv: [String]
+        switch locus {
+        case .ssh(let host):
+            argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
                     "sh", "-c", DatabaseProvisioner.shellQuoted(command)]
+        case .local:
+            argv = ["sh", "-c", command]
+        }
         do {
             return try await execute(argv, nil)
         } catch {

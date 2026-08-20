@@ -39,23 +39,35 @@ struct Box: AsyncParsableCommand {
     )
 
     /// The onboarding guide, executed: point it at an empty Debian/Ubuntu box and it
-    /// asserts the dokku prerequisites onto it, convergently.
+    /// asserts the dokku prerequisites onto it, convergently. For a hosted platform there
+    /// is no box, so the same engine checks the platform facts from this machine.
     struct Init: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Assert the dokku prerequisites onto an empty box.",
+            abstract: "Assert the prerequisites of a backend: onto an empty box, or against a platform.",
             discussion: """
                 The setup guide, run instead of read. Each prerequisite is an assertion: \
                 checked first, fixed only if missing, re-checked after — so a half-prepared \
                 box finishes rather than starting over, and running twice changes nothing.
 
-                The target must accept this machine's key non-interactively and be able to \
-                run installers: root on a fresh box, or a user with passwordless sudo. \
+                For dokku the target must accept this machine's key non-interactively and be \
+                able to run installers: root on a fresh box, or a user with passwordless sudo. \
                 Nothing is written without --yes.
+
+                For appPlatform there is no box. The checks run here and read \
+                DIGITALOCEAN_TOKEN from the environment: the token answers, the container \
+                registry answers, and a managed Postgres cluster is visible. Nothing is fixed, \
+                because each is an operator decision.
                 """
         )
 
-        @Argument(help: "The box, as user@host — root@ on a fresh machine.")
-        var host: String
+        @Argument(help: "The box, as user@host — root@ on a fresh machine. Not used for appPlatform.")
+        var host: String?
+
+        @Option(name: .shortAndLong, help: "Backend to assert. One of: dokku, appPlatform.")
+        var backend: String = Backend.dokku.rawValue
+
+        @Option(name: .long, help: "appPlatform: the managed Postgres cluster clones may create databases in.")
+        var cluster: String?
 
         @Option(name: .long, help: "Public key to authorize for the dokku user. Defaults to ~/.ssh/id_rsa.pub.")
         var key: String = "~/.ssh/id_rsa.pub"
@@ -67,21 +79,41 @@ struct Box: AsyncParsableCommand {
         var yes: Bool = false
 
         func run() async throws {
-            let keyPath = Paths.expanded(key)
-            guard let operatorKey = try? String(contentsOfFile: keyPath, encoding: .utf8),
-                !operatorKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            else {
-                throw ValidationError("no public key at \(keyPath); pass --key")
+            guard let kind = Backend(rawValue: backend) else {
+                throw ValidationError("unknown backend '\(backend)'")
             }
 
-            let assertions = BoxInitializer.dokkuAssertions(
-                operatorKey: operatorKey, network: network)
-            print("\(host)  [\(assertions.count) assertion(s)]")
+            let locus: BoxLocus
+            let assertions: [BoxAssertion]
+            let readyLine: String
+            switch kind {
+            case .dokku:
+                guard let host else {
+                    throw ValidationError("dokku needs a box: hatchery box init root@host")
+                }
+                let keyPath = Paths.expanded(key)
+                guard let operatorKey = try? String(contentsOfFile: keyPath, encoding: .utf8),
+                    !operatorKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else {
+                    throw ValidationError("no public key at \(keyPath); pass --key")
+                }
+                locus = .ssh(host: host)
+                assertions = BoxInitializer.dokkuAssertions(
+                    operatorKey: operatorKey, network: network)
+                readyLine = "\(host) is ready: hatchery stack new <name> --host dokku@\(bare(host))"
+            case .appPlatform:
+                locus = .local
+                assertions = BoxInitializer.appPlatformAssertions(cluster: cluster)
+                readyLine = "App Platform is ready: hatchery stack new <name> --backend appPlatform"
+            case .aws, .cloudRun:
+                throw ValidationError("box init has no recipe for \(kind.rawValue) yet")
+            }
+            print("\(locus.label)  [\(assertions.count) assertion(s)]")
 
             let initializer = BoxInitializer()
             let steps: [BoxStep]
             if yes {
-                steps = await initializer.run(host: host, assertions: assertions) {
+                steps = await initializer.run(at: locus, assertions: assertions) {
                     print("  \($0)")
                 }
             } else {
@@ -92,16 +124,17 @@ struct Box: AsyncParsableCommand {
                         name: $0.name, check: $0.check,
                         remedy: $0.fix.isEmpty ? $0.remedy : "would fix with --yes")
                 }
-                steps = await initializer.run(host: host, assertions: checks) {
+                steps = await initializer.run(at: locus, assertions: checks) {
                     print("  \($0)")
                 }
             }
 
             let failed = steps.filter { $0.outcome == .failed }
+            let fixable = assertions.contains { !$0.fix.isEmpty }
             print("")
             if failed.isEmpty && steps.count == assertions.count {
-                print("  \(host) is ready: hatchery stack new <name> --host dokku@\(bare(host))")
-            } else if !yes {
+                print("  \(readyLine)")
+            } else if !yes && fixable {
                 print("  re-run with --yes to make it so")
             } else {
                 throw ExitCode(1)
