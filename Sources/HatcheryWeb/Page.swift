@@ -1002,16 +1002,22 @@ enum Page {
           if (!ok) { log('cancelled'); return; }
           const target = $('sb-target').value.trim() || null;
 
+          // A box with twenty apps is sixty ssh round trips, so the log says the scan is
+          // under way rather than leaving a closed dialog and silence.
+          log('scanning ' + (target || 'appPlatform') + ' — a box answers one app at a time');
           busy = true;
           const scan = await send('/api/box/scan', {target});
           busy = false;
           if (!scan.ok) { log(scan.data.error || 'scan failed', true); return; }
           const inv = scan.data;
           const cls = {declared: '', 'hatchery-shaped': 'd-change', foreign: 'hint'};
+          // Columns sized for the pane, not a terminal: the longest app name on the lab box
+          // is fifteen characters, and a wrapped claim reads as two apps.
+          const width = Math.max(12, ...inv.apps.map(a => a.name.length)) + 2;
           const rows = inv.apps.map(a => {
-            let line = a.name.padEnd(24) + (a.running ? 'running' : 'stopped').padEnd(9);
-            line += a.claim === 'declared' ? 'declared by ' + a.stack
-                  : a.claim === 'hatchery-shaped' ? 'hatchery-shaped, undeclared' : 'foreign';
+            let line = a.name.padEnd(width) + (a.running ? 'up  ' : 'down');
+            line += '  ' + (a.claim === 'declared' ? 'declared by ' + a.stack
+                  : a.claim === 'hatchery-shaped' ? 'hatchery-shaped, undeclared' : 'foreign');
             if (a.image) line += '  ' + a.image;
             if (a.databases.length) line += '  db: ' + a.databases.join(', ');
             return '<div class="' + (cls[a.claim] || '') + '">' + escapeHTML(line) + '</div>';
