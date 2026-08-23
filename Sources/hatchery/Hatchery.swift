@@ -720,7 +720,23 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .long, help: "POST worsening transitions to this URL as JSON.")
     var alertWebhook: String?
 
+    @Flag(name: .long, help: "Install serve as a launchd agent with these options, so it runs at login and is kept alive, then exit.")
+    var install: Bool = false
+
+    @Flag(name: .long, help: "Remove the launchd agent, then exit.")
+    var uninstall: Bool = false
+
     func run() async throws {
+        if uninstall {
+            try Self.uninstallAgent()
+            return
+        }
+        if install {
+            try Self.installAgent(
+                manifest: manifest, bind: bind, port: port, token: token)
+            return
+        }
+
         // Resolved once, at boot: the server should keep reading the same file it started with
         // rather than follow the working directory somewhere else mid-session.
         //
@@ -1614,5 +1630,105 @@ struct Stack: ParsableCommand {
                 }
             }
         }
+    }
+}
+
+extension Serve {
+    /// Writes the agent for this platform's init, loads it, and says where it serves.
+    static func installAgent(
+        manifest: String, bind: String, port: Int, token: String?
+    ) throws {
+        if bind != "127.0.0.1", (token ?? "").isEmpty {
+            throw ValidationError(
+                "binding \(bind) needs --token, because the server holds SSH access to every "
+                    + "stack it manages; the agent records the token in its plist")
+        }
+        // The manifest resolved now, because launchd starts the agent with no working
+        // directory or environment worth trusting.
+        let resolvedManifest = try ManifestLocator.resolve(manifest)
+        let binary = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        #if os(Linux)
+        let path = ServeAgent.unitPath(home: home)
+        let contents = ServeAgent.unit(
+            binary: binary, manifest: resolvedManifest, bind: bind, port: port, token: token)
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        try contents.write(toFile: path, atomically: true, encoding: .utf8)
+        _ = try runTool("/usr/bin/systemctl", ["--user", "daemon-reload"])
+        _ = try runTool("/usr/bin/systemctl", ["--user", "enable", "--now", "hatchery-serve"])
+        print("installed hatchery-serve as a systemd user unit")
+        print("  serves http://\(bind):\(port) from \(resolvedManifest)")
+        print("  logs   journalctl --user -u hatchery-serve")
+        print("  boots without a login after: loginctl enable-linger $USER")
+        print("  remove with: hatchery serve --uninstall")
+        #else
+        let path = ServeAgent.plistPath(home: home)
+        let contents = ServeAgent.plist(
+            binary: binary, manifest: resolvedManifest, bind: bind, port: port, token: token,
+            home: home)
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        try contents.write(toFile: path, atomically: true, encoding: .utf8)
+
+        // Replace a loaded agent rather than failing on it: bootout is allowed to say
+        // "not loaded", bootstrap is not allowed to fail.
+        _ = try? runTool("/bin/launchctl", ["bootout", "gui/\(getuid())/\(ServeAgent.label)"])
+        let out = try runTool("/bin/launchctl", ["bootstrap", "gui/\(getuid())", path])
+        if !out.isEmpty { print(out) }
+        print("installed \(ServeAgent.label)")
+        print("  serves http://\(bind):\(port) from \(resolvedManifest)")
+        print("  logs   \(ServeAgent.logPath(home: home))")
+        print("  remove with: hatchery serve --uninstall")
+        if bind != "127.0.0.1" {
+            print("  macOS may ask to allow local network access on first launch; allow it, "
+                + "or the box polls fail under launchd")
+        }
+        #endif
+    }
+
+    static func uninstallAgent() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        #if os(Linux)
+        let path = ServeAgent.unitPath(home: home)
+        _ = try? runTool("/usr/bin/systemctl", ["--user", "disable", "--now", "hatchery-serve"])
+        if FileManager.default.fileExists(atPath: path) {
+            try FileManager.default.removeItem(atPath: path)
+            _ = try? runTool("/usr/bin/systemctl", ["--user", "daemon-reload"])
+            print("removed hatchery-serve")
+        } else {
+            print("hatchery-serve was not installed")
+        }
+        #else
+        let path = ServeAgent.plistPath(home: home)
+        _ = try? runTool("/bin/launchctl", ["bootout", "gui/\(getuid())/\(ServeAgent.label)"])
+        if FileManager.default.fileExists(atPath: path) {
+            try FileManager.default.removeItem(atPath: path)
+            print("removed \(ServeAgent.label)")
+        } else {
+            print("\(ServeAgent.label) was not installed")
+        }
+        #endif
+    }
+
+    private static func runTool(_ tool: String, _ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let text = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard process.terminationStatus == 0 else {
+            throw ValidationError(
+                "\((tool as NSString).lastPathComponent) \(arguments.first ?? "") failed: \(text)")
+        }
+        return text
     }
 }
