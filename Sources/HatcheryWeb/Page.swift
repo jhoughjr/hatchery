@@ -255,7 +255,32 @@ enum Page {
         </dialog>
 
         <script>
-        const token = new URLSearchParams(location.search).get('token') || '';
+        // The token is remembered so it is pasted once rather than every time.
+        //
+        // Binding 0.0.0.0 makes a token compulsory, and that change on
+        // 2026-08-25 quietly cost a working bookmark: the address had always
+        // been enough, and afterwards it was not. Storing it keeps the LAN
+        // bind and gives the bookmark back.
+        //
+        // It is no more exposed than it already was — the token travels in the
+        // address bar and sits in browser history either way — and it stays on
+        // this one browser. `?token=` in the address always wins, so a changed
+        // token is fixed by visiting the link again, and `?token=` on its own
+        // forgets the stored one.
+        const asked = new URLSearchParams(location.search).get('token');
+        let token = '';
+        try {
+          if (asked !== null) {
+            token = asked;
+            asked ? localStorage.setItem('hatchery-token', asked)
+                  : localStorage.removeItem('hatchery-token');
+          } else {
+            token = localStorage.getItem('hatchery-token') || '';
+          }
+        } catch (e) {
+          // A browser with storage blocked still works, one visit at a time.
+          token = asked || '';
+        }
         const headers = token ? {'X-Hatchery-Token': token, 'Content-Type': 'application/json'}
                               : {'Content-Type': 'application/json'};
         const $ = (id) => document.getElementById(id);
@@ -909,9 +934,10 @@ enum Page {
             '<div class="card"><h2>' + (needsToken ? 'No token' : 'Cannot read the estate') + '</h2>'
             + '<p class="sib">' + escapeHTML(message) + '</p>'
             + (needsToken
-                ? '<p class="sib">Open this page with the token in the address: '
+                ? '<p class="sib">Open this page once with the token in the address: '
                   + '<code>' + escapeHTML(location.origin) + '/?token=&lt;token&gt;</code>. '
-                  + 'It is the value passed to <code>hatchery serve --token</code>.</p>'
+                  + 'It is the value passed to <code>hatchery serve --token</code>, and this '
+                  + 'browser remembers it afterwards.</p>'
                 : '')
             + '</div>';
           $('map') && ($('map').innerHTML = '');
