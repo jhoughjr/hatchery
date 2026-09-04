@@ -899,12 +899,32 @@ enum Page {
           target.hidden = false;
         }
 
+        // A refusal must not read as an empty estate. The subtitle carried the
+        // reason and the board stayed blank, so a missing token looked exactly
+        // like having no stacks — which cost somebody a real diagnosis on
+        // 2026-09-04. The message now goes where the stacks would have been.
+        function refused(message, status) {
+          const needsToken = status === 401;
+          $('stacks').innerHTML =
+            '<div class="card"><h2>' + (needsToken ? 'No token' : 'Cannot read the estate') + '</h2>'
+            + '<p class="sib">' + escapeHTML(message) + '</p>'
+            + (needsToken
+                ? '<p class="sib">Open this page with the token in the address: '
+                  + '<code>' + escapeHTML(location.origin) + '/?token=&lt;token&gt;</code>. '
+                  + 'It is the value passed to <code>hatchery serve --token</code>.</p>'
+                : '')
+            + '</div>';
+          $('map') && ($('map').innerHTML = '');
+        }
+
         async function refresh() {
           try {
             const res = await fetch('/api/status', {headers});
             if (!res.ok) {
               const data = await res.json().catch(() => ({}));
-              $('sub').textContent = data.error || ('HTTP ' + res.status);
+              const message = data.error || ('HTTP ' + res.status);
+              $('sub').textContent = message;
+              refused(message, res.status);
               return;
             }
             render(await res.json());
