@@ -683,7 +683,18 @@ struct LocalDatabaseProvisionerTests {
         let (_, report) = try await provisioner.provision(
             plan(), host: "192.168.0.103", admin: "local", network: "mwstack_default")
 
-        let creation = recorded.all().filter { $0.contains { $0.contains("docker run") } }
+        // The network is created before the server that joins it. `docker run --network`
+        // fails on a network that is not there, and sending a person to make it by hand is
+        // the missing step this command exists to remove.
+        let all = recorded.all()
+        let networkStep = try #require(
+            all.firstIndex { $0.contains { $0.contains("docker network create") } })
+        let runStep = try #require(all.firstIndex { $0.contains { $0.contains("docker run") } })
+        #expect(networkStep < runStep)
+        // An existing network is kept, not re-made.
+        #expect(all[networkStep].contains { $0.contains("docker network inspect") })
+
+        let creation = all.filter { $0.contains { $0.contains("docker run") } }
         #expect(creation.count == 1)
         let create = try #require(creation.first)
         #expect(create.first == "sh")

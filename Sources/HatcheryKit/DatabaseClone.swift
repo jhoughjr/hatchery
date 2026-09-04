@@ -624,7 +624,9 @@ public struct DatabaseProvisioner: Sendable {
     }
 
     /// A name safe to place in a remote shell pipeline: letters, digits, underscore, dash.
-    static func isPlainName(_ name: String) -> Bool {
+    /// Public so a name typed on the command line is held to the same rule as a name the
+    /// planner derived. Both end up in a shell on the box.
+    public static func isPlainName(_ name: String) -> Bool {
         !name.isEmpty
             && name.allSatisfy {
                 ($0.isASCII && ($0.isLetter || $0.isNumber)) || $0 == "_" || $0 == "-"
@@ -686,6 +688,11 @@ public struct DatabaseProvisioner: Sendable {
             return
         }
 
+        // The network is part of "a server of your own". `docker run --network` fails on a
+        // network that is not there, and a person sent to create it by hand is the same
+        // missing step this exists to remove. Inspect first, so an existing one is kept.
+        let ensureNetwork = "docker network inspect \(network) >/dev/null 2>&1 || "
+            + "docker network create \(network)"
         let create = "docker run -d --name \(plan.serverApp) --network \(network) "
             + "--restart unless-stopped -e POSTGRES_PASSWORD=\(mintPassword()) "
             + "-v \(plan.serverApp)-data:/var/lib/postgresql/data postgres:17-alpine"
@@ -693,6 +700,7 @@ public struct DatabaseProvisioner: Sendable {
             + "docker exec \(plan.serverApp) pg_isready -h 127.0.0.1 -U postgres "
             + ">/dev/null 2>&1 && exit 0; sleep 2; done; exit 1"
         do {
+            _ = try await run(Self.onBox(ensureNetwork, admin: admin))
             _ = try await run(Self.onBox(create, admin: admin))
             _ = try await run(Self.onBox(wait, admin: admin))
             report.append(

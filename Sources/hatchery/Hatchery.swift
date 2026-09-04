@@ -25,7 +25,8 @@ struct Hatchery: AsyncParsableCommand {
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
-            Box.self, Config.self, Deploy.self, Doctor.self, Events.self, Host.self, Serve.self,
+            Box.self, Config.self, Database.self, Deploy.self, Doctor.self, Events.self,
+            Host.self, Serve.self,
             Service.self, Setup.self, Stack.self, State.self, Status.self,
             Up.self, Down.self, Restart.self,
         ]

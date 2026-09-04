@@ -1,0 +1,106 @@
+import ArgumentParser
+import Foundation
+import HatcheryKit
+
+/// Databases, outside a clone.
+///
+/// Provisioning already existed, but only inside `stack clone`: a database arrived because a
+/// stack was copied, and there was no way to ask for one on its own. A new service then had a
+/// person paste `CREATE ROLE` into psql by hand — the one step of standing a service up that
+/// hatchery knew how to do and did not offer.
+struct Database: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "db",
+        abstract: "Provision a database server and a database on it.",
+        subcommands: [Provision.self]
+    )
+
+    /// Creates the server if it is absent, then the database, the roles and the grants.
+    struct Provision: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Create a database, its roles and its grants, on a server of your own.",
+            discussion: """
+                The server is yours, not one you borrow. When --server names a container that \
+                does not exist and --network is given, it is created first — postgres:17-alpine, \
+                its own named volume, restart unless-stopped — so a service does not have to \
+                move in beside somebody else's database.
+
+                Every step is an assertion, so running it twice lands in the same place: an \
+                existing role has its password re-minted, an existing database has its owner \
+                confirmed. That is what lets a half-finished run be re-run.
+
+                --admin is the shell account that can `docker exec` the server, as user@host. \
+                Use `local` when the container runs on this machine. The database is created \
+                where that account points, which for this estate is the pi rather than a laptop.
+
+                The minted passwords are printed. They exist only in the answer to this \
+                command — nothing stores them — so hiding them would mean provisioning again, \
+                and the second run would re-mint and lock the first one out.
+                """
+        )
+
+        @Option(name: .long, help: "The postgres container. Created when absent, if --network is given.")
+        var server: String
+
+        @Option(name: .long, help: "Database to create.")
+        var database: String
+
+        @Option(name: .long, help: "Role that owns the database. Defaults to the database name.")
+        var owner: String?
+
+        @Option(name: .long, help: "Optional reduced-privilege role, for the app's own connection.")
+        var appUser: String?
+
+        @Option(name: .long, help: "Shell account that can docker-exec the server, as user@host, or `local`.")
+        var admin: String
+
+        @Option(name: .long, help: "The box the server runs on. Used to reach a dokku-managed postgres.")
+        var host: String = ""
+
+        @Option(name: .long, help: "Docker network to create the server on. Without it, an absent server is an error rather than something to create.")
+        var network: String?
+
+        @Option(name: .long, help: "Port the server listens on.")
+        var port: Int = 5432
+
+        func run() async throws {
+            let owner = owner ?? database
+            // These names reach a shell on the box. The planner folds the names it derives;
+            // names given by hand are checked here instead, so this door is not the weak one.
+            for (label, value) in [
+                ("server", server), ("database", database), ("owner", owner),
+            ] + (appUser.map { [("app-user", $0)] } ?? []) + (network.map { [("network", $0)] } ?? []) {
+                guard DatabaseProvisioner.isPlainName(value) else {
+                    throw ValidationError(
+                        "\(label) '\(value)' is not a plain name; use letters, digits, _ and -")
+                }
+            }
+
+            var emitted: Set<String> = [
+                "DATABASE_URL", "DATABASE_HOST", "DATABASE_PORT", "DATABASE_USER",
+                "DATABASE_PASSWORD", "DATABASE_DB",
+            ]
+            if appUser != nil {
+                emitted.formUnion(["DATABASE_APP_URL", "DATABASE_APP_USER", "DATABASE_APP_PASSWORD"])
+            }
+
+            let plan = DatabaseClonePlan(
+                serverApp: server, port: String(port), scheme: "postgresql",
+                database: database, owner: owner, appUser: appUser, emitted: emitted,
+                // Nothing is being copied: this database starts empty, and the service's own
+                // migrations own the schema from here.
+                mode: .none)
+
+            let provisioner = DatabaseProvisioner()
+            let (credentials, report) = try await provisioner.provision(
+                plan, host: host, admin: admin, network: network)
+
+            for line in report { print("  \(line)") }
+            print("")
+            let values = plan.values(credentials)
+            for key in values.keys.sorted() {
+                print("\(key)=\(values[key] ?? "")")
+            }
+        }
+    }
+}
