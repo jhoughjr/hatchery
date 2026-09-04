@@ -557,3 +557,160 @@ struct TofuShapeReaderTests {
         #expect(shapes.isEmpty)
     }
 }
+
+/// The same provisioner, pointed at a container on this machine.
+///
+/// `db_admin: local` is the whole difference: the ssh hop goes away, and with it the remote
+/// shell the statements were quoted for. Both halves are pinned here, because a stray pair of
+/// quotes reaches psql as SQL and fails at the far end of a long exec chain.
+@Suite("Provisioning against a local database server")
+struct LocalDatabaseProvisionerTests {
+    private final class Recorded: @unchecked Sendable {
+        private let lock = NSLock()
+        private var commands: [[String]] = []
+        func record(_ argv: [String]) {
+            lock.lock()
+            commands.append(argv)
+            lock.unlock()
+        }
+        func all() -> [[String]] {
+            lock.lock()
+            defer { lock.unlock() }
+            return commands
+        }
+    }
+
+    private func plan(
+        mode: DatabaseCloneMode = .none,
+        sourceDatabase: String? = nil,
+        sourceServer: String? = nil
+    ) -> DatabaseClonePlan {
+        DatabaseClonePlan(
+            serverApp: "mwstack-pg-dev", port: "5432", scheme: "postgresql",
+            database: "mwlab_2_mwserver", owner: "mwlab_2_mwserver", appUser: "mwlab_2_app",
+            emitted: ["DATABASE_URL"], mode: mode,
+            sourceDatabase: sourceDatabase, sourceServer: sourceServer)
+    }
+
+    @Test("the local words name this machine, and any other target is a hop")
+    func recognisesTheLocalWords() {
+        #expect(AdminChannel.isLocal("local"))
+        #expect(AdminChannel.isLocal("localhost"))
+        #expect(AdminChannel.isLocal("127.0.0.1"))
+        #expect(AdminChannel.isLocal(" LOCAL "))
+        #expect(!AdminChannel.isLocal("jimmy@opi"))
+        // A box merely called "local-something" is somewhere else.
+        #expect(!AdminChannel.isLocal("local-box"))
+        #expect(AdminChannel.prefix("local").isEmpty)
+        #expect(AdminChannel.prefix("jimmy@opi") == ["ssh", "-o", "BatchMode=yes", "jimmy@opi"])
+    }
+
+    @Test("every statement runs through docker here, with no ssh and no quoting")
+    func runsDockerHere() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        let (credentials, report) = try await provisioner.provision(
+            plan(), host: "192.168.0.103", admin: "local")
+
+        #expect(credentials.ownerPassword == "minted")
+        let commands = recorded.all()
+        #expect(!commands.isEmpty)
+        for command in commands {
+            #expect(command.first == "docker")
+            #expect(!command.contains("ssh"))
+        }
+        // The SQL reaches psql as SQL. Quoted for a shell that is not there, the statement
+        // would arrive wrapped in apostrophes and fail.
+        let statements = commands.compactMap(\.last)
+        #expect(statements.allSatisfy { !$0.hasPrefix("'") })
+        #expect(statements.contains { $0 == "CREATE ROLE \"mwlab_2_mwserver\" LOGIN PASSWORD 'minted'" })
+        #expect(statements.contains {
+            $0 == "CREATE DATABASE \"mwlab_2_mwserver\" OWNER \"mwlab_2_mwserver\""
+        })
+        #expect(report.contains { $0.contains("on this machine") })
+    }
+
+    @Test("a remote admin keeps its hop and its quoting")
+    func remoteIsUnchanged() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                // Not a dokku app, so the admin channel takes over.
+                if argv.contains("enter") {
+                    throw CommandFailure(
+                        command: "ssh", status: 1, message: "app does not exist")
+                }
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        _ = try await provisioner.provision(
+            plan(), host: "192.168.0.103", admin: "jimmy@opi")
+
+        let viaAdmin = recorded.all().filter { $0.contains("jimmy@opi") }
+        #expect(!viaAdmin.isEmpty)
+        for command in viaAdmin {
+            #expect(Array(command.prefix(4)) == ["ssh", "-o", "BatchMode=yes", "jimmy@opi"])
+            #expect(command.last?.hasPrefix("'") == true)
+        }
+    }
+
+    @Test("a missing server is created here, without a shell on another box")
+    func createsTheServerHere() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                // The server is absent until the run that creates it.
+                if argv.contains("SELECT 1"), !recorded.all().contains(where: {
+                    $0.contains { $0.contains("docker run") }
+                }) {
+                    throw CommandFailure(
+                        command: "docker", status: 1,
+                        message: "Error: No such container: mwstack-pg-dev")
+                }
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        let (_, report) = try await provisioner.provision(
+            plan(), host: "192.168.0.103", admin: "local", network: "mwstack_default")
+
+        let creation = recorded.all().filter { $0.contains { $0.contains("docker run") } }
+        #expect(creation.count == 1)
+        let create = try #require(creation.first)
+        #expect(create.first == "sh")
+        #expect(!create.contains("ssh"))
+        // The script is the script. A quoted one would be one word to `sh -c`.
+        #expect(create.last?.hasPrefix("docker run -d --name mwstack-pg-dev") == true)
+        #expect(report.contains { $0.contains("created database server mwstack-pg-dev") })
+    }
+
+    @Test("a copy across two servers on this machine needs no hop either")
+    func copiesBetweenServersHere() async throws {
+        let recorded = Recorded()
+        let provisioner = DatabaseProvisioner(
+            run: { argv in
+                recorded.record(argv)
+                return Data()
+            },
+            mintPassword: { "minted" })
+
+        _ = try await provisioner.provision(
+            plan(mode: .full, sourceDatabase: "mwserver", sourceServer: "mwstack-pg-src"),
+            host: "192.168.0.103", admin: "local")
+
+        let dumps = recorded.all().filter { $0.contains { $0.contains("pg_dump") } }
+        let dump = try #require(dumps.first)
+        #expect(dump.first == "sh")
+        #expect(!dump.contains("ssh"))
+        #expect(dump.last?.contains("docker exec mwstack-pg-src pg_dump") == true)
+    }
+}

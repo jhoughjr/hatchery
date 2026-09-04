@@ -140,7 +140,8 @@ extension BackendSetting {
         help: """
             A shell account that can `docker exec` the database container, as user@host — only \
             needed when the stack's postgres is not a dokku app, because the dokku account \
-            cannot reach a container dokku does not manage. Optional: without it, database \
+            cannot reach a container dokku does not manage. Use `local` when the container \
+            runs on this machine, and the commands skip ssh. Optional: without it, database \
             provisioning works only for dokku-app databases.
             """,
         required: false)

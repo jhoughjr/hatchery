@@ -415,6 +415,33 @@ enum DatabaseTransport: Sendable, Equatable {
     case adminExec(String)
 }
 
+/// Whether an admin channel names this machine or another one.
+///
+/// `db_admin` names the account that can `docker exec` the database container, and usually
+/// that account is on another box. A database server on the machine hatchery runs on needs
+/// no ssh hop, and asking for one is not free: it needs a key, an sshd, and a name for a box
+/// that is already here. The word `local` says the server is here, and the commands then go
+/// straight to docker.
+///
+/// The quoting goes with the hop. A statement sent over ssh travels through the remote shell,
+/// which joins the arguments with spaces and parses them again, so it is single-quoted for
+/// that shell. A local command has no second shell, and quoting it there would make the
+/// quotes part of the SQL.
+enum AdminChannel {
+    /// The words that name this machine.
+    static let localTargets: Set<String> = ["local", "localhost", "127.0.0.1"]
+
+    static func isLocal(_ admin: String) -> Bool {
+        localTargets.contains(admin.trimmingCharacters(in: .whitespaces).lowercased())
+    }
+
+    /// What goes in front of a command so it runs on the channel's box: nothing for this
+    /// machine, and the ssh hop for any other.
+    static func prefix(_ admin: String) -> [String] {
+        isLocal(admin) ? [] : ["ssh", "-o", "BatchMode=yes", admin]
+    }
+}
+
 /// Creates a plan's database and roles on the stack's postgres app, over ssh.
 ///
 /// Every step is an assertion rather than a command: a role or database that already exists is
@@ -556,7 +583,7 @@ public struct DatabaseProvisioner: Sendable {
             let pipeline =
                 "docker exec \(sourceServer) pg_dump -U postgres --no-owner --no-acl \(flags)"
                 + "-d \(sourceDatabase) | docker exec -i \(plan.serverApp) " + restore
-            command = ["ssh", "-o", "BatchMode=yes", admin, "sh", "-c", Self.shellQuoted(pipeline)]
+            command = Self.onBox(pipeline, admin: admin)
         } else {
             report.append(
                 "\(plan.mode.rawValue) copy skipped: the source database lives on "
@@ -609,14 +636,14 @@ public struct DatabaseProvisioner: Sendable {
     static func shellCommand(
         _ pipeline: String, plan: DatabaseClonePlan, host: String, via transport: DatabaseTransport
     ) -> [String] {
-        let remote = ["sh", "-c", shellQuoted(pipeline)]
         switch transport {
         case .dokkuEnter:
             return ["ssh", "-o", "BatchMode=yes", DokkuProvider.sshTarget(host)]
-                + ["enter", plan.serverApp, "web"] + remote
+                + ["enter", plan.serverApp, "web"] + ["sh", "-c", shellQuoted(pipeline)]
         case .adminExec(let admin):
-            return ["ssh", "-o", "BatchMode=yes", admin]
-                + ["docker", "exec", "-i", plan.serverApp] + remote
+            let prefix = AdminChannel.prefix(admin)
+            return prefix + ["docker", "exec", "-i", plan.serverApp]
+                + ["sh", "-c", prefix.isEmpty ? pipeline : shellQuoted(pipeline)]
         }
     }
 
@@ -666,12 +693,8 @@ public struct DatabaseProvisioner: Sendable {
             + "docker exec \(plan.serverApp) pg_isready -h 127.0.0.1 -U postgres "
             + ">/dev/null 2>&1 && exit 0; sleep 2; done; exit 1"
         do {
-            _ = try await run([
-                "ssh", "-o", "BatchMode=yes", admin, "sh", "-c", Self.shellQuoted(create),
-            ])
-            _ = try await run([
-                "ssh", "-o", "BatchMode=yes", admin, "sh", "-c", Self.shellQuoted(wait),
-            ])
+            _ = try await run(Self.onBox(create, admin: admin))
+            _ = try await run(Self.onBox(wait, admin: admin))
             report.append(
                 "created database server \(plan.serverApp) on \(network) (postgres:17-alpine)")
         } catch let failure as CommandFailure {
@@ -689,6 +712,20 @@ public struct DatabaseProvisioner: Sendable {
     private func chooseTransport(
         plan: DatabaseClonePlan, host: String, admin: String?, report: inout [String]
     ) async throws -> DatabaseTransport {
+        // A local channel takes the admin road first. The dokku probe is an ssh hop, and a
+        // box that runs its postgres in a plain container often runs no dokku at all — the
+        // hop then fails with a refused connection rather than "does not exist", which the
+        // fallback below does not read as a fallback. Probing the road the operator named
+        // keeps a dokku-shaped local box working, because dokku is still tried after.
+        if let admin, AdminChannel.isLocal(admin) {
+            do {
+                _ = try await psql("SELECT 1", plan: plan, host: host, via: .adminExec(admin))
+                report.append("reached \(plan.serverApp) with docker on this machine")
+                return .adminExec(admin)
+            } catch let error as DatabaseProvisionError {
+                guard case .statementFailed = error else { throw error }
+            }
+        }
         do {
             _ = try await psql("SELECT 1", plan: plan, host: host, via: .dokkuEnter)
             return .dokkuEnter
@@ -700,7 +737,8 @@ public struct DatabaseProvisioner: Sendable {
                 throw DatabaseProvisionError.unreachableServer(
                     app: plan.serverApp,
                     hint: "it is not a dokku app, and the stack sets no db_admin. Set db_admin "
-                        + "to a shell target that can docker-exec it (e.g. jimmy@\(bareHost(host)))")
+                        + "to a shell target that can docker-exec it (e.g. jimmy@\(bareHost(host))), "
+                        + "or to `local` when the container runs on this machine")
             }
             _ = try await psql("SELECT 1", plan: plan, host: host, via: .adminExec(admin))
             report.append("reached \(plan.serverApp) via \(admin) (not a dokku app)")
@@ -772,16 +810,22 @@ public struct DatabaseProvisioner: Sendable {
     ) -> [String] {
         var psql = ["psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-tA"]
         if let database { psql += ["-d", database] }
-        psql += ["-c", shellQuoted(sql)]
 
         switch transport {
         case .dokkuEnter:
             return ["ssh", "-o", "BatchMode=yes", DokkuProvider.sshTarget(host)]
-                + ["enter", plan.serverApp, "web"] + psql
+                + ["enter", plan.serverApp, "web"] + psql + ["-c", shellQuoted(sql)]
         case .adminExec(let admin):
-            return ["ssh", "-o", "BatchMode=yes", admin]
-                + ["docker", "exec", "-i", plan.serverApp] + psql
+            let prefix = AdminChannel.prefix(admin)
+            return prefix + ["docker", "exec", "-i", plan.serverApp] + psql
+                + ["-c", prefix.isEmpty ? sql : shellQuoted(sql)]
         }
+    }
+
+    /// A shell script on the admin channel's box, outside any container.
+    static func onBox(_ script: String, admin: String) -> [String] {
+        let prefix = AdminChannel.prefix(admin)
+        return prefix + ["sh", "-c", prefix.isEmpty ? script : shellQuoted(script)]
     }
 
     static func shellQuoted(_ value: String) -> String {
