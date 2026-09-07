@@ -466,7 +466,7 @@ public struct DatabaseProvisioner: Sendable {
     /// the database container, for the (lab's actual) case where postgres is not a dokku app.
     public func provision(
         _ plan: DatabaseClonePlan, host: String, admin: String? = nil,
-        network: String? = nil
+        network: String? = nil, publish: String? = nil
     ) async throws -> (credentials: DatabaseCredentials, report: [String]) {
         var report: [String] = []
         // The per-environment database server is hatchery's own idea, so its existence is
@@ -476,7 +476,8 @@ public struct DatabaseProvisioner: Sendable {
         // without either, the old honest refusal stands.
         if let admin, let network {
             try await ensureServer(
-                plan, host: host, admin: admin, network: network, report: &report)
+                plan, host: host, admin: admin, network: network, publish: publish,
+                report: &report)
         }
         let transport = try await chooseTransport(plan: plan, host: host, admin: admin, report: &report)
         let ownerPassword = mintPassword()
@@ -673,7 +674,7 @@ public struct DatabaseProvisioner: Sendable {
     /// postgres to answer. Convergent: an existing server is left exactly alone.
     private func ensureServer(
         _ plan: DatabaseClonePlan, host: String, admin: String, network: String,
-        report: inout [String]
+        publish: String?, report: inout [String]
     ) async throws {
         do {
             _ = try await psql("SELECT 1", plan: plan, host: host, via: .adminExec(admin))
@@ -693,8 +694,13 @@ public struct DatabaseProvisioner: Sendable {
         // missing step this exists to remove. Inspect first, so an existing one is kept.
         let ensureNetwork = "docker network inspect \(network) >/dev/null 2>&1 || "
             + "docker network create \(network)"
+        // A server with no published port answers only its own network. That is right for a
+        // service beside it, and wrong for a person or a test suite on another machine, who
+        // then finds a database that exists and cannot be reached. --publish is how a caller
+        // says which of the two this server is for.
+        let door = publish.map { "-p \($0):5432 " } ?? ""
         let create = "docker run -d --name \(plan.serverApp) --network \(network) "
-            + "--restart unless-stopped -e POSTGRES_PASSWORD=\(mintPassword()) "
+            + "\(door)--restart unless-stopped -e POSTGRES_PASSWORD=\(mintPassword()) "
             + "-v \(plan.serverApp)-data:/var/lib/postgresql/data postgres:17-alpine"
         let wait = "for i in $(seq 1 30); do "
             + "docker exec \(plan.serverApp) pg_isready -h 127.0.0.1 -U postgres "

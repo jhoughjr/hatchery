@@ -63,6 +63,11 @@ struct Database: AsyncParsableCommand {
         @Option(name: .long, help: "Port the server listens on.")
         var port: Int = 5432
 
+        @Option(
+            name: .long,
+            help: "Host port to publish the server on. Without it the server answers only its own network.")
+        var publish: Int?
+
         func run() async throws {
             let owner = owner ?? database
             // These names reach a shell on the box. The planner folds the names it derives;
@@ -93,7 +98,8 @@ struct Database: AsyncParsableCommand {
 
             let provisioner = DatabaseProvisioner()
             let (credentials, report) = try await provisioner.provision(
-                plan, host: host, admin: admin, network: network)
+                plan, host: host, admin: admin, network: network,
+                publish: publish.map(String.init))
 
             for line in report { print("  \(line)") }
             print("")

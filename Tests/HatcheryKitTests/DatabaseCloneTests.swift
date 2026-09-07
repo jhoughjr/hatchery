@@ -450,6 +450,43 @@ struct DatabaseProvisionerTests {
         #expect(report.contains { $0.contains("created database server mwstack-pg-dev") })
     }
 
+    @Test("a server asked to publish a port gets one, and one left alone does not")
+    func publishesThePortWhenAsked() async throws {
+        func runCreating(_ recorded: Recorded) -> @Sendable ([String]) async throws -> Data {
+            { argv in
+                recorded.record(argv)
+                let joined = argv.joined(separator: " ")
+                if joined.contains("enter") {
+                    throw CommandFailure(command: "ssh", status: 20,
+                        message: "!     App mwstack-pg-dev does not exist")
+                }
+                if joined.contains("SELECT 1"),
+                    !recorded.all().contains(where: { $0.joined(separator: " ").contains("docker run") }) {
+                    throw CommandFailure(command: "ssh", status: 1,
+                        message: "Error response from daemon: No such container: mwstack-pg-dev")
+                }
+                return Data()
+            }
+        }
+
+        let asked = Recorded()
+        _ = try await DatabaseProvisioner(run: runCreating(asked), mintPassword: { "minted" })
+            .provision(
+                plan(appUser: nil), host: "192.168.0.103", admin: "jimmy@opi.local",
+                network: "macworkstack-infra_default", publish: "5433")
+        #expect(asked.all().map { $0.joined(separator: " ") }
+            .contains { $0.contains("-p 5433:5432") })
+
+        // The default stays closed: a service beside the database needs no host port, and
+        // opening one nobody asked for puts a database on the box's every interface.
+        let silent = Recorded()
+        _ = try await DatabaseProvisioner(run: runCreating(silent), mintPassword: { "minted" })
+            .provision(
+                plan(appUser: nil), host: "192.168.0.103", admin: "jimmy@opi.local",
+                network: "macworkstack-infra_default")
+        #expect(!silent.all().map { $0.joined(separator: " ") }.contains { $0.contains("-p ") })
+    }
+
     @Test("an existing server is never re-created")
     func leavesExistingServerAlone() async throws {
         let recorded = Recorded()
