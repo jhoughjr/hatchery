@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Build hatchery and put it on PATH.
+#
+# The copy is the part worth writing down. macOS ties a binary's ad-hoc
+# signature to where it was built, so a plain `cp` of the release build lands a
+# hatchery that the kernel kills on sight: no output, no message, exit 137, and
+# a person concluding the build was bad. Re-signing after the copy is what makes
+# the installed binary the one that was built.
+set -euo pipefail
+
+DEST="${1:-$HOME/.local/bin}"
+cd "$(dirname "$0")/.."
+
+swift build -c release
+mkdir -p "$DEST"
+install -m 0755 .build/release/hatchery "$DEST/hatchery"
+codesign --force --sign - "$DEST/hatchery"
+
+# Prove it runs, rather than reporting a copy that succeeded.
+"$DEST/hatchery" --help >/dev/null
+echo "installed $("$DEST/hatchery" --version 2>/dev/null || echo hatchery) to $DEST/hatchery"
