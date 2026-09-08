@@ -305,13 +305,24 @@ public struct SecretPlanner: Sendable {
     ///
     /// `siblings` is the config of services already in the stack, keyed by service name, and is
     /// what makes sharing possible. Passing none means every shareable key is minted instead.
+    /// `manifestPath`, when the caller has one in hand, lets a kind file's own contract win
+    /// over the built-in table, the same as `EnvContract.contract(for:backend:registry:)`
+    /// elsewhere: a service with a kind file marks its own secret keys, and minting must agree
+    /// with `hatchery config split` about which ones those are.
     public func resolve(
         for service: ServiceSpec,
         in stack: StackSpec,
         siblings: [String: [String: String]] = [:],
-        mintKeypair: Bool = false
+        mintKeypair: Bool = false,
+        manifestPath: String? = nil
     ) async throws -> [SecretResolution] {
-        guard let contract = EnvContract.contract(for: service.kind, backend: stack.backend) else {
+        let contract = manifestPath.map {
+            EnvContract.contract(
+                for: service.kind,
+                backend: stack.backend,
+                registry: KindRegistry(manifestPath: $0))
+        } ?? EnvContract.contract(for: service.kind, backend: stack.backend)
+        guard let contract else {
             return []
         }
 

@@ -469,6 +469,41 @@ struct ScaffolderTests {
         #expect(configFiles.map(\.path) == ["gsx2.config.json"])
     }
 
+    /// `gsxGateway` carries no built-in contract at all, so a kind file is the only way this
+    /// service gets one. Passing `manifestPath` is what lets `Scaffolder.plan` find it, for
+    /// both minting (`SecretPlanner.resolve`) and the config/secrets split.
+    @Test("a kind file's own contract wins minting and the split when manifestPath is passed")
+    func kindFileContractDrivesMintingAndSplit() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hatchery-scaffold-kindfile-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manifestPath = directory.appendingPathComponent("hatchery.json").path
+        try "{}".write(toFile: manifestPath, atomically: true, encoding: .utf8)
+
+        let kindFile = #"{"kind": "gsx-gateway", "environment": {"GSX_GATEWAY_TOKEN": {"required": true, "secret": true}}}"#
+        let sourcePath = directory.appendingPathComponent("hatchery-kind.json").path
+        try kindFile.write(toFile: sourcePath, atomically: true, encoding: .utf8)
+        try KindRegistry(manifestPath: manifestPath).add(from: sourcePath)
+
+        let uncontracted = ServiceSpec(
+            name: "gsx2", kind: .gsxGateway, image: "gsx:arm64-abc",
+            domains: ["gsx2.opi"], configFile: "gsx2.config.json")
+        let result = try await scaffolder(Files()).plan(
+            service: uncontracted, into: "mwlab", manifest: manifest,
+            manifestPath: manifestPath)
+
+        #expect(result.secrets.map(\.key) == ["GSX_GATEWAY_TOKEN"])
+        #expect(result.unresolved.isEmpty, "GSX_GATEWAY_TOKEN mints outright; nothing to supply")
+
+        let configFiles = result.files.filter { $0.role == .config }
+        #expect(configFiles.map(\.path).sorted() == ["gsx2.config.json", "gsx2.secrets.json"])
+        let secrets = try #require(configFiles.first { $0.path == "gsx2.secrets.json" })
+        #expect(secrets.contents.contains("GSX_GATEWAY_TOKEN"))
+        let config = try #require(configFiles.first { $0.path == "gsx2.config.json" })
+        #expect(!config.contents.contains("GSX_GATEWAY_TOKEN"))
+    }
+
     @Test("the keys needing values are reported rather than left as convincing blanks")
     func reportsUnresolved() async throws {
         let result = try await scaffolder(Files()).plan(

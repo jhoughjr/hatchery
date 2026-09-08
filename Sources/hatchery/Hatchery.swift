@@ -1024,7 +1024,7 @@ struct Service: AsyncParsableCommand {
             let result = try await scaffolder.plan(
                 service: service, into: stack, manifest: parsed,
                 containerPort: port, network: network, gated: gated,
-                siblings: siblings, mintKeypair: mintKeypair)
+                siblings: siblings, mintKeypair: mintKeypair, manifestPath: manifest)
 
             for file in result.files {
                 let verb = file.role == .variableAppend ? "append to" : "write"
@@ -1223,8 +1223,90 @@ struct ServiceKindArgument: ExpressibleByArgument {
 struct Config: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Inspect and check service configuration.",
-        subcommands: [Validate.self, Audit.self, Sync.self, Set.self]
+        subcommands: [Validate.self, Audit.self, Sync.self, Set.self, Split.self]
     )
+
+    /// Move a service's secret keys out of the sidecar the sealing rule already covers.
+    struct Split: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "split",
+            abstract: "Move a service's secret keys from its sidecar into a file of their own.",
+            discussion: """
+                Moves every key a service's contract marks secret from <service>.config.json \
+                into <service>.secrets.json, leaving the rest declared where it already was. \
+                Refuses a service whose sidecar is not yet sealed, so a split never leaves a \
+                secret in a file the archive does not hold.
+                """
+        )
+
+        @Argument(help: "Stack to split.")
+        var stack: String
+
+        @Argument(help: "Split one service instead of every service.")
+        var service: String?
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        @Flag(name: .long, help: "Report what would move without writing anything.")
+        var dryRun: Bool = false
+
+        func run() async throws {
+            // Resolve before reading, so a bare invocation finds the manifest from anywhere.
+            let manifestPath = try ManifestLocator.resolve(manifest)
+            let parsed = try StackManifest.decode(
+                from: Data(contentsOf: URL(fileURLWithPath: manifestPath)))
+            guard let spec = parsed.stack(named: stack) else {
+                throw ValidationError("no stack named '\(stack)' in \(manifestPath)")
+            }
+            let services: [ServiceSpec]
+            if let service {
+                guard let only = spec.services.first(where: { $0.name == service }) else {
+                    throw ValidationError("stack '\(spec.name)' declares no service named '\(service)'")
+                }
+                services = [only]
+            } else {
+                services = spec.services
+            }
+
+            let registry = KindRegistry(manifestPath: manifestPath)
+            var refused = false
+            var wrote = false
+
+            for target in services {
+                guard let contract = EnvContract.contract(for: target.kind, backend: spec.backend, registry: registry) else {
+                    print("\(target.name): no contract known for \(target.kind.rawValue); nothing to split")
+                    continue
+                }
+                do {
+                    let outcome = try ConfigSplitter.split(
+                        service: target,
+                        in: spec,
+                        manifestPath: manifestPath,
+                        contract: contract,
+                        dryRun: dryRun)
+                    if outcome.moved.isEmpty {
+                        print("\(target.name): nothing to move")
+                    } else if dryRun {
+                        print("\(target.name): would move \(outcome.moved.count) key(s): \(outcome.moved.joined(separator: ", "))")
+                    } else {
+                        print("\(target.name): moved \(outcome.moved.count) key(s): \(outcome.moved.joined(separator: ", "))")
+                        wrote = true
+                    }
+                } catch {
+                    print("\(target.name): \(error)")
+                    refused = true
+                }
+            }
+
+            if wrote {
+                print("seal the directory now; hatchery state status reports a moved key as unsealed until then")
+            }
+            if refused {
+                throw ExitCode.failure
+            }
+        }
+    }
 
     /// Fill in a value hatchery could not invent.
     struct Set: AsyncParsableCommand {
@@ -1463,6 +1545,19 @@ struct Config: ParsableCommand {
                             + "\(issues.filter { $0.severity == .warning }.count) warning(s)")
                         for issue in issues {
                             print("    \(issue.severity.rawValue): \(issue.key): \(issue.message)")
+                        }
+
+                        // The sidecar's own content, never the merge with the secrets file: a
+                        // key still here is a key `hatchery config split` has not moved yet.
+                        let sidecarURL = ConfigSync.configURL(
+                            for: service, in: spec, manifestPath: manifest)
+                        if let sidecarDeclared = try? ConfigSync.readDeclared(at: sidecarURL) {
+                            let findings = ConfigValidator.secretInSidecar(
+                                sidecarDeclared, against: contract)
+                            warnings += findings.count
+                            for finding in findings {
+                                print("    \(finding.severity.rawValue): \(finding.key): \(finding.message)")
+                            }
                         }
                     } catch {
                         // A service we cannot read is not a passing service.

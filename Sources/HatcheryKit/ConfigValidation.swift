@@ -73,6 +73,21 @@ public enum ConfigValidator {
         !issues.contains { $0.severity == .error }
     }
 
+    /// Keys a contract marks secret that are still declared in the sidecar rather than moved
+    /// into its secrets file. `declared` is the sidecar's own content, `.config.json` alone,
+    /// never the merge with the secrets file, so a key genuinely still there is what the
+    /// finding names.
+    public static func secretInSidecar(_ declared: [String: String], against contract: EnvContract) -> [ValidationIssue] {
+        declared.keys
+            .filter { contract.secret.contains($0) }
+            .sorted()
+            .map {
+                ValidationIssue(
+                    severity: .warning, key: $0,
+                    message: "secret in the sidecar; hatchery config split moves it out")
+            }
+    }
+
     /// Redact a config map for display. Secret values become a fingerprint, never
     /// the value, so validation output is safe to paste into a ticket.
     public static func redact(_ config: [String: String], contract: EnvContract) -> [String: String] {

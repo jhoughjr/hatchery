@@ -70,6 +70,10 @@ public struct Scaffolder: Sendable {
     }
 
     /// Works out everything that would be written, without writing any of it.
+    ///
+    /// `manifestPath`, when the caller has one in hand, lets a kind file's own contract win
+    /// over the built-in table for both minting and the config/secrets split. A caller with no
+    /// manifest path falls back to the built-in table, as it always did.
     public func plan(
         service: ServiceSpec,
         into stackName: String,
@@ -80,7 +84,8 @@ public struct Scaffolder: Sendable {
         hostPort: String = "80",
         checksDisabled: Bool = true,
         siblings: [String: [String: String]] = [:],
-        mintKeypair: Bool = false
+        mintKeypair: Bool = false,
+        manifestPath: String? = nil
     ) async throws -> ScaffoldResult {
         guard var stack = manifest.stack(named: stackName) else {
             throw ManifestError.invalidStackName(stackName)
@@ -111,7 +116,11 @@ public struct Scaffolder: Sendable {
         }
 
         let secrets = try await planner.resolve(
-            for: resolved, in: stack, siblings: siblings, mintKeypair: mintKeypair)
+            for: resolved,
+            in: stack,
+            siblings: siblings,
+            mintKeypair: mintKeypair,
+            manifestPath: manifestPath)
 
         // A key with no value is left out rather than written as "". The dokku provider rejects
         // a zero-length config value outright — `string length must be at least 1` — so an empty
@@ -122,7 +131,12 @@ public struct Scaffolder: Sendable {
             config[secret.key] = secret.value
         }
 
-        let contract = EnvContract.contract(for: resolved.kind, backend: stack.backend)
+        let contract = manifestPath.map {
+            EnvContract.contract(
+                for: resolved.kind,
+                backend: stack.backend,
+                registry: KindRegistry(manifestPath: $0))
+        } ?? EnvContract.contract(for: resolved.kind, backend: stack.backend)
         let split = contract.map { ConfigSync.split(config, by: $0) }
             ?? (config: config, secrets: [:])
 

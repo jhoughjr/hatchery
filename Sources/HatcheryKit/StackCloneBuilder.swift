@@ -203,7 +203,7 @@ public struct StackCloneBuilder: Sendable {
                 containerPort: options.port ?? shape?.containerPort ?? 8080,
                 network: options.network ?? shape?.network,
                 gated: options.gated ?? shape?.gated ?? false,
-                siblings: siblings)
+                siblings: siblings, manifestPath: created.manifestPath)
             try scaffolder.write(result, in: stack)
             current = result.manifest
             try saveManifest(current, created.manifestPath)
