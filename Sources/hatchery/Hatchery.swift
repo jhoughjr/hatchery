@@ -167,7 +167,11 @@ struct Box: AsyncParsableCommand {
                 every app that runs there, and sorts each one against the manifest: declared \
                 by a stack, hatchery-shaped but undeclared, or foreign.
 
-                A user@host target is probed as a dokku box. 'appPlatform', or no target with \
+                A bare address is probed as a dokku box. A target that names its own account, \
+                such as jimmy@192.168.0.103, falls through to the box's docker daemon and lists \
+                the running containers dokku does not own: dokku's own containers and the buildx \
+                builders are left out, because the first answer to dokku's declaration and the \
+                second are scratch space for a build. 'appPlatform', or no target with \
                 DIGITALOCEAN_TOKEN set, reads App Platform through its API. 'cloudRun' reads \
                 gcloud's configured project. Nothing is written.
                 """
@@ -198,10 +202,14 @@ struct Box: AsyncParsableCommand {
                 throw ExitCode(1)
             }
 
-            let databases = inventory.databases.map { "\($0.count) database(s)" }
-                ?? (inventory.provider == .dokku
-                    ? "databases not listable as the dokku user"
-                    : "databases not tracked by the platform")
+            let databases: String
+            switch inventory.provider {
+            case .dokku: databases = inventory.databases.map { "\($0.count) database(s)" }
+                ?? "databases not listable as the dokku user"
+            case .host: databases = "the clusters inside these containers are declared on their own"
+            default: databases = inventory.databases.map { "\($0.count) database(s)" }
+                ?? "databases not tracked by the platform"
+            }
             print("\(inventory.target)  [\(inventory.provider.rawValue)]  "
                 + "\(inventory.apps.count) app(s), \(databases)")
             if parsed == nil {
@@ -216,6 +224,8 @@ struct Box: AsyncParsableCommand {
                 case .foreign: line += "foreign"
                 }
                 if let image = app.image { line += "  \(image)" }
+                if let network = app.network { line += "  net: \(network)" }
+                if let restart = app.restart { line += "  restart: \(restart)" }
                 if !app.databases.isEmpty { line += "  db: \(app.databases.joined(separator: ", "))" }
                 print(line)
             }
@@ -240,16 +250,21 @@ struct Box: AsyncParsableCommand {
                 The stack must be a dokku stack on the same box. The declaration still needs a \
                 tofu import before plan agrees the app exists, and the command is printed at \
                 the end. Nothing is applied.
+
+                A target that names its own account reads the box's docker daemon instead, and \
+                the named container is declared as a container: one docker inspect carries its \
+                image, network, mounts, ports, restart policy and environment, and the \
+                declaration carries its own import block.
                 """
         )
 
         @Argument(help: "The box, as user@host or a bare address.")
         var target: String
 
-        @Argument(help: "The app to adopt, as dokku names it.")
+        @Argument(help: "The app to adopt, as dokku names it, or the container, as docker names it.")
         var app: String
 
-        @Option(name: .shortAndLong, help: "The dokku stack on that box to declare the app into.")
+        @Option(name: .shortAndLong, help: "The stack on that box to declare it into. The stack's backend decides which of the two is read.")
         var stack: String
 
         @Option(
@@ -288,8 +303,13 @@ struct Box: AsyncParsableCommand {
 
             let scanner = ScanKit.Scanner()
             let (provider, box) = try await scanner.identify(target)
+            if provider == .host {
+                try await adoptContainer(
+                    box: box, manifestPath: manifestPath, manifest: parsed, dryRun: dryRun)
+                return
+            }
             guard provider == .dokku else {
-                throw ValidationError("adopt reads dokku boxes only for now; \(box) is \(provider.rawValue)")
+                throw ValidationError("adopt reads a box or a container; \(box) is \(provider.rawValue)")
             }
             let inventory = try await scanner.scan(target)
             guard inventory.apps.contains(where: { $0.name == app }) else {
@@ -347,6 +367,71 @@ struct Box: AsyncParsableCommand {
             if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
             print("")
             print("  next, in \(spec.tofu?.directory ?? "the stack directory"): \(result.importCommand)")
+        }
+
+        /// The container path: one inspect, the kind the registry knows under that name, and the same
+        /// lock, dry run and write the dokku path uses.
+        private func adoptContainer(
+            box: String, manifestPath: String, manifest parsed: StackManifest, dryRun: Bool
+        ) async throws {
+            let adopter = Adopter()
+            let facts: ContainerInspection
+            do {
+                facts = try await adopter.container(named: app, on: box)
+            } catch let error as AdoptError {
+                throw ValidationError(error.description)
+            } catch let error as ContainerInspectionError {
+                throw ValidationError(error.description)
+            }
+
+            let registry = KindRegistry(manifestPath: manifestPath)
+            // A container's own name is the kind the registry is asked for. Without one the kind is
+            // `container`, whose contract is empty, so every key it runs with stays in the sidecar.
+            let named = try? registry.kindFile(for: ServiceKind(rawValue: facts.name))
+            let resolvedKind = named.map { ServiceKind(rawValue: $0.kind) } ?? kind?.kind ?? .container
+
+            print("\(app) on \(box)")
+            print("  image    \(facts.image)")
+            print("  kind     \(resolvedKind.rawValue)\(named != nil ? " (from a kind file)" : "")")
+            print("  state    \(facts.state)")
+            if let network = facts.spec.network { print("  network  \(network)") }
+            print("  restart  \(facts.spec.restart)")
+            print("  mounts   \(facts.spec.mounts.count), ports \(facts.spec.ports.count)")
+            print("  env      \(facts.environment.count) key(s)")
+            if let path = named?.healthcheck {
+                print("  probe    \(path), from the kind file")
+            } else {
+                print("  probe    \(facts.hasHealthcheck ? "the container's own HEALTHCHECK" : "none declared")")
+            }
+
+            let result: AdoptResult
+            do {
+                result = try await adopter.planContainer(
+                    facts, kind: resolvedKind, into: stack, box: box, manifest: parsed,
+                    manifestPath: manifestPath, kindFile: named)
+            } catch let error as AdoptError {
+                throw ValidationError(error.description)
+            }
+            for file in result.files {
+                let verb = file.role == .variableAppend ? "append to" : "write"
+                print("  \(verb) \(file.path)")
+            }
+            if dryRun {
+                print("  dry run; nothing written")
+                return
+            }
+
+            guard let spec = parsed.stack(named: stack) else { return }
+            let scaffolded = ScaffoldResult(
+                service: result.service, files: result.files, secrets: [], manifest: result.manifest)
+            let written = try Scaffolder().write(scaffolded, in: spec)
+            print("  wrote \(written.count) file(s)")
+            try result.manifest.write(to: manifestPath)
+            print("  manifest updated")
+            if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
+            print("")
+            print("  next, in \(spec.tofu?.directory ?? "the stack directory"): tofu plan")
+            print("  the declaration carries its own import block, so nothing else binds it")
         }
     }
 }

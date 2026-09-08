@@ -1,0 +1,222 @@
+[
+    {
+        "Id": "4af81f8ff62f65b98eddd6157dcf1d44ad01e4e3f048ba606ba86856287997b2",
+        "Created": "2026-08-28T16:21:54.011170152Z",
+        "Path": "/usr/sbin/dnsmasq",
+        "Args": [
+            "--keep-in-foreground"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 2438325,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-09-08T15:56:59.763368081Z",
+            "FinishedAt": "2026-09-08T15:56:59.533438087Z"
+        },
+        "Image": "sha256:52e25fb2601156ab66f6a0872c180b285df7cafaa41267d8d65689f066490641",
+        "ResolvConfPath": "/mnt/nvme/docker/containers/4af81f8ff62f65b98eddd6157dcf1d44ad01e4e3f048ba606ba86856287997b2/resolv.conf",
+        "HostnamePath": "/mnt/nvme/docker/containers/4af81f8ff62f65b98eddd6157dcf1d44ad01e4e3f048ba606ba86856287997b2/hostname",
+        "HostsPath": "/mnt/nvme/docker/containers/4af81f8ff62f65b98eddd6157dcf1d44ad01e4e3f048ba606ba86856287997b2/hosts",
+        "LogPath": "/mnt/nvme/docker/containers/4af81f8ff62f65b98eddd6157dcf1d44ad01e4e3f048ba606ba86856287997b2/4af81f8ff62f65b98eddd6157dcf1d44ad01e4e3f048ba606ba86856287997b2-json.log",
+        "Name": "/lan-dns",
+        "RestartCount": 0,
+        "Driver": "overlayfs",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "docker-default",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": [
+                "/home/jimmy/lan-dns/dnsmasq.conf:/etc/dnsmasq.conf:ro"
+            ],
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {
+                    "max-file": "3",
+                    "max-size": "10m"
+                }
+            },
+            "NetworkMode": "host",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "unless-stopped",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "private",
+            "Dns": [],
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": null,
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 0,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 0,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": [],
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "Storage": {
+            "RootFS": {
+                "Snapshot": {
+                    "Name": "overlayfs"
+                }
+            }
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": "/home/jimmy/lan-dns/dnsmasq.conf",
+                "Destination": "/etc/dnsmasq.conf",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            }
+        ],
+        "Config": {
+            "Hostname": "opi",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "ExposedPorts": {
+                "53/tcp": {},
+                "53/udp": {},
+                "67/udp": {},
+                "69/udp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+            "Cmd": null,
+            "Image": "4km3/dnsmasq:latest",
+            "Volumes": null,
+            "WorkingDir": "/",
+            "Entrypoint": [
+                "/usr/sbin/dnsmasq",
+                "--keep-in-foreground"
+            ],
+            "Labels": {
+                "org.opencontainers.image.created": "2025-11-18T10:03:59.290Z",
+                "org.opencontainers.image.description": "Alpine Linux-based dnsmasq Docker image.",
+                "org.opencontainers.image.licenses": "",
+                "org.opencontainers.image.revision": "4f47739662707292f00990fd31b28354f8456ad8",
+                "org.opencontainers.image.source": "https://github.com/4km3/docker-dnsmasq",
+                "org.opencontainers.image.title": "docker-dnsmasq",
+                "org.opencontainers.image.url": "https://github.com/4km3/docker-dnsmasq",
+                "org.opencontainers.image.version": "2.90-r3"
+            }
+        },
+        "NetworkSettings": {
+            "SandboxID": "ce37f91eba5256777c725913e6faadbda5569fa38a6a1a59a2c7fc3fe2698d07",
+            "SandboxKey": "/var/run/docker/netns/default",
+            "Ports": {},
+            "Networks": {
+                "host": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "50ddde4bd56b749e154fb7c0ed3c33e098d6e982734229571e4c73f3a543a628",
+                    "EndpointID": "345df07d7a73e7926f1d7a026ba967124320edcc579addb390e01fe62a13a565",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "MacAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                }
+            }
+        },
+        "ImageManifestDescriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:3d56401900214a8a487cad9d84ba6bb52562e8bb24755528321f6f0812059cc1",
+            "size": 672,
+            "platform": {
+                "architecture": "arm64",
+                "os": "linux"
+            }
+        }
+    }
+]

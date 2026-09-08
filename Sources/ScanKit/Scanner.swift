@@ -15,16 +15,22 @@ public struct FoundApp: Sendable, Equatable {
     public let databases: [String]
     /// The docker network the app joins, for self-hosted providers. `nil` elsewhere.
     public let network: String?
+    /// What the box does with this container when it stops, for the host provider. `nil` elsewhere.
+    ///
+    /// dokku owns the restart policy of its own containers and never reports it, so this stays absent
+    /// for a dokku app and carries `unless-stopped`, `always`, `no` or `on-failure` for a bare one.
+    public let restart: String?
 
     public init(
         name: String, image: String? = nil, running: Bool, databases: [String] = [],
-        network: String? = nil
+        network: String? = nil, restart: String? = nil
     ) {
         self.name = name
         self.image = image
         self.running = running
         self.databases = databases
         self.network = network
+        self.restart = restart
     }
 }
 
@@ -114,9 +120,21 @@ public struct Scanner: Sendable {
         if probe.status == 0 {
             return (.dokku, box)
         }
+        // A target that names its own account is asking for the docker plane. The dokku account cannot
+        // answer for it: dokku will not speak about a container it did not make, and a bare address is
+        // rewritten to `dokku@` above, so this is only reached for a user someone typed.
+        let shell = target!.trimmingCharacters(in: .whitespaces)
+        let docker = await self.run("docker info --format '{{.ServerVersion}}'", on: shell)
+        let version = docker.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if docker.status == 0, !version.isEmpty {
+            return (.host, shell)
+        }
         throw ScanError.noProviderAnswered(
             target: target!,
-            tried: ["dokku: \(box) did not answer apps:list (\(probe.combined))"])
+            tried: [
+                "dokku: \(box) did not answer apps:list (\(probe.combined))",
+                "host: \(shell) did not answer docker info (\(docker.combined))",
+            ])
     }
 
     /// Everything that runs on the target.
@@ -124,9 +142,10 @@ public struct Scanner: Sendable {
         let (provider, address) = try await self.identify(target)
         switch provider {
         case .dokku: return try await self.scanDokku(box: address)
+        case .host: return try await self.scanHost(box: address)
         case .appPlatform: return try await self.scanAppPlatform()
         case .cloudRun: return try await self.scanCloudRun(project: address)
-        case .aws, .host:
+        case .aws:
             throw ScanError.providerRefused("scan has no reader for \(provider.rawValue) yet")
         }
     }
@@ -140,8 +159,8 @@ public struct Scanner: Sendable {
         func declaring(_ app: FoundApp) -> StackSpec? {
             stacks.first { stack in
                 guard stack.services.contains(where: { $0.name == app.name }) else { return false }
-                // On dokku the box must match too. A platform has one address.
-                if inventory.provider == .dokku, let host = stack.hostAddress {
+                // On a box the address must match too. A platform has one address.
+                if inventory.provider.isSelfHosted, let host = stack.hostAddress {
                     return inventory.target.hasSuffix(host)
                 }
                 return true
@@ -210,6 +229,61 @@ public struct Scanner: Sendable {
         text.split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.hasPrefix("=====>") && !$0.hasPrefix("NAME") }
+    }
+
+    // MARK: host
+
+    /// Every running container the box holds that no other declaration owns.
+    ///
+    /// The names come from `docker ps` and the facts from one `docker inspect` over the filtered set, so a
+    /// box with thirty containers costs two round trips rather than thirty. A dokku container and a buildx
+    /// builder are dropped before the inspect: dokku's provider declares the first, and the second is
+    /// scratch space for a build.
+    private func scanHost(box: String) async throws -> Inventory {
+        let listed = await self.run("docker ps --format '{{.Names}}'", on: box)
+        guard listed.status == 0 else { throw ScanError.providerRefused(listed.combined) }
+        let names = listed.standardOutput
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && ContainerNames.isDeclarable($0) }
+
+        guard !names.isEmpty else {
+            return Inventory(provider: .host, target: box, apps: [], databases: nil)
+        }
+
+        let inspected = await self.run(
+            "docker inspect \(names.joined(separator: " "))", on: box)
+        guard inspected.status == 0 else { throw ScanError.providerRefused(inspected.combined) }
+        return try Self.hostInventory(from: Data(inspected.standardOutput.utf8), box: box)
+    }
+
+    /// The inventory a `docker inspect` answer describes. Split out so a test can hand it recorded bytes.
+    ///
+    /// A container has no database attachment the daemon knows about: the cluster inside one is declared on
+    /// its own. Databases are therefore unknown here rather than none.
+    static func hostInventory(from body: Data, box: String) throws -> Inventory {
+        guard let inspected = try? ContainerInspection.decodeAll(body) else {
+            throw ScanError.providerRefused("docker inspect did not answer with a JSON array")
+        }
+        let apps = inspected.map {
+            FoundApp(
+                name: $0.name, image: $0.image, running: $0.running,
+                network: $0.spec.network, restart: $0.spec.restart)
+        }
+        return Inventory(provider: .host, target: box, apps: apps, databases: nil)
+    }
+
+    /// One command on the box, as one string the remote shell parses.
+    ///
+    /// The command is not split here, unlike the dokku door: a docker `--format` argument carries quotes and
+    /// braces, and splitting it on spaces would hand the remote shell half a template.
+    private func run(_ command: String, on box: String) async -> CommandOutput {
+        let argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box, command]
+        do {
+            return try await self.execute(argv, nil)
+        } catch {
+            return CommandOutput(status: 255, standardOutput: "", standardError: "\(error)")
+        }
     }
 
     // MARK: Cloud Run

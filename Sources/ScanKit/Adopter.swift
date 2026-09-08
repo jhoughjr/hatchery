@@ -40,6 +40,8 @@ public enum AdoptError: Error, Equatable, CustomStringConvertible {
     case stackNotOnBox(stack: String, box: String)
     case kindUnknown(app: String, image: String)
     case unreadable(String)
+    /// A container is declared on a stack of the `host` backend, and the named stack is on another.
+    case stackNotOnHost(stack: String, backend: String, box: String)
 
     public var description: String {
         switch self {
@@ -54,6 +56,12 @@ public enum AdoptError: Error, Equatable, CustomStringConvertible {
                 + "pass --kind-file, add it to the registry, or pass --kind"
         case .unreadable(let what):
             return "the box did not answer \(what)"
+        case .stackNotOnHost(let stack, let backend, let box):
+            return """
+                stack '\(stack)' is on the \(backend) backend, and a container is declared on a host \
+                stack. A host stack for \(box) is made with: hatchery stack new <name> --backend host \
+                --host \(box) --tofu-dir <dir>
+                """
         }
     }
 }
@@ -188,6 +196,95 @@ public struct Adopter: Sendable {
         return AdoptResult(
             service: scaffolded.service, files: files, manifest: scaffolded.manifest,
             importCommand: "tofu import dokku_app.\(tofuIdentifier(for: facts.name)) \(facts.name)")
+    }
+
+    // MARK: containers
+
+    /// Everything the box will say about one container, as an account that can drive the daemon.
+    ///
+    /// One `docker inspect` carries the whole run: the image, the network, the mounts, the ports, the
+    /// restart policy and the environment. A dokku app takes six calls to say as much, because dokku keeps
+    /// each of those in a report of its own.
+    public func container(named name: String, on box: String) async throws -> ContainerInspection {
+        let output: CommandOutput
+        do {
+            output = try await self.execute(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box,
+                 "docker inspect \(name)"], nil)
+        } catch {
+            throw AdoptError.unreadable("docker inspect \(name)")
+        }
+        guard output.status == 0 else {
+            throw AdoptError.notOnBox(app: name, box: box)
+        }
+        return try ContainerInspection.decode(Data(output.standardOutput.utf8))
+    }
+
+    /// The plan for a container: the service joins `stackName` on the host backend, with the box's own
+    /// environment in place of minted values, and a declaration that imports what is already running.
+    ///
+    /// `kindFile`, when the registry holds one under the container's name, wins for `healthcheck`. Without
+    /// one the service records no health path, and the container's own HEALTHCHECK is what status reads.
+    public func planContainer(
+        _ facts: ContainerInspection, kind: ServiceKind, into stackName: String, box: String,
+        manifest: StackManifest, manifestPath: String, kindFile: KindFile? = nil
+    ) async throws -> AdoptResult {
+        guard let stack = manifest.stack(named: stackName) else {
+            throw AdoptError.stackNotOnBox(stack: stackName, box: box)
+        }
+        guard stack.backend == .host else {
+            throw AdoptError.stackNotOnHost(
+                stack: stackName, backend: stack.backend.rawValue, box: box)
+        }
+        guard let host = stack.hostAddress, box.hasSuffix(host) else {
+            throw AdoptError.stackNotOnBox(stack: stackName, box: box)
+        }
+        for declared in manifest.stacks
+        where declared.services.contains(where: { $0.name == facts.name }) {
+            throw AdoptError.alreadyDeclared(app: facts.name, stack: declared.name)
+        }
+
+        let service = ServiceSpec(
+            name: facts.name, kind: kind, image: facts.image,
+            configFile: "\(facts.name).config.json",
+            healthPath: kindFile?.healthcheck,
+            container: facts.spec)
+        let scaffolded = try await Scaffolder().plan(
+            service: service, into: stackName, manifest: manifest, containerID: facts.id,
+            manifestPath: manifestPath)
+
+        // The scaffolder minted nothing, because a container's kind carries no built-in contract. The box's
+        // environment replaces the empty sidecar, split by whatever contract the kind does have.
+        let contract = EnvContract.contract(
+            for: kind, backend: .host, registry: KindRegistry(manifestPath: manifestPath))
+        let split = contract.map { ConfigSync.split(facts.environment, by: $0) }
+            ?? (config: facts.environment, secrets: [:])
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let configJSON = String(decoding: try encoder.encode(split.config), as: UTF8.self)
+        var files = try scaffolded.files.map { file -> GeneratedFile in
+            guard file.role == .config else { return file }
+            let contents = file.path == service.configFile
+                ? configJSON
+                : String(decoding: try encoder.encode(split.secrets), as: UTF8.self)
+            return GeneratedFile(path: file.path, contents: contents + "\n", role: .config)
+        }
+        // The scaffolder writes a secrets file only when it minted something, and a container mints nothing,
+        // so the file the split needs is added here.
+        let secretsName = ConfigSync.secretsURL(
+            for: service, in: stack, manifestPath: manifestPath)?.lastPathComponent
+        if !split.secrets.isEmpty, let secretsFile = secretsName,
+            !files.contains(where: { $0.path == secretsFile })
+        {
+            let secretsJSON = String(decoding: try encoder.encode(split.secrets), as: UTF8.self)
+            files.append(
+                GeneratedFile(path: secretsFile, contents: secretsJSON + "\n", role: .config))
+        }
+
+        return AdoptResult(
+            service: scaffolded.service, files: files, manifest: scaffolded.manifest,
+            importCommand: "tofu import docker_container.\(tofuIdentifier(for: facts.name)) \(facts.id)")
     }
 
     // MARK: parsing

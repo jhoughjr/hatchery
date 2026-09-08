@@ -85,13 +85,16 @@ public enum URLSessionTransport {
 public struct StatusReporter: Sendable {
     private let transport: HealthTransport
     private let timeout: Duration
+    private let execute: CommandExecutor
 
     public init(
         transport: @escaping HealthTransport = URLSessionTransport.live,
-        timeout: Duration = .seconds(5)
+        timeout: Duration = .seconds(5),
+        execute: @escaping CommandExecutor = ShellRunner.liveExecutor
     ) {
         self.transport = transport
         self.timeout = timeout
+        self.execute = execute
     }
 
     public func status(of stack: StackSpec) async -> StackStatus {
@@ -111,6 +114,9 @@ public struct StatusReporter: Sendable {
     }
 
     public func status(of service: ServiceSpec, in stack: StackSpec? = nil) async -> ServiceHealth {
+        if let stack, stack.backend == .host, let container = service.container {
+            return await self.containerStatus(of: service, container: container, in: stack)
+        }
         guard let probe = service.healthRequest(in: stack) else {
             return HealthInterpreter.unreachable(service: service.name, reason: "no address declared")
         }
@@ -133,6 +139,89 @@ public struct StatusReporter: Sendable {
                 latencyMs: latencyMs
             )
         }
+    }
+
+    /// Grades a container from what the box says about it, and then from its health path when it has one.
+    ///
+    /// A container has no vhost to ask, so the daemon is the only witness that it exists at all. Docker's own
+    /// health is read where the container declares a HEALTHCHECK, because a process that is up and failing
+    /// its own check is degraded rather than responding.
+    private func containerStatus(
+        of service: ServiceSpec, container: ContainerSpec, in stack: StackSpec
+    ) async -> ServiceHealth {
+        guard let box = stack.host, !box.isEmpty else {
+            return HealthInterpreter.unreachable(
+                service: service.name, reason: "the stack declares no box")
+        }
+        let output: CommandOutput
+        do {
+            output = try await self.execute(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box,
+                 "docker inspect \(service.name)"], nil)
+        } catch {
+            return HealthInterpreter.unreachable(service: service.name, reason: "cannot reach \(box)")
+        }
+        guard output.status == 0 else {
+            // The daemon answers about a name it does not hold, and ssh answers about a box that is not
+            // there, with the same nonzero status. The message is what separates them.
+            let missing = output.combined.lowercased().contains("no such object")
+            return HealthInterpreter.unreachable(
+                service: service.name,
+                reason: missing
+                    ? "no container named '\(service.name)' on the box"
+                    : "the box did not answer docker inspect")
+        }
+        guard let read = try? ContainerInspection.decode(Data(output.standardOutput.utf8)) else {
+            return HealthInterpreter.unreachable(
+                service: service.name, reason: "docker inspect answered with nothing readable")
+        }
+
+        guard read.running else {
+            return ServiceHealth(
+                service: service.name, state: .degraded, reasons: ["the container is \(read.state)"])
+        }
+        if let health = read.health, health != "healthy" {
+            return ServiceHealth(
+                service: service.name, state: .degraded, reasons: ["docker reports it \(health)"])
+        }
+
+        if let path = service.healthPath, !path.isEmpty,
+            let request = Self.containerProbe(path: path, container: container, box: box)
+        {
+            let result = await self.transport(request, self.timeout)
+            switch result {
+            case .response(let status, _, _) where (200..<400).contains(status):
+                return ServiceHealth(service: service.name, state: .ready, reasons: [])
+            case .response(let status, _, _):
+                return ServiceHealth(
+                    service: service.name, state: .responding, reasons: ["HTTP \(status) at \(path)"])
+            case .failure(let reason):
+                return ServiceHealth(
+                    service: service.name, state: .responding,
+                    reasons: ["running, and \(path) did not answer (\(reason))"])
+            }
+        }
+
+        guard read.health == "healthy" else {
+            return ServiceHealth(
+                service: service.name, state: .responding,
+                reasons: ["running, and it reports no readiness of its own"])
+        }
+        return ServiceHealth(service: service.name, state: .ready, reasons: [])
+    }
+
+    /// Where to reach a container's health path.
+    ///
+    /// A container on the host network answers at the box's own address, because it holds the box's ports.
+    /// Any other container is reachable only where it publishes a port, so a container that publishes none
+    /// has no address a probe can use.
+    static func containerProbe(path: String, container: ContainerSpec, box: String) -> HealthRequest? {
+        let address = box.split(separator: "@").last.map(String.init) ?? box
+        if container.network == "host" {
+            return URL(string: "http://\(address)\(path)").map { HealthRequest(url: $0) }
+        }
+        guard let port = container.ports.first else { return nil }
+        return URL(string: "http://\(address):\(port.host)\(path)").map { HealthRequest(url: $0) }
     }
 
     public func status(of manifest: StackManifest) async -> [StackStatus] {
