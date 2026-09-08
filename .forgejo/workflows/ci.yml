@@ -1,0 +1,43 @@
+name: build
+
+# The forge's gate. The GitHub workflow beside this one keeps running on GitHub;
+# the forge reads .forgejo/workflows and falls back to .github only when this is absent.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# One live run per ref. A force-push should not leave the runner finishing a build
+# nobody can merge.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # linux picks opi-forge. mini-forge also declares arm64 but runs in host mode with
+    # no docker, and a container job that lands there fails at the image pull.
+    runs-on: [self-hosted, linux, arm64]
+    # Not 6.1-noble, which the other repos use. This package pins 6.3.3 in
+    # .swift-version, and 6.3.2-noble is the newest image that starts on this runner.
+    # It also carries python3, which 6.1-noble does not and the page check needs.
+    container: roost-swift-ci:6.3.2-noble
+    steps:
+      - uses: actions/checkout@v4
+
+      # Links .build to /swiftcache/<repo> and says whether the cache was warm or cold.
+      # This replaces the home-directory scratch path the GitHub job carries: checkout
+      # cleans untracked files every run, so build state has to live outside the workspace,
+      # and the action owns where that is rather than each repo choosing its own.
+      - uses: actions/swift-ci@v1
+
+      # A JS syntax error in the dashboard's inline script is a page that never renders,
+      # and one shipped. Cheap to check, expensive to ship.
+      - name: page script parses
+        run: bash Scripts/check-page-syntax.sh
+
+      - name: build
+        run: swift build --build-tests
+
+      - name: test
+        run: swift test --skip-build
