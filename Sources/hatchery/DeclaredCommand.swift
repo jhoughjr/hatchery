@@ -27,11 +27,24 @@ struct Declared: AsyncParsableCommand {
     @Option(name: .long, help: "The file holding the pulse node key.")
     var keyFile: String = "~/.roost_node_key"
 
+    @Option(name: .long, help: "Write this pulse URL into each manifest as its publish target, so every later write publishes on its own. An empty string clears it.")
+    var publishTo: String?
+
     func run() async throws {
         let requested = self.manifest.isEmpty ? [ManifestLocator.defaultName] : self.manifest
         var loaded: [(manifest: StackManifest, path: String)] = []
         for request in requested {
             loaded.append(try ManifestLocator.load(request))
+        }
+        if let target = self.publishTo {
+            // Setting the target is a write, and a write publishes, so each manifest reaches pulse here on its own.
+            loaded = try loaded.map { entry in
+                var manifest = entry.manifest
+                manifest.publish = target.isEmpty ? nil : target
+                try manifest.write(to: entry.path)
+                return (manifest: manifest, path: entry.path)
+            }
+            print("  publish target \(target.isEmpty ? "cleared" : "set to " + target) on \(loaded.count) manifest(s)")
         }
         let document = Declaration(manifests: loaded)
         let data = try document.encoded()

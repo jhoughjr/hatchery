@@ -311,7 +311,7 @@ struct Box: AsyncParsableCommand {
                 service: result.service, files: result.files, secrets: [], manifest: result.manifest)
             let written = try Scaffolder().write(scaffolded, in: spec)
             print("  wrote \(written.count) file(s)")
-            try result.manifest.encoded().write(to: URL(fileURLWithPath: manifestPath))
+            try result.manifest.write(to: manifestPath)
             print("  manifest updated")
             if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
             print("")
@@ -457,7 +457,7 @@ struct Deploy: AsyncParsableCommand {
         // would leave the declaration claiming an image that never planned.
         if result.plan.updatesManifest {
             let updated = parsed.settingImage(stack: stack, service: service, to: result.plan.target)
-            try updated.encoded().write(to: URL(fileURLWithPath: manifest))
+            try updated.write(to: manifest)
             print("  manifest updated to \(result.plan.target)")
         }
 
@@ -632,7 +632,7 @@ struct Host: ParsableCommand {
             // Normalised on the way in, so `@opi` cannot resolve to something that fails auth.
             let normalised = DokkuProvider.sshTarget(target)
             let updated = try parsed.savingHost(name, target: normalised)
-            try updated.encoded().write(to: URL(fileURLWithPath: path))
+            try updated.write(to: path)
 
             print("  @\(name) -> \(normalised)")
             if let warning = DokkuProvider.userWarning(normalised) {
@@ -679,7 +679,7 @@ struct Host: ParsableCommand {
             let path = try ManifestLocator.resolve(manifest)
             let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: path)))
             let updated = try parsed.removingHost(name)
-            try updated.encoded().write(to: URL(fileURLWithPath: path))
+            try updated.write(to: path)
             print("  forgot @\(name)")
         }
     }
@@ -764,7 +764,7 @@ struct Serve: AsyncParsableCommand {
             try FileManager.default.createDirectory(
                 at: directory, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
-            try manifest.encoded().write(to: URL(fileURLWithPath: path))
+            try manifest.write(to: path)
         }
 
         let historyPath = history ?? TransitionLog.defaultPath(besideManifest: resolved)
@@ -948,7 +948,7 @@ struct Service: AsyncParsableCommand {
             let written = try scaffolder.write(result, in: spec)
             print("  wrote \(written.count) file(s)")
 
-            try result.manifest.encoded().write(to: URL(fileURLWithPath: manifest))
+            try result.manifest.write(to: manifest)
             print("  manifest updated")
 
             // Scaffolding mints secrets — a signing key among them. This is exactly the write
@@ -1486,7 +1486,7 @@ struct Stack: ParsableCommand {
             }
 
             let created = try await bootstrapper.create(planned)
-            try created.manifest.encoded().write(to: URL(fileURLWithPath: created.manifestPath))
+            try created.manifest.write(to: created.manifestPath)
             print("  wrote \(created.manifestPath)")
             print("  tofu init: ok")
             if let line = await StateMaintenance.seal(after: created.manifestPath) {
@@ -1567,8 +1567,7 @@ struct Stack: ParsableCommand {
                     domains: spec.services.flatMap(\.domains), stack: spec
                 ) { print("    \($0)") }
             }
-            try parsed.removing(stack: spec.name).encoded()
-                .write(to: URL(fileURLWithPath: path))
+            try parsed.removing(stack: spec.name).write(to: path)
             print("  removed '\(spec.name)' from \(path)")
             if purge, let directory = spec.tofu?.directory {
                 // A failure to delete is a line, not a failed destroy — the teardown happened.

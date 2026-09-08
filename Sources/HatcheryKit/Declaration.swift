@@ -67,6 +67,7 @@ extension Declaration {
     /// The key never joins a command line, so this is the only way it travels.
     public static func nodeKey(at path: String) throws -> String {
         let expanded = (path as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: expanded) else { throw DeclarationError.noKey(expanded) }
         let key = try String(contentsOfFile: expanded, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { throw DeclarationError.emptyKey(expanded) }
         return key
@@ -92,14 +93,46 @@ extension Declaration {
     }
 }
 
+extension Declaration {
+    /// The publish for a synchronous command: encode, read the key, post, and answer nil on success or a short reason.
+    /// A missing key is a reason and not a throw, because a write must finish whatever the publish does.
+    public static func publishSync(_ document: Declaration, to pulse: String, keyFile: String = "~/.roost_node_key") -> String? {
+        let data: Data
+        let key: String
+        do {
+            data = try document.encoded()
+            key = try Self.nodeKey(at: keyFile)
+        } catch {
+            return "\(error)"
+        }
+        let done = DispatchSemaphore(value: 0)
+        let box = ReasonBox()
+        Task {
+            box.reason = await Self.publish(data, to: pulse, key: key)
+            done.signal()
+        }
+        done.wait()
+        return box.reason
+    }
+}
+
+/// Carries the answer across the semaphore.
+private final class ReasonBox: @unchecked Sendable {
+    var reason: String?
+}
+
 public enum DeclarationError: Error, CustomStringConvertible {
     /// - `emptyKey`: the key file exists and holds nothing.
+    /// - `noKey`: there is no key file at the path.
     case emptyKey(String)
+    case noKey(String)
 
     public var description: String {
         switch self {
         case .emptyKey(let path):
             return "the key file at \(path) is empty"
+        case .noKey(let path):
+            return "no pulse node key at \(path)"
         }
     }
 }

@@ -214,11 +214,36 @@ public struct StackManifest: Codable, Sendable, Equatable {
     public var stacks: [StackSpec]
     /// SSH targets saved by name, so a box is written once and referred to afterwards.
     public var hosts: [String: String]?
+    /// Where this manifest publishes its declaration when it is written, as a pulse base URL.
+    /// Absent means the declaration is read by hand with `hatchery declared`.
+    public var publish: String?
 
     public init(version: Int = 1, stacks: [StackSpec] = [], hosts: [String: String]? = nil) {
         self.version = version
         self.stacks = stacks
         self.hosts = hosts
+        self.publish = nil
+    }
+
+    public init(version: Int = 1, stacks: [StackSpec] = [], hosts: [String: String]? = nil, publish: String?) {
+        self.version = version
+        self.stacks = stacks
+        self.hosts = hosts
+        self.publish = publish
+    }
+
+    /// The one door that writes a manifest to disk.
+    /// When the manifest names a publish target, the declaration goes there as the write finishes, so the declared reading is true by construction.
+    /// A publish that fails prints one line and never fails the write, because the manifest on disk is the record and pulse is the copy.
+    public func write(to path: String) throws {
+        try self.encoded().write(to: URL(fileURLWithPath: path))
+        guard let target = self.publish, !target.isEmpty else { return }
+        let document = Declaration(manifests: [(manifest: self, path: path)])
+        if let reason = Declaration.publishSync(document, to: target) {
+            FileHandle.standardError.write(Data("  publish: pulse did not take the declaration (\(reason))\n".utf8))
+        } else {
+            FileHandle.standardError.write(Data("  published the declaration to \(target)\n".utf8))
+        }
     }
 
     public func stack(named name: String) -> StackSpec? {

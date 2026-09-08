@@ -111,7 +111,7 @@ public struct StackCloneBuilder: Sendable {
             try ConfigSync.encoded($1).write(to: $0)
         },
         saveManifest: @escaping @Sendable (StackManifest, String) throws -> Void = {
-            try $0.encoded().write(to: URL(fileURLWithPath: $1))
+            try $0.write(to: $1)
         },
         sealState: @escaping @Sendable (String) async -> String? = {
             await StateMaintenance.seal(after: $0)
