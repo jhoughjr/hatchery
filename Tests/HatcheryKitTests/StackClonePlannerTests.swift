@@ -38,7 +38,7 @@ private final class Counter: @unchecked Sendable {
 struct StackClonePlannerTests {
     private func plan(
         readLive: @escaping StackClonePlanner.LiveRead,
-        readDeclared: @escaping StackClonePlanner.DeclaredRead = { _ in [:] }
+        readDeclared: @escaping StackClonePlanner.DeclaredRead = { _, _ in [:] }
     ) async throws -> PlannedClone {
         try await StackClonePlanner(readLive: readLive, readDeclared: readDeclared).plan(
             stack: source(), into: "mwlab-2", environment: .staging,
@@ -58,6 +58,20 @@ struct StackClonePlannerTests {
         // Not-implemented-yet is a fact about the backend, not a failure worth a warning.
         let planned = try await plan(
             readLive: { _, _ in throw LiveConfigError.unsupportedBackend(.dokku) })
+        #expect(planned.origins["mwlab-2"] == "declared file")
+    }
+
+    /// A source service split into two files still plans correctly from the declared fallback:
+    /// the secrets file's URL reaches the reader beside the sidecar's, not instead of it.
+    @Test("the declared fallback reads the secrets file beside the sidecar too")
+    func declaredFallbackReadsTheSecretsFile() async throws {
+        let planned = try await plan(
+            readLive: { _, _ in throw LiveConfigError.unsupportedBackend(.dokku) },
+            readDeclared: { url, secretsURL in
+                #expect(url.lastPathComponent == "mwlab.config.json")
+                #expect(secretsURL?.lastPathComponent == "mwlab.secrets.json")
+                return ["LOG_LEVEL": "debug"]
+            })
         #expect(planned.origins["mwlab-2"] == "declared file")
     }
 
@@ -123,7 +137,7 @@ struct StackClonePlannerTests {
         do {
             _ = try await plan(
                 readLive: { _, _ in throw LiveConfigError.unsupportedBackend(.dokku) },
-                readDeclared: { _ in
+                readDeclared: { _, _ in
                     throw CocoaError(.fileReadNoSuchFile)
                 })
             Issue.record("planning succeeded from a config nobody could read")

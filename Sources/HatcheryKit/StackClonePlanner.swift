@@ -40,7 +40,7 @@ public struct PlannedClone: Sendable {
 /// promise different clones.
 public struct StackClonePlanner: Sendable {
     public typealias LiveRead = @Sendable (ServiceSpec, StackSpec) async throws -> [String: String]
-    public typealias DeclaredRead = @Sendable (URL) throws -> [String: String]
+    public typealias DeclaredRead = @Sendable (URL, URL?) throws -> [String: String]
     /// Whether a planned database's server answers, before anything is created.
     public typealias ServerProbe = @Sendable (DatabaseClonePlan, String, String?) async -> String?
 
@@ -49,7 +49,9 @@ public struct StackClonePlanner: Sendable {
     public static let liveRead: LiveRead = { service, stack in
         try await LiveConfigReader().config(for: service, in: stack)
     }
-    public static let declaredRead: DeclaredRead = { try ConfigSync.readDeclared(at: $0) }
+    public static let declaredRead: DeclaredRead = {
+        try ConfigSync.readDeclared(config: $0, secrets: $1)
+    }
     public static let serverProbe: ServerProbe = { plan, host, admin in
         await DatabaseProvisioner().probe(plan, host: host, admin: admin)
     }
@@ -101,6 +103,7 @@ public struct StackClonePlanner: Sendable {
             // exists to find. When live reading fails or isn't supported the declared file
             // stands in, and the origin says which one the plan was made from.
             let url = ConfigSync.configURL(for: service, in: source, manifestPath: manifestPath)
+            let secretsURL = ConfigSync.secretsURL(for: service, in: source, manifestPath: manifestPath)
             let config: [String: String]
             let origin: String
             do {
@@ -110,7 +113,7 @@ public struct StackClonePlanner: Sendable {
                 let why = error is LiveConfigError
                     ? "" : " — live read failed: \(error); the box may disagree"
                 do {
-                    config = try readDeclared(url)
+                    config = try readDeclared(url, secretsURL)
                     origin = "declared file\(why)"
                 } catch {
                     throw UnreadableConfig(
