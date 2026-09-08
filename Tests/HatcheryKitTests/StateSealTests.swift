@@ -56,6 +56,12 @@ struct SecretPredicateTests {
         #expect(SealedState.isSecret("mwserver-tf/terraform.tfstate.backup"))
     }
 
+    @Test("a secrets file split out of a config map counts too")
+    func includesSecretsFiles() {
+        #expect(SealedState.isSecret("mwlab.secrets.json"))
+        #expect(SealedState.isSecret("mwserver-tf/comlab.secrets.json"))
+    }
+
     @Test("declarations and provider binaries do not")
     func excluded() {
         #expect(!SealedState.isSecret("mwlab.tf"))

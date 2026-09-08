@@ -175,12 +175,20 @@ public struct StackCloneBuilder: Sendable {
             }
 
             // Siblings are the services already added to *this* clone, so shared keys are
-            // shared within the new stack rather than carried from the source.
+            // shared within the new stack rather than carried from the source. A shared secret,
+            // such as a keypair split into its own file, must still be visible here or a later
+            // service mints a fresh one instead of matching the one already deployed.
             var siblings: [String: [String: String]] = [:]
             for existing in stack.services {
                 let url = ConfigSync.configURL(
                     for: existing, in: stack, manifestPath: created.manifestPath)
-                if let config = try? readConfig(url) { siblings[existing.name] = config }
+                let secretsURL = ConfigSync.secretsURL(
+                    for: existing, in: stack, manifestPath: created.manifestPath)
+                var config = (try? readConfig(url)) ?? [:]
+                if let secretsURL, let secrets = try? readConfig(secretsURL) {
+                    config.merge(secrets) { _, secret in secret }
+                }
+                if !config.isEmpty { siblings[existing.name] = config }
             }
 
             let spec = ServiceSpec(
@@ -251,8 +259,21 @@ public struct StackCloneBuilder: Sendable {
                 let landed = target.service(named: service.name) {
                 let url = ConfigSync.configURL(
                     for: landed, in: target, manifestPath: created.manifestPath)
-                let existing = (try? readConfig(url)) ?? [:]
-                try writeConfig(url, ConfigSync.applying(values, to: existing))
+                let secretsURL = ConfigSync.secretsURL(
+                    for: landed, in: target, manifestPath: created.manifestPath)
+                var existing = (try? readConfig(url)) ?? [:]
+                if let secretsURL, let secrets = try? readConfig(secretsURL) {
+                    existing.merge(secrets) { _, secret in secret }
+                }
+                let merged = ConfigSync.applying(values, to: existing)
+
+                let contract = EnvContract.contract(for: landed.kind, backend: target.backend)
+                let split = contract.map { ConfigSync.split(merged, by: $0) }
+                    ?? (config: merged, secrets: [:])
+                try writeConfig(url, split.config)
+                if !split.secrets.isEmpty, let secretsURL {
+                    try writeConfig(secretsURL, split.secrets)
+                }
             }
 
             for line in databaseReport { onProgress("  " + line) }

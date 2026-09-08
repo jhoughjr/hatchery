@@ -34,15 +34,19 @@ public enum SealedState {
     }
 
     /// The files that carry secret values, by the same rule `seal.sh` uses: config maps hold
-    /// credentials, and tfstate holds every value the provider has ever seen, in cleartext.
+    /// credentials, a `.secrets.json` file holds the keys a config map split out, and tfstate
+    /// holds every value the provider has ever seen, in cleartext.
     ///
     /// Kept deliberately identical to the `find` in that script. If the two disagree, a file is
-    /// either sealed but unreported or reported but unsealed — and both of those read as safe.
+    /// either sealed but unreported or reported but unsealed, and both of those read as safe.
+    /// `seal.sh` must carry the same `.secrets.json` pattern in its own `find`, or a split leaves
+    /// a secret file uncounted by the archive that is meant to hold it.
     public static func isSecret(_ relativePath: String) -> Bool {
         let parts = relativePath.split(separator: "/").map(String.init)
         if parts.contains(".terraform") || parts.contains(".git") { return false }
         guard let name = parts.last else { return false }
         return name.hasSuffix(".config.json")
+            || name.hasSuffix(".secrets.json")
             || name == "terraform.tfstate"
             || name == "terraform.tfstate.backup"
     }

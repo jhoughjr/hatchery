@@ -10,6 +10,11 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     public var image: String
     public var domains: [String]
     public var configFile: String
+    /// Where this service's secret keys live, split out from `configFile`.
+    ///
+    /// Absent from most manifests. When absent, `ConfigSync.secretsURL(...)` derives the name
+    /// by replacing `.config.json` with `.secrets.json`.
+    public var secretsFile: String?
     /// An explicit base URL, which overrides the address derived from `domains`.
     /// Both this and ``healthPath`` are optional, so a manifest written before them still reads.
     public var baseURL: String?
@@ -34,6 +39,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         image: String,
         domains: [String] = [],
         configFile: String,
+        secretsFile: String? = nil,
         baseURL: String? = nil,
         healthPath: String? = nil,
         deploymentID: String? = nil,
@@ -44,6 +50,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         self.image = image
         self.domains = domains
         self.configFile = configFile
+        self.secretsFile = secretsFile
         self.baseURL = baseURL
         self.healthPath = healthPath
 
@@ -116,6 +123,15 @@ extension ServiceSpec {
     /// The published address, ignoring any box-level routing.
     public func healthURL() -> URL? {
         healthRequest()?.url
+    }
+
+    /// The secrets sidecar name this service would use by convention.
+    ///
+    /// `nil` when `configFile` does not end in `.config.json`, the one name the sealing rule
+    /// keys on. `ConfigSync.secretsURL(...)` uses this when `secretsFile` is not set explicitly.
+    var conventionalSecretsFile: String? {
+        guard configFile.hasSuffix(".config.json") else { return nil }
+        return String(configFile.dropLast(".config.json".count)) + ".secrets.json"
     }
 
     /// A public name gets TLS. A single-label or lab-suffixed name is a LAN address that no

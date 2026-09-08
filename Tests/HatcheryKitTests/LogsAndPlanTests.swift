@@ -406,7 +406,7 @@ struct ConfigCompletenessTests {
     func reportsMissing() {
         let status = ConfigCompleteness.check(
             service: stack.services[0], in: stack, manifestPath: "/infra/lab/hatchery.json",
-            read: { _ in ["APP_URL": "http://x"] })
+            read: { _, _ in ["APP_URL": "http://x"] })
 
         #expect(!status.complete)
         #expect(status.missing.contains("DATABASE_PASSWORD"))
@@ -420,7 +420,7 @@ struct ConfigCompletenessTests {
         for key in contract.required { full[key] = "value" }
 
         let status = ConfigCompleteness.check(
-            service: stack.services[0], in: stack, manifestPath: "/m.json", read: { _ in full })
+            service: stack.services[0], in: stack, manifestPath: "/m.json", read: { _, _ in full })
         #expect(status.complete)
         #expect(status.summary == nil)
     }
@@ -429,7 +429,7 @@ struct ConfigCompletenessTests {
     func emptyIsMissing() {
         let status = ConfigCompleteness.check(
             service: stack.services[0], in: stack, manifestPath: "/m.json",
-            read: { _ in ["DATABASE_PASSWORD": ""] })
+            read: { _, _ in ["DATABASE_PASSWORD": ""] })
         #expect(status.missing.contains("DATABASE_PASSWORD"))
     }
 
@@ -437,11 +437,44 @@ struct ConfigCompletenessTests {
     func missingFileIsNotComplete() {
         let status = ConfigCompleteness.check(
             service: stack.services[0], in: stack, manifestPath: "/m.json",
-            read: { _ in throw CocoaError(.fileNoSuchFile) })
+            read: { _, _ in throw CocoaError(.fileNoSuchFile) })
 
         #expect(!status.found)
         #expect(!status.complete)
         #expect(status.summary == "no config file")
+    }
+
+    /// A required key split into the secrets file is not missing: with the default reader,
+    /// `check` reads the sidecar and the secrets file as one declaration, the same as
+    /// `ConfigSync.readDeclared(config:secrets:)`.
+    @Test("a required key found only in the secrets file is not reported missing")
+    func secretsFileKeyCountsAsPresent() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hatchery-completeness-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let splitStack = StackSpec(
+            name: "lab", backend: .dokku, host: "dokku@h",
+            tofu: TofuBinding(directory: directory.path),
+            services: stack.services)
+        let contract = EnvContract.contract(for: .paymentGateway, backend: .dokku)!
+        var full: [String: String] = [:]
+        for key in contract.required { full[key] = "value" }
+        let secretOnly = full.filter { contract.secret.contains($0.key) }
+        let configOnly = full.filter { !contract.secret.contains($0.key) }
+        try #require(!secretOnly.isEmpty)
+
+        try ConfigSync.encode(configOnly)
+            .write(to: directory.appendingPathComponent("svc.config.json"))
+        try ConfigSync.encode(secretOnly)
+            .write(to: directory.appendingPathComponent("svc.secrets.json"))
+
+        let status = ConfigCompleteness.check(
+            service: splitStack.services[0], in: splitStack,
+            manifestPath: directory.appendingPathComponent("hatchery.json").path)
+
+        #expect(status.complete)
     }
 
     @Test("the browser is sent complete and summary, not left to recompute them")

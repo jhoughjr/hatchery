@@ -1294,9 +1294,17 @@ struct Config: ParsableCommand {
             }
 
             let url = ConfigSync.configURL(for: target, in: spec, manifestPath: manifestPath)
-            let declared = (try? ConfigSync.readDeclared(at: url)) ?? [:]
+            let secretsURL = ConfigSync.secretsURL(for: target, in: spec, manifestPath: manifestPath)
+            let declared = (try? ConfigSync.readDeclared(config: url, secrets: secretsURL)) ?? [:]
             let merged = ConfigSync.applying(updates, to: declared)
-            try ConfigSync.encoded(merged).write(to: url)
+
+            let writeContract = EnvContract.contract(for: target.kind, backend: spec.backend)
+            let split = writeContract.map { ConfigSync.split(merged, by: $0) }
+                ?? (config: merged, secrets: [:])
+            try ConfigSync.encoded(split.config).write(to: url)
+            if !split.secrets.isEmpty, let secretsURL {
+                try ConfigSync.encoded(split.secrets).write(to: secretsURL)
+            }
 
             // Names only. The values are the reason this file is gitignored.
             for key in updates.keys.sorted() {
@@ -1363,7 +1371,8 @@ struct Config: ParsableCommand {
                 do {
                     let live = try await reader.config(for: service, in: spec)
                     let url = ConfigSync.configURL(for: service, in: spec, manifestPath: manifest)
-                    let declared = try ConfigSync.readDeclared(at: url)
+                    let secretsURL = ConfigSync.secretsURL(for: service, in: spec, manifestPath: manifest)
+                    let declared = try ConfigSync.readDeclared(config: url, secrets: secretsURL)
                     let difference = ConfigSync.diff(live: live, declared: declared)
                     let needsWrite = ConfigSync.needsWrite(live: live, declared: declared)
 
@@ -1377,9 +1386,16 @@ struct Config: ParsableCommand {
                     if dryRun {
                         print("    (dry run, \(url.lastPathComponent) not written)")
                     } else {
-                        try ConfigSync.encode(ConfigSync.merged(live: live, declared: declared))
-                            .write(to: url, options: .atomic)
+                        let toWrite = ConfigSync.merged(live: live, declared: declared)
+                        let contract = EnvContract.contract(for: service.kind, backend: spec.backend)
+                        let split = contract.map { ConfigSync.split(toWrite, by: $0) }
+                            ?? (config: toWrite, secrets: [:])
+                        try ConfigSync.encode(split.config).write(to: url, options: .atomic)
                         print("    wrote \(url.lastPathComponent)")
+                        if !split.secrets.isEmpty, let secretsURL {
+                            try ConfigSync.encode(split.secrets).write(to: secretsURL, options: .atomic)
+                            print("    wrote \(secretsURL.lastPathComponent)")
+                        }
                         wrote = true
                     }
                 } catch {

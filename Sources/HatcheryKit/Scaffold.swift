@@ -121,11 +121,22 @@ public struct Scaffolder: Sendable {
         for secret in secrets where !secret.value.isEmpty {
             config[secret.key] = secret.value
         }
+
+        let contract = EnvContract.contract(for: resolved.kind, backend: stack.backend)
+        let split = contract.map { ConfigSync.split(config, by: $0) }
+            ?? (config: config, secrets: [:])
+
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let configJSON = String(decoding: try encoder.encode(config), as: UTF8.self)
+        let configJSON = String(decoding: try encoder.encode(split.config), as: UTF8.self)
         files.append(
             GeneratedFile(path: resolved.configFile, contents: configJSON + "\n", role: .config))
+
+        if !split.secrets.isEmpty, let secretsFile = resolved.secretsFile ?? resolved.conventionalSecretsFile {
+            let secretsJSON = String(decoding: try encoder.encode(split.secrets), as: UTF8.self)
+            files.append(
+                GeneratedFile(path: secretsFile, contents: secretsJSON + "\n", role: .config))
+        }
 
         stack.services.append(resolved)
         var updated = manifest

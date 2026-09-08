@@ -83,6 +83,20 @@ public enum ConfigSync {
         return try JSONDecoder().decode([String: String].self, from: data)
     }
 
+    /// Reads a service's declared config as one map, merging in its secrets file when it has one.
+    ///
+    /// The secrets file wins on a key both files declare, since it is the more recent write: a
+    /// key moved there by `config split` must read as moved rather than reverting to the copy
+    /// still sitting in the sidecar until the next split.
+    public static func readDeclared(config: URL, secrets: URL?) throws -> [String: String] {
+        var result = try readDeclared(at: config)
+        guard let secrets else { return result }
+        for (key, value) in try readDeclared(at: secrets) {
+            result[key] = value
+        }
+        return result
+    }
+
     /// The config to write for a service.
     ///
     /// A platform key is carried only when the declaration already claimed it. The lab taught
@@ -129,6 +143,30 @@ public enum ConfigSync {
         return URL(fileURLWithPath: service.configFile, relativeTo: directory).standardizedFileURL
     }
 
+    /// Where a service's secrets file lives, mirroring `configURL(...)`.
+    ///
+    /// `nil` only when the service names no `secretsFile` and its `configFile` carries no
+    /// `.config.json` name to derive one from. Resolved without checking whether the file
+    /// exists yet, the same as `configURL(...)`: a writer needs the destination before the file
+    /// is there, and `readDeclared(at:)` already treats a missing file as an empty one, so a
+    /// reader sees the same result either way.
+    public static func secretsURL(
+        for service: ServiceSpec,
+        in stack: StackSpec? = nil,
+        manifestPath: String
+    ) -> URL? {
+        guard let name = service.secretsFile ?? service.conventionalSecretsFile else { return nil }
+        if let directory = stack?.tofu?.directory {
+            return URL(
+                fileURLWithPath: name,
+                relativeTo: URL(fileURLWithPath: Paths.expanded(directory), isDirectory: true)
+            ).standardizedFileURL
+        }
+        let manifestURL = URL(fileURLWithPath: manifestPath)
+        return URL(fileURLWithPath: name, relativeTo: manifestURL.deletingLastPathComponent())
+            .standardizedFileURL
+    }
+
     /// Merges values into a service's declared config, leaving every other key alone.
     ///
     /// This is how a key reported as needing a value gets one. It is a merge rather than a
@@ -152,5 +190,25 @@ public enum ConfigSync {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(config)
+    }
+
+    /// Separates a service's values by a contract's secret marking, for the two files a sidecar
+    /// now writes.
+    ///
+    /// `config` holds every key the contract does not mark secret, `secrets` the ones it does.
+    /// A key the contract does not know at all stays in `config`, the same as today.
+    public static func split(
+        _ values: [String: String], by contract: EnvContract
+    ) -> (config: [String: String], secrets: [String: String]) {
+        var config: [String: String] = [:]
+        var secrets: [String: String] = [:]
+        for (key, value) in values {
+            if contract.secret.contains(key) {
+                secrets[key] = value
+            } else {
+                config[key] = value
+            }
+        }
+        return (config, secrets)
     }
 }

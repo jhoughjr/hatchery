@@ -163,4 +163,105 @@ final class ConfigSyncTests: XCTestCase {
 
         XCTAssertEqual(url.path, "/secrets/mwlab.json")
     }
+
+    // MARK: - The secrets file beside the sidecar
+
+    /// A fresh directory to exercise `secretsURL`'s existence check against real files.
+    private func tempDirectory() -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hatchery-secrets-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    func testSecretsURLResolvesTheConventionalNameFromConfigFile() {
+        let service = ServiceSpec(
+            name: "mwlab", kind: .mwserver, image: "i", configFile: "mwlab.config.json")
+        let url = ConfigSync.secretsURL(for: service, manifestPath: "/infra/state/hatchery.json")
+
+        XCTAssertEqual(url?.path, "/infra/state/mwlab.secrets.json")
+    }
+
+    /// A service that has never been split has no secrets file on disk yet, but `secretsURL`
+    /// still resolves it, the same as `configURL` resolves a sidecar that has not been written:
+    /// a writer needs the destination, and a reader gets an empty map either way.
+    func testSecretsURLResolvesEvenWhenNothingIsOnDiskYet() {
+        let directory = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let service = ServiceSpec(
+            name: "mwlab", kind: .mwserver, image: "i", configFile: "mwlab.config.json")
+        let url = ConfigSync.secretsURL(
+            for: service, manifestPath: directory.appendingPathComponent("hatchery.json").path)
+
+        XCTAssertEqual(url?.path, directory.appendingPathComponent("mwlab.secrets.json").path)
+    }
+
+    /// A `configFile` that carries no `.config.json` convention has no name to derive from.
+    func testSecretsURLIsNilWithNoConventionalNameToDerive() {
+        let service = ServiceSpec(
+            name: "mwlab", kind: .mwserver, image: "i", configFile: "mwlab.json")
+        let url = ConfigSync.secretsURL(for: service, manifestPath: "/infra/state/hatchery.json")
+
+        XCTAssertNil(url)
+    }
+
+    /// An explicit `secretsFile` is a manifest author's own word, trusted the same way
+    /// `configFile` is, without checking whether the file exists yet.
+    func testSecretsURLTrustsAnExplicitNameEvenWhenAbsent() {
+        let service = ServiceSpec(
+            name: "mwlab", kind: .mwserver, image: "i", configFile: "mwlab.config.json",
+            secretsFile: "mwlab.secrets.json")
+        let url = ConfigSync.secretsURL(for: service, manifestPath: "/infra/state/hatchery.json")
+
+        XCTAssertEqual(url?.path, "/infra/state/mwlab.secrets.json")
+    }
+
+    func testReadDeclaredMergesTheSecretsFileWithTheSecretsFileWinning() throws {
+        let directory = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configURL = directory.appendingPathComponent("mwlab.config.json")
+        let secretsURL = directory.appendingPathComponent("mwlab.secrets.json")
+        try ConfigSync.encode(["APP_URL": "http://mwlab.opi", "DATABASE_PASSWORD": "stale"])
+            .write(to: configURL)
+        try ConfigSync.encode(["DATABASE_PASSWORD": "current"]).write(to: secretsURL)
+
+        let merged = try ConfigSync.readDeclared(config: configURL, secrets: secretsURL)
+
+        XCTAssertEqual(
+            merged, ["APP_URL": "http://mwlab.opi", "DATABASE_PASSWORD": "current"])
+    }
+
+    func testReadDeclaredWithNoSecretsURLReadsTheConfigFileAlone() throws {
+        let directory = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configURL = directory.appendingPathComponent("mwlab.config.json")
+        try ConfigSync.encode(["APP_URL": "http://mwlab.opi"]).write(to: configURL)
+
+        let merged = try ConfigSync.readDeclared(config: configURL, secrets: nil)
+
+        XCTAssertEqual(merged, ["APP_URL": "http://mwlab.opi"])
+    }
+
+    func testSplitSeparatesValuesByTheContractsSecretSet() {
+        let contract = EnvContract(
+            required: ["APP_URL", "DATABASE_PASSWORD"], secret: ["DATABASE_PASSWORD"])
+
+        let split = ConfigSync.split(
+            ["APP_URL": "http://mwlab.opi", "DATABASE_PASSWORD": "p", "LOG_LEVEL": "info"],
+            by: contract)
+
+        XCTAssertEqual(split.config, ["APP_URL": "http://mwlab.opi", "LOG_LEVEL": "info"])
+        XCTAssertEqual(split.secrets, ["DATABASE_PASSWORD": "p"])
+    }
+
+    /// A key the contract does not know at all is not secret by omission; it stays declared.
+    func testSplitLeavesAnUndeclaredKeyInConfig() {
+        let contract = EnvContract(secret: ["DATABASE_PASSWORD"])
+
+        let split = ConfigSync.split(["MYSTERY_KEY": "x"], by: contract)
+
+        XCTAssertEqual(split.config, ["MYSTERY_KEY": "x"])
+        XCTAssertTrue(split.secrets.isEmpty)
+    }
 }

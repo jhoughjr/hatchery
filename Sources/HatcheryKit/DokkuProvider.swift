@@ -167,11 +167,21 @@ public struct DokkuProvider: ServiceProvider {
                 """
         }
 
+        let configExpr: String
+        if let secretsName = service.secretsFile ?? service.conventionalSecretsFile {
+            configExpr = """
+                merge(jsondecode(file("${path.module}/\(service.configFile)")), fileexists("${path.module}/\(secretsName)") ? jsondecode(file("${path.module}/\(secretsName)")) : {})
+                """
+        } else {
+            configExpr = "jsondecode(file(\"${path.module}/\(service.configFile)\"))"
+        }
+
         body += """
 
-              # Loaded from a gitignored file rather than a variable: the provider cannot accept
-              # variables in this map (aliksend/terraform-provider-dokku#94).
-              config = sensitive(jsondecode(file("${path.module}/\(service.configFile)")))
+              # Loaded from gitignored files rather than a variable: the provider cannot accept
+              # variables in this map (aliksend/terraform-provider-dokku#94). The secrets file
+              # may not exist yet, so the merge only reads it when fileexists says it is there.
+              config = sensitive(\(configExpr))
 
               deploy = {
                 type         = "docker_image"

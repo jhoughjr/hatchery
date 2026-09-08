@@ -375,6 +375,14 @@ struct ScaffolderTests {
         #expect(result.manifest.stack(named: "mwlab")?.service(named: "paylab2") != nil)
         // The manifest records which variable moves the image, so `deploy` can find it.
         #expect(result.service.imageVariable == "paylab2_image")
+
+        // The declaration reads both files, and only trusts the secrets one when it exists yet.
+        let declaration = try #require(result.files.first { $0.path == "paylab2.tf" })
+        #expect(
+            declaration.contents.contains(
+                """
+                config = sensitive(merge(jsondecode(file("${path.module}/paylab2.config.json")), fileexists("${path.module}/paylab2.secrets.json") ? jsondecode(file("${path.module}/paylab2.secrets.json")) : {}))
+                """))
     }
 
     @Test("a duplicate service is refused")
@@ -430,17 +438,35 @@ struct ScaffolderTests {
     func omitsEmptyValues() async throws {
         let result = try await scaffolder(Files()).plan(
             service: gateway("paylab2"), into: "mwlab", manifest: manifest)
-        let config = try #require(result.files.first { $0.role == .config })
-        let parsed = try JSONSerialization.jsonObject(with: Data(config.contents.utf8))
+        let config = try #require(result.files.first { $0.path == "paylab2.config.json" })
+        let parsedConfig = try JSONSerialization.jsonObject(with: Data(config.contents.utf8))
             as? [String: String]
 
         // The dokku provider rejects a zero-length config value, so an empty placeholder makes
         // a freshly created service fail to plan.
-        #expect(parsed?["DATABASE_PASSWORD"] == nil)
-        #expect(parsed?.values.contains("") == false)
-        // What hatchery could supply is still there.
-        #expect(parsed?["KEYPAIR_JWKS"] != nil)
-        #expect(parsed?["APP_URL"] == "http://paylab2.opi")
+        #expect(parsedConfig?["DATABASE_PASSWORD"] == nil)
+        #expect(parsedConfig?.values.contains("") == false)
+        #expect(parsedConfig?["APP_URL"] == "http://paylab2.opi")
+
+        // What hatchery could supply is still there, split into its own secrets file: the
+        // payment gateway contract marks KEYPAIR_JWKS secret.
+        #expect(parsedConfig?["KEYPAIR_JWKS"] == nil)
+        let secrets = try #require(result.files.first { $0.path == "paylab2.secrets.json" })
+        let parsedSecrets = try JSONSerialization.jsonObject(with: Data(secrets.contents.utf8))
+            as? [String: String]
+        #expect(parsedSecrets?["KEYPAIR_JWKS"] != nil)
+    }
+
+    @Test("a service with no contract writes only the one config file, as it always did")
+    func writesOneFileWithNoContract() async throws {
+        let uncontracted = ServiceSpec(
+            name: "gsx2", kind: .gsxGateway, image: "gsx:arm64-abc",
+            domains: ["gsx2.opi"], configFile: "gsx2.config.json")
+        let result = try await scaffolder(Files()).plan(
+            service: uncontracted, into: "mwlab", manifest: manifest)
+
+        let configFiles = result.files.filter { $0.role == .config }
+        #expect(configFiles.map(\.path) == ["gsx2.config.json"])
     }
 
     @Test("the keys needing values are reported rather than left as convincing blanks")
