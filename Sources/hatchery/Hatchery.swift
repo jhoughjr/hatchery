@@ -118,7 +118,7 @@ struct Box: AsyncParsableCommand {
                 locus = .local
                 assertions = BoxInitializer.cloudRunAssertions(project: project, instance: cluster)
                 readyLine = "Cloud Run is ready: hatchery stack new <name> --backend cloudRun"
-            case .aws:
+            case .aws, .host:
                 throw ValidationError("box init has no recipe for \(kind.rawValue) yet")
             }
             print("\(locus.label)  [\(assertions.count) assertion(s)]")

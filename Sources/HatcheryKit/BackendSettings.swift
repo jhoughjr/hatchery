@@ -146,6 +146,23 @@ extension BackendSetting {
             """,
         required: false)
 
+    public static let boxHost = BackendSetting(
+        key: "host",
+        label: "SSH target",
+        help: """
+            How hatchery reaches the box, as user@host. Any account the box puts in the `docker` \
+            group works, because the docker daemon is what hatchery drives here, not dokku. \
+            The tofu docker provider is given the same target as `ssh://user@host`.
+            """,
+        defaultValue: nil)
+
+    public static let boxKey = BackendSetting(
+        key: "ssh_key",
+        label: "SSH private key",
+        help: "The key authorized for that account on the box.",
+        required: false,
+        defaultValue: "~/.ssh/id_rsa")
+
     public static func region(default value: String, help: String) -> BackendSetting {
         BackendSetting(key: "region", label: "Region", help: help, defaultValue: value)
     }

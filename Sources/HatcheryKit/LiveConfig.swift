@@ -158,6 +158,11 @@ public struct LiveConfigReader: Sendable {
             // config would make `config audit` report drift that is not there.
             throw LiveConfigError.unsupportedBackend(.aws)
 
+        case .host:
+            // A container's environment is read from `docker inspect`, which the declaration reads for its
+            // findings rather than the config verbs. Sub-step 3 of this packet opens that door.
+            throw LiveConfigError.unsupportedBackend(.host)
+
         case .appPlatform:
             // Authoring one works — `digitalocean_app` takes an image, an environment, a port
             // and a health check. Reading one back does not: `doctl apps spec get` returns the

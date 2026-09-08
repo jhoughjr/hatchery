@@ -236,6 +236,64 @@ public struct Preflight: Sendable {
         return checks
     }
 
+    /// What a host backend needs: tofu here, an ssh client here, a box that answers, and a docker daemon
+    /// that answers as this account.
+    ///
+    /// `docker info` rather than `docker version`: version answers from the client alone, so an account
+    /// that cannot reach the daemon still passes it.
+    public func host(host: String?) async -> [PreflightCheck] {
+        var checks: [PreflightCheck] = []
+        checks.append(await tofu())
+        checks.append(
+            await binary(
+                "ssh", arguments: ["-V"], label: "ssh client",
+                remedy: InstallHint.forTool("ssh")))
+
+        guard let host, !host.isEmpty else {
+            for name in ["box reachable", "docker responds"] {
+                checks.append(
+                    PreflightCheck(
+                        name: name, status: .skipped, detail: "no host given", remedy: nil))
+            }
+            return checks
+        }
+
+        let reachable = await reachability(host: host, probe: ["true"])
+        checks.append(reachable)
+        guard reachable.status == .ok else {
+            checks.append(
+                PreflightCheck(
+                    name: "docker responds", status: .skipped,
+                    detail: "the box could not be reached", remedy: nil))
+            return checks
+        }
+        checks.append(await docker(host: host))
+        return checks
+    }
+
+    private func docker(host: String) async -> PreflightCheck {
+        do {
+            let result = try await execute(
+                Self.sshCommand(
+                    host: host, remote: ["docker", "info", "--format", "{{.ServerVersion}}"]), nil)
+            let text = result.combined.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard result.status == 0, !text.isEmpty else {
+                return PreflightCheck(
+                    name: "docker responds", status: .failed,
+                    detail: text.isEmpty ? "no output" : Self.firstLine(text),
+                    remedy: """
+                        the account must be in the docker group on the box: \
+                        `sudo usermod -aG docker <user>`, then log in again
+                        """)
+            }
+            return PreflightCheck(
+                name: "docker responds", status: .ok, detail: "docker \(Self.firstLine(text))")
+        } catch {
+            return PreflightCheck(
+                name: "docker responds", status: .failed, detail: "\(error)", remedy: nil)
+        }
+    }
+
     private func tofu() async -> PreflightCheck {
         do {
             let result = try await execute(["tofu", "version"], nil)
@@ -292,9 +350,11 @@ public struct Preflight: Sendable {
         return text.contains("no such file or directory") || text.contains("command not found")
     }
 
-    private func reachability(host: String) async -> PreflightCheck {
+    /// `probe` is what the box is asked to run. dokku's account answers `version`; a shell account does not,
+    /// so the host backend asks it for `true` instead.
+    private func reachability(host: String, probe: [String] = ["version"]) async -> PreflightCheck {
         do {
-            let result = try await execute(Self.sshCommand(host: host, remote: ["version"]), nil)
+            let result = try await execute(Self.sshCommand(host: host, remote: probe), nil)
             if result.status == 0 {
                 return PreflightCheck(name: "box reachable", status: .ok, detail: "\(host) answered")
             }

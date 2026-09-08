@@ -1,5 +1,72 @@
 import Foundation
 
+/// How the box runs one container: the shape `docker inspect` reports and `docker_container` declares.
+///
+/// This exists because a bare container carries its whole contract in its run arguments, where a dokku app
+/// carries it in dokku's own state.
+/// Nothing here is a secret: the environment stays in the sidecar and the secrets file, as it does for every other service.
+public struct ContainerSpec: Codable, Sendable, Equatable {
+    /// One path the container reads or writes, from a bind path or a named volume on the box.
+    public struct Mount: Codable, Sendable, Equatable {
+        /// A host path, or the name of a docker volume.
+        public var source: String
+        public var target: String
+        public var readOnly: Bool
+
+        public init(source: String, target: String, readOnly: Bool = false) {
+            self.source = source
+            self.target = target
+            self.readOnly = readOnly
+        }
+    }
+
+    /// One published port. `host` is the port on the box, and `container` the port inside it.
+    public struct PortMap: Codable, Sendable, Equatable {
+        public var host: Int
+        public var container: Int
+        public var `protocol`: String
+
+        public init(host: Int, container: Int, protocol proto: String = "tcp") {
+            self.host = host
+            self.container = container
+            self.protocol = proto
+        }
+    }
+
+    public var image: String
+    /// `host`, `bridge`, or the name of a docker network. Absent means the daemon's default.
+    public var network: String?
+    public var mounts: [Mount]
+    public var ports: [PortMap]
+    /// `unless-stopped`, `always`, `no`, or `on-failure`.
+    public var restart: String
+    /// The command, when it overrides the image's own. Absent means the image decides.
+    public var command: [String]?
+    public var privileged: Bool
+    /// Extra `host:address` lines the container resolves, as `--add-host` writes them.
+    public var extraHosts: [String]
+
+    public init(
+        image: String,
+        network: String? = nil,
+        mounts: [Mount] = [],
+        ports: [PortMap] = [],
+        restart: String = "unless-stopped",
+        command: [String]? = nil,
+        privileged: Bool = false,
+        extraHosts: [String] = []
+    ) {
+        self.image = image
+        self.network = network
+        self.mounts = mounts
+        self.ports = ports
+        self.restart = restart
+        self.command = command
+        self.privileged = privileged
+        self.extraHosts = extraHosts
+    }
+}
+
 /// A service instance within a stack.
 ///
 /// `configFile` points at a sidecar holding the resolved environment. The sidecar is
@@ -32,6 +99,11 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// than a limitation: if nothing declares which variable moves, there is no way to change
     /// the image without going around the declaration that owns it.
     public var imageVariable: String?
+    /// How the box runs this service as a container, for a service on the `host` backend.
+    ///
+    /// Absent for every other backend, and left out of the encoded manifest when absent.
+    /// A manifest written before this therefore still reads, and a dokku manifest gains no empty field.
+    public var container: ContainerSpec?
 
     public init(
         name: String,
@@ -43,7 +115,8 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         baseURL: String? = nil,
         healthPath: String? = nil,
         deploymentID: String? = nil,
-        imageVariable: String? = nil
+        imageVariable: String? = nil,
+        container: ContainerSpec? = nil
     ) {
         self.name = name
         self.kind = kind
@@ -56,6 +129,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
 
         self.deploymentID = deploymentID
         self.imageVariable = imageVariable
+        self.container = container
     }
 }
 

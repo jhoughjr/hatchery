@@ -213,6 +213,47 @@ public enum Onboarding {
         ]
     }
 
+    /// Getting a box to the point hatchery can declare the containers dokku does not own.
+    ///
+    /// There is far less to do here than for dokku, because the daemon is already there: a dokku box runs
+    /// docker, and this backend only asks to reach it as an account that is allowed to drive it.
+    public static var hostSteps: [SetupStep] {
+        [
+            SetupStep(
+                title: "Reach the box as an account in the docker group",
+                why: """
+                    This backend drives the docker daemon, not dokku. The `dokku` account cannot help \
+                    here: it turns every SSH command into a dokku command, and dokku will not speak \
+                    about a container it did not make.
+                    """,
+                on: "box",
+                commands: ["sudo usermod -aG docker <user>"],
+                verify: "ssh <user>@<box> docker info    # run this from your machine"),
+
+            SetupStep(
+                title: "Check that docker answers over ssh",
+                why: """
+                    The tofu docker provider reaches the daemon at `ssh://user@host` and nothing else. \
+                    A group change only takes effect on a new login, so an account added a moment ago \
+                    still fails here.
+                    """,
+                on: "here",
+                commands: ["ssh <user>@<box> docker info --format '{{.ServerVersion}}'"],
+                verify: "a version number, not a permission error"),
+
+            SetupStep(
+                title: "Install OpenTofu on this machine",
+                why: """
+                    hatchery writes the declaration and asks tofu what it would do. Nothing reaches the \
+                    daemon except through that declaration, so a container hatchery declares stays \
+                    described by one.
+                    """,
+                on: "here",
+                commands: ["brew install opentofu"],
+                verify: "tofu version"),
+        ]
+    }
+
     public static var dokkuSteps: [SetupStep] {
         [
             SetupStep(

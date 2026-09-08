@@ -126,7 +126,7 @@ public struct Scanner: Sendable {
         case .dokku: return try await self.scanDokku(box: address)
         case .appPlatform: return try await self.scanAppPlatform()
         case .cloudRun: return try await self.scanCloudRun(project: address)
-        case .aws:
+        case .aws, .host:
             throw ScanError.providerRefused("scan has no reader for \(provider.rawValue) yet")
         }
     }

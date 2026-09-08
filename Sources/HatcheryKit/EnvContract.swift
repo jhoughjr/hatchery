@@ -185,11 +185,11 @@ extension EnvContract {
         // MWServer opts into object storage. No other kind does yet, so no other kind may set its keys.
         EnvContract(
             required: mwserverRequired,
-            optional: backend == .dokku
+            optional: backend.isSelfHosted
                 ? mwserverOptional.union(discreteDatabaseKeys)
                 : mwserverOptional,
             secret: mwserverSecret,
-            retired: backend == .dokku ? [] : discreteDatabaseKeys,
+            retired: backend.isSelfHosted ? [] : discreteDatabaseKeys,
             ignored: dokkuInjected
         )
         .uses(.vault)
@@ -212,7 +212,9 @@ extension EnvContract {
             // connection string, so the retired set is the same.
             contract.required.insert("DATABASE_URL")
             contract.retired = discreteDatabaseKeys
-        case .dokku:
+        case .dokku, .host:
+            // The host backend is the same box dokku runs on, so a service there reaches the same postgres
+            // by the same discrete keys.
             contract.required.formUnion(["DATABASE_HOST", "DATABASE_USER", "DATABASE_PASSWORD", "DATABASE_DB"])
             contract.optional.insert("DATABASE_PORT")
         }
@@ -232,7 +234,9 @@ extension EnvContract {
             // connection string, so the retired set is the same.
             contract.required.insert("DATABASE_URL")
             contract.retired = discreteDatabaseKeys
-        case .dokku:
+        case .dokku, .host:
+            // The host backend is the same box dokku runs on, so a service there reaches the same postgres
+            // by the same discrete keys.
             contract.required.formUnion(["DATABASE_HOST", "DATABASE_USER", "DATABASE_PASSWORD", "DATABASE_DB"])
             contract.optional.insert("DATABASE_PORT")
         }

@@ -18,6 +18,9 @@ public struct ServiceKind: RawRepresentable, Hashable, Sendable, Codable {
     public static let gsxGateway = ServiceKind(rawValue: "gsx-gateway")
     public static let bucket = ServiceKind(rawValue: "bucket")
     public static let edge = ServiceKind(rawValue: "edge")
+    /// A container the box runs that no platform owns: dnsmasq, a Postgres cluster, a CI runner.
+    /// Its contract comes from a kind file of its name, or it is empty.
+    public static let container = ServiceKind(rawValue: "container")
 
     /// Every kind the estate deploys.
     ///
@@ -25,7 +28,7 @@ public struct ServiceKind: RawRepresentable, Hashable, Sendable, Codable {
     /// exactly. Keeping them character-identical makes the eventual join a mapping rather than
     /// a translation table, so do not rename one without the other.
     public static let all: [ServiceKind] = [
-        .mwserver, .paymentGateway, .communicationGateway, .gsxGateway, .bucket, .edge,
+        .mwserver, .paymentGateway, .communicationGateway, .gsxGateway, .bucket, .edge, .container,
     ]
 
     /// Kinds hatchery ships an environment contract for today.
@@ -73,11 +76,14 @@ public enum Backend: String, Codable, Sendable, CaseIterable {
     case aws
     /// Google Cloud Run — the closest sibling to App Runner.
     case cloudRun
+    /// A box reached over ssh as `user@host`, whose docker daemon hatchery drives.
+    /// This is the plane for the containers dokku does not own, on the same machines dokku runs on.
+    case host
 }
 
 extension Backend {
     public var isSelfHosted: Bool {
-        self == .dokku
+        self == .dokku || self == .host
     }
 }
 

@@ -404,11 +404,11 @@ struct BackendConsistencyTests {
         }
     }
 
-    @Test("only dokku keeps the discrete database keys")
+    @Test("only a self-hosted backend keeps the discrete database keys")
     func contractsSplitOnPlacement() throws {
         for backend in Backend.allCases {
             let contract = try #require(EnvContract.contract(for: .mwserver, backend: backend))
-            if backend == .dokku {
+            if backend.isSelfHosted {
                 #expect(!contract.retired.contains("DATABASE_HOST"))
             } else {
                 // Nothing else has a postgres on the same box to reach that way.

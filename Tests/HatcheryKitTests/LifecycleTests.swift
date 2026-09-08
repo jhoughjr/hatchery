@@ -133,7 +133,10 @@ final class LifecycleTests: XCTestCase {
     func testServiceKindsMatchTheRegistryEnum() {
         XCTAssertEqual(
             ServiceKind.all.map(\.rawValue),
-            ["mwserver", "payment-gateway", "communication-gateway", "gsx-gateway", "bucket", "edge"]
+            [
+                "mwserver", "payment-gateway", "communication-gateway", "gsx-gateway", "bucket",
+                "edge", "container",
+            ]
         )
     }
 

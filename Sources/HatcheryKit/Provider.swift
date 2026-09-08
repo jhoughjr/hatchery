@@ -52,6 +52,11 @@ public struct ScaffoldRequest: Sendable, Equatable {
     /// Whether the backend's zero-downtime checks are off for this service. `true` matches
     /// the lab's convention for a freshly scaffolded service; adopt carries what it measures.
     public var checksDisabled: Bool
+    /// The id of the container this service already runs as, when the service is being adopted.
+    ///
+    /// Set only by adopt. A declaration written with one carries an `import` block, because tofu otherwise
+    /// plans to create a container the box is already holding the name of.
+    public var containerID: String?
 
     public init(
         stack: StackSpec,
@@ -60,7 +65,8 @@ public struct ScaffoldRequest: Sendable, Equatable {
         network: String? = nil,
         gated: Bool = false,
         hostPort: String = "80",
-        checksDisabled: Bool = true
+        checksDisabled: Bool = true,
+        containerID: String? = nil
     ) {
         self.stack = stack
         self.service = service
@@ -69,6 +75,7 @@ public struct ScaffoldRequest: Sendable, Equatable {
         self.gated = gated
         self.hostPort = hostPort
         self.checksDisabled = checksDisabled
+        self.containerID = containerID
     }
 }
 
@@ -143,6 +150,7 @@ public enum Providers {
         case .aws: return AWSProvider()
         case .cloudRun: return CloudRunProvider()
         case .appPlatform: return AppPlatformProvider()
+        case .host: return HostProvider()
         }
     }
 

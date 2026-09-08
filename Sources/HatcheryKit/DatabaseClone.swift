@@ -194,6 +194,9 @@ public enum DatabaseClonePlanner {
                 service: kind, sourceConfig: sourceConfig, source: source, target: target,
                 environment: environment, cluster: cluster, mode: mode, backend: destination)
         case .aws: return nil
+        // A bare container is not a place a database is cloned into. The cluster inside one is declared on
+        // its own, and that is a different packet.
+        case .host: return nil
         }
         guard let contract = EnvContract.contract(for: kind, backend: backend) else { return nil }
         let needed = contract.required.intersection(plannable)
