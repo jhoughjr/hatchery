@@ -26,7 +26,7 @@ struct Hatchery: AsyncParsableCommand {
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
             Box.self, Config.self, Database.self, Declared.self, Deploy.self, Doctor.self, Events.self,
-            Host.self, Serve.self,
+            Host.self, Kind.self, Serve.self,
             Service.self, Setup.self, Stack.self, State.self, Status.self,
             Up.self, Down.self, Restart.self,
         ]
@@ -252,7 +252,9 @@ struct Box: AsyncParsableCommand {
         @Option(name: .shortAndLong, help: "The dokku stack on that box to declare the app into.")
         var stack: String
 
-        @Option(name: .shortAndLong, help: "Service kind, when the image does not say. One of: \(ServiceKind.known.map(\.rawValue).joined(separator: ", ")).")
+        @Option(
+            name: .shortAndLong,
+            help: "Service kind, when neither a kind file nor the image says. Built in: \(ServiceKind.known.map(\.rawValue).joined(separator: ", ")). Or a kind the registry declares — see `hatchery kind list`.")
         var kind: ServiceKindArgument?
 
         @Option(name: .shortAndLong, help: "Path to the stack manifest.")
@@ -316,6 +318,69 @@ struct Box: AsyncParsableCommand {
             if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
             print("")
             print("  next, in \(spec.tofu?.directory ?? "the stack directory"): \(result.importCommand)")
+        }
+    }
+}
+
+/// The kind files a registry collects beside a manifest.
+struct Kind: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Work with the kind files a registry collects beside a manifest.",
+        subcommands: [Add.self, List.self]
+    )
+
+    struct Add: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "add",
+            abstract: "Add a hatchery-kind.json file to the registry."
+        )
+
+        @Argument(help: "Path to a hatchery-kind.json file.")
+        var path: String
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        func run() async throws {
+            let manifestPath = try ManifestLocator.resolve(manifest)
+            let registry = KindRegistry(manifestPath: manifestPath)
+            do {
+                let file = try registry.add(from: path)
+                print("  added '\(file.kind)' to the registry")
+            } catch let error as KindRegistryError {
+                throw ValidationError(error.description)
+            }
+        }
+    }
+
+    struct List: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "list",
+            abstract: "List the kinds the registry declares."
+        )
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        func run() async throws {
+            let manifestPath = try ManifestLocator.resolve(manifest)
+            let registry = KindRegistry(manifestPath: manifestPath)
+            let files = try registry.all()
+            guard !files.isEmpty else {
+                print("  no kinds declared in the registry")
+                return
+            }
+            for file in files.sorted(by: { $0.kind < $1.kind }) {
+                let contract = file.contract(backend: .dokku)
+                let health = file.healthcheck ?? ServiceKind(rawValue: file.kind).defaultHealthPath
+                let port = file.port.map(String.init) ?? "-"
+                let name = file.kind.padding(
+                    toLength: max(20, file.kind.count), withPad: " ", startingAt: 0)
+                print(
+                    "  \(name)port \(port)  health \(health)  "
+                        + "\(contract.required.count) required, \(contract.secret.count) secret"
+                        + (file.summary.map { "  \($0)" } ?? ""))
+            }
         }
     }
 }
@@ -1176,10 +1241,12 @@ struct Config: ParsableCommand {
                 updates[String(parts[0])] = String(parts[1])
             }
 
+            let registry = KindRegistry(manifestPath: manifestPath)
+
             // Same refusal-by-name the bootstrap settings get. A misspelled key is written
             // without complaint and only ever resurfaces later as `unexpected` in an audit —
             // by which time the service has been running without the value for weeks.
-            if let contract = EnvContract.contract(for: target.kind, backend: spec.backend) {
+            if let contract = EnvContract.contract(for: target.kind, backend: spec.backend, registry: registry) {
                 let unknown = contract.unknownKeys(in: updates)
                 if !unknown.isEmpty {
                     let hints = unknown.map { key -> String in
@@ -1208,7 +1275,7 @@ struct Config: ParsableCommand {
             }
             print("  wrote \(url.path)")
 
-            if let contract = EnvContract.contract(for: target.kind, backend: spec.backend) {
+            if let contract = EnvContract.contract(for: target.kind, backend: spec.backend, registry: registry) {
                 let missing = contract.required.filter { (merged[$0] ?? "").isEmpty }.sorted()
                 if missing.isEmpty {
                     print("  every required key now has a value")
@@ -1329,6 +1396,7 @@ struct Config: ParsableCommand {
             }
 
             let reader = LiveConfigReader()
+            let registry = KindRegistry(manifestPath: manifest)
             var errors = 0
             var warnings = 0
 
@@ -1337,7 +1405,7 @@ struct Config: ParsableCommand {
                 for service in spec.services {
                     do {
                         let config = try await reader.config(for: service, in: spec)
-                        guard let contract = EnvContract.contract(for: service.kind, backend: spec.backend) else {
+                        guard let contract = EnvContract.contract(for: service.kind, backend: spec.backend, registry: registry) else {
                             print("  \(service.name): no contract known for \(service.kind.rawValue)")
                             continue
                         }

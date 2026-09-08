@@ -700,7 +700,8 @@ public struct HatcheryAPI: Sendable {
         case .problem(let response): return response
         case .found(let s, let v): stack = s; service = v
         }
-        guard let contract = EnvContract.contract(for: service.kind, backend: stack.backend) else {
+        let registry = KindRegistry(manifestPath: manifestPath())
+        guard let contract = EnvContract.contract(for: service.kind, backend: stack.backend, registry: registry) else {
             return .failure(400, "no contract for \(service.kind.rawValue)")
         }
 
@@ -821,7 +822,8 @@ public struct HatcheryAPI: Sendable {
             try scaffolder.write(result, in: stack)
             try saveManifest(result.manifest, manifestPath())
 
-            let secret = EnvContract.contract(for: service.kind, backend: stack.backend)?.secret ?? []
+            let registry = KindRegistry(manifestPath: manifestPath())
+            let secret = EnvContract.contract(for: service.kind, backend: stack.backend, registry: registry)?.secret ?? []
             return .json(
                 Wire.ServiceCreated(
                     ok: true,
@@ -1616,9 +1618,11 @@ public struct HatcheryAPI: Sendable {
             return .failure(404, "no service '\(body.service)' in stack '\(body.stack)'")
         }
 
+        let registry = KindRegistry(manifestPath: manifestPath())
+
         // The editor renders its fields from the contract, but the API takes whatever the
         // request carries — so the same refusal-by-name the CLI applies happens here too.
-        if let contract = EnvContract.contract(for: service.kind, backend: stack.backend) {
+        if let contract = EnvContract.contract(for: service.kind, backend: stack.backend, registry: registry) {
             let unknown = contract.unknownKeys(in: body.values)
             if !unknown.isEmpty {
                 let hints = unknown.map { key -> String in
@@ -1641,7 +1645,7 @@ public struct HatcheryAPI: Sendable {
             // and reporting it as a failure would invite someone to write it again.
             let sealed = await sealState(url.path)
 
-            let contract = EnvContract.contract(for: service.kind, backend: stack.backend)
+            let contract = EnvContract.contract(for: service.kind, backend: stack.backend, registry: registry)
             let missing = (contract?.required ?? []).filter { (merged[$0] ?? "").isEmpty }.sorted()
             let detail = "set \(body.values.keys.sorted().joined(separator: ", "))"
             return .json(

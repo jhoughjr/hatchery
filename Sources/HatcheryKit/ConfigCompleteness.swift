@@ -69,7 +69,8 @@ public enum ConfigCompleteness {
         manifestPath: String,
         read: (URL) throws -> [String: String] = { try ConfigSync.readDeclared(at: $0) }
     ) -> ConfigStatus {
-        guard let contract = EnvContract.contract(for: service.kind, backend: stack.backend) else {
+        let registry = KindRegistry(manifestPath: manifestPath)
+        guard let contract = EnvContract.contract(for: service.kind, backend: stack.backend, registry: registry) else {
             return ConfigStatus(service: service.name, missing: [], unexpected: [], found: true)
         }
         let url = ConfigSync.configURL(for: service, in: stack, manifestPath: manifestPath)
