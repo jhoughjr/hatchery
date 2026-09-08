@@ -12,6 +12,13 @@ struct Declared: AsyncParsableCommand {
             One document of stacks and services, with the host, the kind, the image and the names, \
             and never a config value. With --publish the same document goes to pulse, where the coop \
             reads it beside what roost found answering.
+
+            Each service also carries its findings: a secret still sitting in the sidecar, and a \
+            sidecar whose key set no longer matches the box. Filling them reads the live \
+            environment of every service, so the document costs one call per service.
+
+            --answers prints one line per service instead, as `name kind backend`, which is the \
+            list roost's reconcile should expect to find answering. It reads no box.
             """
     )
 
@@ -30,6 +37,9 @@ struct Declared: AsyncParsableCommand {
     @Option(name: .long, help: "Write this pulse URL into each manifest as its publish target, so every later write publishes on its own. An empty string clears it.")
     var publishTo: String?
 
+    @Flag(name: .long, help: "Print one line per service, as `name kind backend`, instead of the document.")
+    var answers = false
+
     func run() async throws {
         let requested = self.manifest.isEmpty ? [ManifestLocator.defaultName] : self.manifest
         var loaded: [(manifest: StackManifest, path: String)] = []
@@ -46,7 +56,15 @@ struct Declared: AsyncParsableCommand {
             }
             print("  publish target \(target.isEmpty ? "cleared" : "set to " + target) on \(loaded.count) manifest(s)")
         }
-        let document = Declaration(manifests: loaded)
+        // The answers list says nothing about the saying of the declaration, so it skips the audit and
+        // the round trip per service the audit costs.
+        if self.answers {
+            Declaration(manifests: loaded).answers.forEach { print($0) }
+            return
+        }
+
+        let document = Declaration(
+            manifests: loaded, findings: await DeclarationAudit().findings(for: loaded))
         let data = try document.encoded()
         print(String(decoding: data, as: UTF8.self))
 

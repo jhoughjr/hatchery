@@ -24,7 +24,7 @@ public enum LiveConfigError: Error, CustomStringConvertible, Equatable {
     public var description: String {
         switch self {
         case .noHost(let stack):
-            return "stack '\(stack)' targets dokku but declares no host, so there is nothing to read from"
+            return "stack '\(stack)' runs on a box but declares no host, so there is nothing to read from"
         case .unsupportedBackend(let backend):
             return "reading live config from \(backend.rawValue) is not implemented yet"
         case .malformedConfig(let service):
@@ -34,6 +34,7 @@ public enum LiveConfigError: Error, CustomStringConvertible, Equatable {
 }
 
 /// Runs one command and returns its standard output.
+
 public typealias CommandRunner = @Sendable ([String]) async throws -> Data
 
 /// Everything one command produced, including a nonzero status.
@@ -159,9 +160,16 @@ public struct LiveConfigReader: Sendable {
             throw LiveConfigError.unsupportedBackend(.aws)
 
         case .host:
-            // A container's environment is read from `docker inspect`, which the declaration reads for its
-            // findings rather than the config verbs. Sub-step 3 of this packet opens that door.
-            throw LiveConfigError.unsupportedBackend(.host)
+            guard let host = stack.host, !host.isEmpty else {
+                throw LiveConfigError.noHost(stack: stack.name)
+            }
+            // A container carries its whole environment in its run, so one inspect is the whole answer.
+            // Nothing here is hidden behind a reference the way a managed platform's secrets are.
+            let data = try await run(Self.inspectCommand(host: host, container: service.name))
+            guard let read = try? ContainerInspection.decode(data) else {
+                throw LiveConfigError.malformedConfig(service: service.name)
+            }
+            return read.environment
 
         case .appPlatform:
             // Authoring one works — `digitalocean_app` takes an image, an environment, a port
@@ -171,6 +179,11 @@ public struct LiveConfigReader: Sendable {
             // about what a value we cannot see means, so it is deliberately not guessed here.
             throw LiveConfigError.unsupportedBackend(.appPlatform)
         }
+    }
+
+    /// One `docker inspect` over ssh. The command is one string, because the remote shell parses it.
+    static func inspectCommand(host: String, container: String) -> [String] {
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "docker inspect \(container)"]
     }
 
     static func dokkuCommand(host: String, app: String) -> [String] {

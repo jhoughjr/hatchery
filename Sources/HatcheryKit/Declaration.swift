@@ -6,12 +6,34 @@ import FoundationNetworking
 /// The declaration as a reading: every stack the manifests hold, flattened to what a reader off this machine needs.
 /// Config values never join it, because the document is published.
 public struct Declaration: Codable, Sendable, Equatable {
+    /// Something true about a service that its declaration alone does not say.
+    ///
+    /// The declaration says what should be; a finding says what is wrong with the saying of it. The coop
+    /// draws these in its why column beside the gap, so the text is one sentence a reader can act on.
+    ///
+    /// - `code`: the machine's word for the kind of finding, from ``FindingCode``.
+    /// - `text`: the same thing for a person.
+    public struct Finding: Codable, Sendable, Equatable {
+        public var code: String
+        public var text: String
+
+        public init(code: String, text: String) {
+            self.code = code
+            self.text = text
+        }
+    }
+
     public struct Service: Codable, Sendable, Equatable {
         public var name: String
         public var kind: String
         public var image: String
         public var domains: [String]
         public var healthPath: String?
+        /// What the box does with this container when it stops, for a service on the `host` backend.
+        /// Absent for every other backend, where the platform owns the answer.
+        public var restart: String?
+        /// Empty when the service is clean. Filled by ``DeclarationAudit``, never by a manifest write.
+        public var findings: [Finding] = []
     }
 
     public struct Stack: Codable, Sendable, Equatable {
@@ -28,7 +50,16 @@ public struct Declaration: Codable, Sendable, Equatable {
     public var manifests: [String]
     public var stacks: [Stack]
 
-    public init(manifests: [(manifest: StackManifest, path: String)], now: Date = Date()) {
+    /// `findings` is keyed `<stack>/<service>`, and a service with no entry reads as clean.
+    ///
+    /// It is a parameter rather than something this type works out, because a manifest write publishes a
+    /// declaration and a write must never reach the box to do it. ``DeclarationAudit`` is what fills it, and
+    /// only `hatchery declared` runs that.
+    public init(
+        manifests: [(manifest: StackManifest, path: String)],
+        findings: [String: [Finding]] = [:],
+        now: Date = Date()
+    ) {
         self.at = Int(now.timeIntervalSince1970 * 1000)
         self.manifests = manifests.map(\.path)
         self.stacks = manifests.flatMap { loaded in
@@ -45,11 +76,24 @@ public struct Declaration: Codable, Sendable, Equatable {
                             kind: service.kind.rawValue,
                             image: service.image,
                             domains: service.domains,
-                            healthPath: service.healthPath
+                            healthPath: service.healthPath,
+                            restart: service.container?.restart,
+                            findings: findings["\(stack.name)/\(service.name)"] ?? []
                         )
                     }
                 )
             }
+        }
+    }
+
+    /// One line per service, across every stack: the name, the kind, and the backend that runs it.
+    ///
+    /// This is the list roost's reconcile should expect to find answering on the box. It is generated from
+    /// the declaration rather than typed into the reconcile script, so a container declared here starts
+    /// being asked about without anyone editing bash.
+    public var answers: [String] {
+        stacks.flatMap { stack in
+            stack.services.map { "\($0.name) \($0.kind) \(stack.backend)" }
         }
     }
 
