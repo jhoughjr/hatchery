@@ -77,6 +77,8 @@ public struct Scaffolder: Sendable {
         containerPort: Int = 8080,
         network: String? = nil,
         gated: Bool = false,
+        hostPort: String = "80",
+        checksDisabled: Bool = true,
         siblings: [String: [String: String]] = [:],
         mintKeypair: Bool = false
     ) async throws -> ScaffoldResult {
@@ -95,12 +97,12 @@ public struct Scaffolder: Sendable {
         var resolved = service
         let request = ScaffoldRequest(
             stack: stack, service: service, containerPort: containerPort,
-            network: network, gated: gated)
+            network: network, gated: gated, hostPort: hostPort, checksDisabled: checksDisabled)
         resolved.imageVariable = provider.imageVariableName(for: request)
 
         let finalRequest = ScaffoldRequest(
             stack: stack, service: resolved, containerPort: containerPort,
-            network: network, gated: gated)
+            network: network, gated: gated, hostPort: hostPort, checksDisabled: checksDisabled)
 
         var files = try provider.declaration(for: finalRequest)
         if let variable = provider.imageVariable(for: finalRequest) {

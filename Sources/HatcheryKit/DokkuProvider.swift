@@ -137,18 +137,23 @@ public struct DokkuProvider: ServiceProvider {
               ]
 
               ports = {
-                "80" = {
+                "\(request.hostPort)" = {
                   scheme         = "http"
                   container_port = "\(request.containerPort)"
                 }
               }
 
-              # Zero-downtime checks are off, matching the rest of the lab.
-              checks = {
-                status = "disabled"
-              }
-
             """
+
+        if request.checksDisabled {
+            body += """
+                  # Zero-downtime checks are off, matching the rest of the lab.
+                  checks = {
+                    status = "disabled"
+                  }
+
+                """
+        }
 
         if let network = request.network, !network.isEmpty {
             body += """

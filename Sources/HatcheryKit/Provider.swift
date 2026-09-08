@@ -46,19 +46,29 @@ public struct ScaffoldRequest: Sendable, Equatable {
     public var network: String?
     /// Whether the declaration is gated behind an `enable_<name>` variable, as the lab's are.
     public var gated: Bool
+    /// The host-facing port the domain answers on. `"80"` is what every hatchery-scaffolded
+    /// service is authored with; adopt carries whatever the box measures.
+    public var hostPort: String
+    /// Whether the backend's zero-downtime checks are off for this service. `true` matches
+    /// the lab's convention for a freshly scaffolded service; adopt carries what it measures.
+    public var checksDisabled: Bool
 
     public init(
         stack: StackSpec,
         service: ServiceSpec,
         containerPort: Int = 8080,
         network: String? = nil,
-        gated: Bool = false
+        gated: Bool = false,
+        hostPort: String = "80",
+        checksDisabled: Bool = true
     ) {
         self.stack = stack
         self.service = service
         self.containerPort = containerPort
         self.network = network
         self.gated = gated
+        self.hostPort = hostPort
+        self.checksDisabled = checksDisabled
     }
 }
 

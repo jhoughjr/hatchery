@@ -12,19 +12,25 @@ public struct AppFacts: Sendable, Equatable {
     public let domains: [String]
     /// The port the container listens on, from the http port map.
     public let containerPort: Int
+    /// The host-facing port of the same mapping, e.g. `"80"` in `http:80:8080`.
+    public let hostPort: String
     public let network: String?
     public let config: [String: String]
+    /// Whether the box currently disables this app's zero-downtime checks.
+    public let checksDisabled: Bool
 
     public init(
-        name: String, image: String, domains: [String], containerPort: Int,
-        network: String?, config: [String: String]
+        name: String, image: String, domains: [String], containerPort: Int, hostPort: String = "80",
+        network: String?, config: [String: String], checksDisabled: Bool = false
     ) {
         self.name = name
         self.image = image
         self.domains = domains
         self.containerPort = containerPort
+        self.hostPort = hostPort
         self.network = network
         self.config = config
+        self.checksDisabled = checksDisabled
     }
 }
 
@@ -44,7 +50,8 @@ public enum AdoptError: Error, Equatable, CustomStringConvertible {
         case .stackNotOnBox(let stack, let box):
             return "stack '\(stack)' is not a dokku stack on \(box)"
         case .kindUnknown(let app, let image):
-            return "cannot tell the kind of '\(app)' from its image \(image); pass --kind"
+            return "cannot tell the kind of '\(app)' from its image \(image); "
+                + "pass --kind-file, add it to the registry, or pass --kind"
         case .unreadable(let what):
             return "the box did not answer \(what)"
         }
@@ -83,6 +90,10 @@ public struct Adopter: Sendable {
             "network:report \(app) --network-attach-post-create", on: box)
         let inspect = try await self.answer("ps:inspect \(app)", on: box)
         let exported = try await self.answer("config:export --format json \(app)", on: box)
+        // Best-effort: an older dokku without the checks plugin's report flag answers nothing
+        // useful here, and that is not a reason to fail the whole read.
+        let checksDisabled = (try? await self.answer(
+            "checks:report \(app) --checks-disabled-list", on: box)) ?? ""
 
         let config = (try? JSONDecoder().decode([String: String].self, from: Data(exported.utf8)))
             ?? [:]
@@ -91,8 +102,10 @@ public struct Adopter: Sendable {
             image: Self.image(fromInspect: inspect, app: app),
             domains: domains.split(separator: " ").map(String.init),
             containerPort: Self.containerPort(fromPortMap: ports),
+            hostPort: Self.hostPort(fromPortMap: ports),
             network: network.isEmpty ? nil : network,
-            config: config)
+            config: config,
+            checksDisabled: !checksDisabled.isEmpty)
     }
 
     /// The kind an image name implies. The kinds hatchery knows carry their name in their
@@ -108,12 +121,40 @@ public struct Adopter: Sendable {
         return nil
     }
 
+    /// Resolves the kind for `app`, trying each source in this order and refusing only when
+    /// none of them says: a kind file named directly, one the registry already holds under
+    /// the app's own name, `--kind`, then the image. A resolution from a file carries it, so
+    /// `plan` can take the file's `healthcheck` and `port`.
+    public static func resolveKind(
+        app: String, kindFilePath: String?, kindOption: ServiceKind?, image: String,
+        registry: KindRegistry
+    ) throws -> (kind: ServiceKind, kindFile: KindFile?) {
+        if let kindFilePath {
+            let file = try KindFile.load(atPath: kindFilePath)
+            return (ServiceKind(rawValue: file.kind), file)
+        }
+        if let found = try? registry.kindFile(for: ServiceKind(rawValue: app)) {
+            return (ServiceKind(rawValue: found.kind), found)
+        }
+        if let kindOption {
+            return (kindOption, nil)
+        }
+        if let inferred = inferKind(fromImage: image) {
+            return (inferred, nil)
+        }
+        throw AdoptError.kindUnknown(app: app, image: image)
+    }
+
     /// The plan: the service joins `stackName`, with the box's config in place of minted
     /// values. The stack must be a dokku stack on the same box, because the declaration
     /// the scaffolder writes targets the stack's host.
+    ///
+    /// `kindFile`, when present, wins for `healthcheck` and `port` (when it has one) — the
+    /// service's own word about its own contact surface. The config sidecar still carries the
+    /// box's measured keys either way.
     public func plan(
         _ facts: AppFacts, kind: ServiceKind, into stackName: String, box: String,
-        manifest: StackManifest
+        manifest: StackManifest, kindFile: KindFile? = nil
     ) async throws -> AdoptResult {
         guard let stack = manifest.stack(named: stackName), stack.backend == .dokku,
             let host = stack.hostAddress, box.hasSuffix(host)
@@ -127,10 +168,12 @@ public struct Adopter: Sendable {
 
         let service = ServiceSpec(
             name: facts.name, kind: kind, image: facts.image, domains: facts.domains,
-            configFile: "\(facts.name).config.json")
+            configFile: "\(facts.name).config.json",
+            healthPath: kindFile?.healthcheck)
         let scaffolded = try await Scaffolder().plan(
             service: service, into: stackName, manifest: manifest,
-            containerPort: facts.containerPort, network: facts.network)
+            containerPort: kindFile?.port ?? facts.containerPort, network: facts.network,
+            hostPort: facts.hostPort, checksDisabled: facts.checksDisabled)
 
         // The scaffolder minted a config. The box's config replaces it wholesale: keys the
         // contract does not know are kept too, because the running app reads them.
@@ -144,7 +187,7 @@ public struct Adopter: Sendable {
 
         return AdoptResult(
             service: scaffolded.service, files: files, manifest: scaffolded.manifest,
-            importCommand: "tofu import dokku_app.\(DokkuProvider.identifier(facts.name)) \(facts.name)")
+            importCommand: "tofu import dokku_app.\(tofuIdentifier(for: facts.name)) \(facts.name)")
     }
 
     // MARK: parsing
@@ -177,6 +220,16 @@ public struct Adopter: Sendable {
             if parts.count == 3, parts[0] == "http", let port = Int(parts[2]) { return port }
         }
         return 8080
+    }
+
+    /// `http:80:8080` → `"80"`. The middle field of the same mapping, so the tofu declaration
+    /// answers the domain on the port the app actually maps rather than an assumed `"80"`.
+    static func hostPort(fromPortMap map: String) -> String {
+        for entry in map.split(separator: " ") {
+            let parts = entry.split(separator: ":")
+            if parts.count == 3, parts[0] == "http" { return String(parts[1]) }
+        }
+        return "80"
     }
 
     private func answer(_ command: String, on box: String) async throws -> String {

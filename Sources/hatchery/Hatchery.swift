@@ -257,6 +257,11 @@ struct Box: AsyncParsableCommand {
             help: "Service kind, when neither a kind file nor the image says. Built in: \(ServiceKind.known.map(\.rawValue).joined(separator: ", ")). Or a kind the registry declares — see `hatchery kind list`.")
         var kind: ServiceKindArgument?
 
+        @Option(
+            name: .long,
+            help: "Read a kind file directly, ahead of the registry and --kind. Added to the registry unless --dry-run.")
+        var kindFile: String?
+
         @Option(name: .shortAndLong, help: "Path to the stack manifest.")
         var manifest: String = "hatchery.json"
 
@@ -265,8 +270,21 @@ struct Box: AsyncParsableCommand {
 
         func run() async throws {
             let manifestPath = try ManifestLocator.resolve(manifest)
+            let manifestDirectory = URL(fileURLWithPath: manifestPath).deletingLastPathComponent().path
             let data = try Data(contentsOf: URL(fileURLWithPath: manifestPath))
             let parsed = try StackManifest.decode(from: data)
+
+            // Two adopters against one box collide — phase 1 measured it — so only one runs
+            // against a manifest at a time. A dry run writes nothing and takes no lock.
+            let lock = AdoptLock(manifestDirectory: manifestDirectory)
+            if !dryRun {
+                do {
+                    try lock.acquire()
+                } catch let error as AdoptLockError {
+                    throw ValidationError(error.description)
+                }
+            }
+            defer { if !dryRun { lock.release() } }
 
             let scanner = ScanKit.Scanner()
             let (provider, box) = try await scanner.identify(target)
@@ -280,22 +298,33 @@ struct Box: AsyncParsableCommand {
 
             let adopter = Adopter()
             let facts = try await adopter.facts(for: app, on: box)
-            guard let resolvedKind = kind?.kind ?? Adopter.inferKind(fromImage: facts.image) else {
-                throw ValidationError(AdoptError.kindUnknown(app: app, image: facts.image).description)
+
+            let registry = KindRegistry(manifestPath: manifestPath)
+            let resolved: (kind: ServiceKind, kindFile: KindFile?)
+            do {
+                resolved = try Adopter.resolveKind(
+                    app: app, kindFilePath: kindFile, kindOption: kind?.kind, image: facts.image,
+                    registry: registry)
+            } catch let error as AdoptError {
+                throw ValidationError(error.description)
+            }
+            if let kindFile, !dryRun {
+                try registry.add(from: kindFile)
             }
 
             print("\(app) on \(box)")
             print("  image    \(facts.image)")
-            print("  kind     \(resolvedKind.rawValue)")
+            print("  kind     \(resolved.kind.rawValue)\(resolved.kindFile != nil ? " (from a kind file)" : "")")
             print("  domains  \(facts.domains.joined(separator: " "))")
-            print("  port     \(facts.containerPort)")
+            print("  port     \(resolved.kindFile?.port ?? facts.containerPort)")
             if let network = facts.network { print("  network  \(network)") }
             print("  config   \(facts.config.count) key(s)")
 
             let result: AdoptResult
             do {
                 result = try await adopter.plan(
-                    facts, kind: resolvedKind, into: stack, box: box, manifest: parsed)
+                    facts, kind: resolved.kind, into: stack, box: box, manifest: parsed,
+                    kindFile: resolved.kindFile)
             } catch let error as AdoptError {
                 throw ValidationError(error.description)
             }
