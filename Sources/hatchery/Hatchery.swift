@@ -254,7 +254,7 @@ struct Box: AsyncParsableCommand {
 
         @Option(
             name: .shortAndLong,
-            help: "Service kind, when neither a kind file nor the image says. Built in: \(ServiceKind.known.map(\.rawValue).joined(separator: ", ")). Or a kind the registry declares — see `hatchery kind list`.")
+            help: "Service kind, when neither a kind file nor the image says. Built in: \(ServiceKind.known.map(\.rawValue).joined(separator: ", ")). Or a kind the registry declares, see `hatchery kind list`.")
         var kind: ServiceKindArgument?
 
         @Option(
@@ -274,7 +274,7 @@ struct Box: AsyncParsableCommand {
             let data = try Data(contentsOf: URL(fileURLWithPath: manifestPath))
             let parsed = try StackManifest.decode(from: data)
 
-            // Two adopters against one box collide — phase 1 measured it — so only one runs
+            // Two adopters against one box collide, phase 1 measured it, so only one runs
             // against a manifest at a time. A dry run writes nothing and takes no lock.
             let lock = AdoptLock(manifestDirectory: manifestDirectory)
             if !dryRun {

@@ -149,7 +149,7 @@ public struct Adopter: Sendable {
     /// values. The stack must be a dokku stack on the same box, because the declaration
     /// the scaffolder writes targets the stack's host.
     ///
-    /// `kindFile`, when present, wins for `healthcheck` and `port` (when it has one) — the
+    /// `kindFile`, when present, wins for `healthcheck` and `port` (when it has one): the
     /// service's own word about its own contact surface. The config sidecar still carries the
     /// box's measured keys either way.
     public func plan(

@@ -149,7 +149,7 @@ extension KindFile {
     /// The environment contract this file declares, in the shape the built-in kinds carry.
     ///
     /// A key is `required` when the file says so directly, or when it names a `deployed` value
-    /// with no `default` — a key with nothing to fall back to. `secret` is read the same
+    /// with no `default`, a key with nothing to fall back to. `secret` is read the same
     /// direct way; `optional` is everything else. No kind file declares a retired or an
     /// ignored key yet.
     public func contract(backend: Backend) -> EnvContract {
