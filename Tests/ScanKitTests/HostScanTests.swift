@@ -266,6 +266,98 @@ struct ContainerAdoptTests {
         #expect(refusal.description.contains("--backend host"))
     }
 
+    @Test("a replace regenerates a container the stack already declares, and keeps its sidecar")
+    func replacesADeclaredContainer() async throws {
+        let inspect = try recorded("lan-dns.inspect.json")
+        let adopter = Adopter(execute: { _, _ in
+            CommandOutput(status: 0, standardOutput: inspect)
+        })
+        let facts = try await adopter.container(named: "lan-dns", on: "jimmy@192.168.0.103")
+
+        var declared = manifest()
+        declared.stacks[0].services = [
+            ServiceSpec(
+                name: "lan-dns", kind: .container, image: "4km3/dnsmasq:0.1",
+                configFile: "lan-dns.config.json")
+        ]
+
+        // Without the flag the refusal stands, because adopting twice is what it is there to catch.
+        await #expect(throws: AdoptError.self) {
+            try await adopter.planContainer(
+                facts, kind: .container, into: "box", box: "jimmy@192.168.0.103",
+                manifest: declared, manifestPath: "/infra/box/hatchery.json")
+        }
+
+        let result = try await adopter.planContainer(
+            facts, kind: .container, into: "box", box: "jimmy@192.168.0.103",
+            manifest: declared, manifestPath: "/infra/box/hatchery.json", replacing: true)
+
+        // The manifest entry is rewritten in place rather than doubled.
+        #expect(result.manifest.stacks[0].services.map(\.name) == ["lan-dns"])
+        #expect(result.manifest.stacks[0].services[0].image == "4km3/dnsmasq:latest")
+        #expect(result.files.contains { $0.path == "lan_dns.tf" })
+        #expect(!result.files.contains { $0.role == .config })
+
+        // --refresh-config is what asks for the sidecar to be read off the box again.
+        let refreshed = try await adopter.planContainer(
+            facts, kind: .container, into: "box", box: "jimmy@192.168.0.103",
+            manifest: declared, manifestPath: "/infra/box/hatchery.json", replacing: true,
+            refreshConfig: true)
+        #expect(refreshed.files.contains { $0.path == "lan-dns.config.json" })
+    }
+
+    @Test("the image is read a second time, and only what the run adds to it reaches the sidecar")
+    func sidecarHoldsOnlyWhatTheRunAdds() async throws {
+        let inspect = try recorded("rookery-pg.inspect.json")
+        let imageEnv = try recorded("postgres-17-alpine.image-env.json")
+        let asked = AskedCommands()
+        let adopter = Adopter(execute: { command, _ in
+            asked.commands.append(command.joined(separator: " "))
+            let last = command.last ?? ""
+            return CommandOutput(
+                status: 0, standardOutput: last.hasPrefix("docker image inspect") ? imageEnv : inspect)
+        })
+        let facts = try await adopter.container(named: "rookery-pg", on: "jimmy@192.168.0.103")
+        let image = try await adopter.imageEnvironment(
+            for: facts.image, on: "jimmy@192.168.0.103")
+
+        #expect(asked.commands.last?.contains("docker image inspect postgres:17-alpine") == true)
+        #expect(image.count == 8)
+
+        let result = try await adopter.planContainer(
+            facts, kind: .container, into: "box", box: "jimmy@192.168.0.103",
+            manifest: manifest(), manifestPath: "/infra/box/hatchery.json",
+            imageEnvironment: image)
+
+        // The eight keys rookery-pg reports are all the image's own, so the sidecar holds none of them.
+        let sidecar = try #require(result.files.first { $0.path == "rookery-pg.config.json" })
+        let recorded = try JSONDecoder().decode(
+            [String: String].self, from: Data(sidecar.contents.utf8))
+        #expect(recorded.isEmpty)
+    }
+
+    @Test("an image the box cannot inspect is a refusal, not an empty environment")
+    func refusesAnImageItCannotRead() async {
+        let refusing = Adopter(execute: { _, _ in
+            CommandOutput(
+                status: 1, standardOutput: "",
+                standardError: "Error: No such image: postgres:17-alpine")
+        })
+        await #expect(throws: AdoptError.self) {
+            try await refusing.imageEnvironment(
+                for: "postgres:17-alpine", on: "jimmy@192.168.0.103")
+        }
+
+        // An answer the box gives with status 0 that is not an environment is refused the same way.
+        let garbled = Adopter(execute: { _, _ in
+            CommandOutput(status: 0, standardOutput: "{}\n")
+        })
+        await #expect(throws: ContainerInspectionError.self) {
+            try await garbled.imageEnvironment(
+                for: "postgres:17-alpine", on: "jimmy@192.168.0.103")
+        }
+    }
+
     @Test("a container the box does not hold is refused before anything is planned")
     func refusesAContainerThatIsNotThere() async {
         let adopter = Adopter(execute: { _, _ in

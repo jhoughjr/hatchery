@@ -45,6 +45,11 @@ public struct ContainerSpec: Codable, Sendable, Equatable {
     public var privileged: Bool
     /// Extra `host:address` lines the container resolves, as `--add-host` writes them.
     public var extraHosts: [String]
+    /// Whether tofu owns the shape of this container.
+    ///
+    /// Unmanaged means declared and observed: tofu holds the import and ignores drift.
+    /// Managed means tofu owns the container's shape, and a plan may replace it.
+    public var managed: Bool
 
     public init(
         image: String,
@@ -54,7 +59,8 @@ public struct ContainerSpec: Codable, Sendable, Equatable {
         restart: String = "unless-stopped",
         command: [String]? = nil,
         privileged: Bool = false,
-        extraHosts: [String] = []
+        extraHosts: [String] = [],
+        managed: Bool = false
     ) {
         self.image = image
         self.network = network
@@ -64,6 +70,41 @@ public struct ContainerSpec: Codable, Sendable, Equatable {
         self.command = command
         self.privileged = privileged
         self.extraHosts = extraHosts
+        self.managed = managed
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case image, network, mounts, ports, restart, command, privileged, extraHosts, managed
+    }
+
+    /// Every manifest written before this field reads as unmanaged, which is what those containers are.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.image = try values.decode(String.self, forKey: .image)
+        self.network = try values.decodeIfPresent(String.self, forKey: .network)
+        self.mounts = try values.decode([Mount].self, forKey: .mounts)
+        self.ports = try values.decode([PortMap].self, forKey: .ports)
+        self.restart = try values.decode(String.self, forKey: .restart)
+        self.command = try values.decodeIfPresent([String].self, forKey: .command)
+        self.privileged = try values.decode(Bool.self, forKey: .privileged)
+        self.extraHosts = try values.decode([String].self, forKey: .extraHosts)
+        self.managed = try values.decodeIfPresent(Bool.self, forKey: .managed) ?? false
+    }
+
+    /// The field is written only when it is true, so adopting a container adds no key to a manifest.
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(self.image, forKey: .image)
+        try values.encodeIfPresent(self.network, forKey: .network)
+        try values.encode(self.mounts, forKey: .mounts)
+        try values.encode(self.ports, forKey: .ports)
+        try values.encode(self.restart, forKey: .restart)
+        try values.encodeIfPresent(self.command, forKey: .command)
+        try values.encode(self.privileged, forKey: .privileged)
+        try values.encode(self.extraHosts, forKey: .extraHosts)
+        if self.managed {
+            try values.encode(true, forKey: .managed)
+        }
     }
 }
 

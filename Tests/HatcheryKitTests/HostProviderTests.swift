@@ -119,17 +119,9 @@ struct HostProviderTests {
         #expect(tf.path == "lan_dns.tf")
         #expect(tf.contents == """
             # container 'lan-dns', authored by hatchery.
-            resource "docker_image" "lan_dns" {
-              name = "4km3/dnsmasq:latest"
-
-              # An adopted container's image is already on the box, and a scaffolded one needs a pull.
-              # keep_locally stops a destroy from deleting an image other containers share.
-              keep_locally = true
-            }
-
             resource "docker_container" "lan_dns" {
               name  = "lan-dns"
-              image = docker_image.lan_dns.image_id
+              image = "4km3/dnsmasq:latest"
 
               restart = "unless-stopped"
 
@@ -144,6 +136,12 @@ struct HostProviderTests {
               env = sensitive([
                 for key, value in merge(jsondecode(file("${path.module}/lan-dns.config.json")), fileexists("${path.module}/lan-dns.secrets.json") ? jsondecode(file("${path.module}/lan-dns.secrets.json")) : {}) : "${key}=${value}"
               ])
+
+              # This container is declared and observed, not managed, so tofu records it and never reshapes it.
+              lifecycle {
+                prevent_destroy = true
+                ignore_changes  = all
+              }
             }
 
             """)
@@ -158,17 +156,9 @@ struct HostProviderTests {
         #expect(tf.path == "rookery_pg.tf")
         #expect(tf.contents == """
             # container 'rookery-pg', authored by hatchery.
-            resource "docker_image" "rookery_pg" {
-              name = "postgres:17-alpine"
-
-              # An adopted container's image is already on the box, and a scaffolded one needs a pull.
-              # keep_locally stops a destroy from deleting an image other containers share.
-              keep_locally = true
-            }
-
             resource "docker_container" "rookery_pg" {
               name  = "rookery-pg"
-              image = docker_image.rookery_pg.image_id
+              image = "postgres:17-alpine"
 
               restart = "unless-stopped"
 
@@ -193,9 +183,66 @@ struct HostProviderTests {
               env = sensitive([
                 for key, value in merge(jsondecode(file("${path.module}/rookery-pg.config.json")), fileexists("${path.module}/rookery-pg.secrets.json") ? jsondecode(file("${path.module}/rookery-pg.secrets.json")) : {}) : "${key}=${value}"
               ])
+
+              # This container is declared and observed, not managed, so tofu records it and never reshapes it.
+              lifecycle {
+                prevent_destroy = true
+                ignore_changes  = all
+              }
             }
 
             """)
+    }
+
+    @Test("a managed container hands tofu its image and its shape, and carries no guard")
+    func managedDeclaration() throws {
+        var service = rookeryPG()
+        service.container?.managed = true
+        let files = try HostProvider().declaration(
+            for: ScaffoldRequest(stack: hostStack(), service: service))
+        let tf = try #require(files.first { $0.role == .declaration })
+
+        #expect(tf.contents.hasPrefix("""
+            # container 'rookery-pg', authored by hatchery.
+            resource "docker_image" "rookery_pg" {
+              name = "postgres:17-alpine"
+
+              # An adopted container's image is already on the box, and a scaffolded one needs a pull.
+              # keep_locally stops a destroy from deleting an image other containers share.
+              keep_locally = true
+            }
+
+            resource "docker_container" "rookery_pg" {
+              name  = "rookery-pg"
+              image = docker_image.rookery_pg.image_id
+
+              restart = "unless-stopped"
+            """))
+        #expect(!tf.contents.contains("lifecycle"))
+        #expect(!tf.contents.contains("prevent_destroy"))
+    }
+
+    @Test("the field is written only when tofu owns the container, so an adopted manifest gains no key")
+    func managedIsWrittenOnlyWhenTrue() throws {
+        var stack = hostStack()
+        stack.services = [lanDNS()]
+        let observed = String(
+            decoding: try StackManifest(version: 1, stacks: [stack]).encoded(), as: UTF8.self)
+        #expect(!observed.contains("managed"))
+
+        stack.services[0].container?.managed = true
+        let managed = StackManifest(version: 1, stacks: [stack])
+        let text = String(decoding: try managed.encoded(), as: UTF8.self)
+        #expect(text.contains("\"managed\" : true"))
+        #expect(try StackManifest.decode(from: try managed.encoded()) == managed)
+
+        // A manifest written before the field reads as unmanaged, which is what those containers are.
+        let older = """
+            {"image":"4km3/dnsmasq:latest","mounts":[],"ports":[],"restart":"no",
+             "privileged":false,"extraHosts":[]}
+            """
+        let spec = try JSONDecoder().decode(ContainerSpec.self, from: Data(older.utf8))
+        #expect(!spec.managed)
     }
 
     @Test("adopting adds the import block, so tofu binds to the container instead of creating one")
@@ -241,7 +288,7 @@ struct HostProviderTests {
         let scaffolded = try HostProvider().declaration(
             for: ScaffoldRequest(stack: hostStack(), service: bare))
         let bareTF = try #require(scaffolded.first { $0.role == .declaration })
-        #expect(bareTF.contents.contains("name = \"4km3/dnsmasq:latest\""))
+        #expect(bareTF.contents.contains("image = \"4km3/dnsmasq:latest\""))
         #expect(bareTF.contents.contains("restart = \"unless-stopped\""))
         #expect(!bareTF.contents.contains("network_mode"))
     }

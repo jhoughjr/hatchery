@@ -99,6 +99,51 @@ struct ContainerInspectionTests {
             """))
     }
 
+    @Test("the sidecar records what the run adds to the image, and not what the image already set")
+    func dropsTheImagesOwnEnvironment() throws {
+        let read = try ContainerInspection.decode(
+            try recordedInspection("rookery-pg.inspect.json"))
+        let image = try ContainerInspection.imageEnvironment(
+            try recordedInspection("postgres-17-alpine.image-env.json"))
+
+        // Every one of the eight keys rookery-pg runs with is the image's own, so the sidecar is empty.
+        #expect(read.environment.count == 8)
+        #expect(image.count == 8)
+        #expect(read.declaredEnvironment(against: image).isEmpty)
+
+        // A -e flag that overrides the image's value is a declaration, and it stays.
+        var overridden = read.environment
+        overridden["PGDATA"] = "/mnt/pgdata"
+        let run = ContainerInspection(
+            id: read.id, name: read.name, image: read.image, state: read.state,
+            running: read.running, environment: overridden, spec: read.spec)
+        #expect(run.declaredEnvironment(against: image) == ["PGDATA": "/mnt/pgdata"])
+
+        // A key the kind file's contract names stays, whatever the image says about it.
+        let contract = EnvContract(required: ["PGDATA"], secret: ["PG_SHA256"])
+        #expect(
+            read.declaredEnvironment(against: image, contract: contract)
+                == [
+                    "PGDATA": "/var/lib/postgresql/data",
+                    "PG_SHA256":
+                        "078a03516dcdbdb705fecaf415ea3d13a956c589e46f09fed68a06fb00598c90",
+                ])
+
+        // A key the contract only ignores is the platform's, so it drops with the rest of the image's.
+        let ignoring = EnvContract(ignored: ["PGDATA"], ignoredPrefixes: ["PG_"])
+        #expect(read.declaredEnvironment(against: image, contract: ignoring).isEmpty)
+    }
+
+    @Test("an answer that is not the image's environment is refused")
+    func refusesWhatIsNotAnImageEnvironment() {
+        #expect(throws: ContainerInspectionError.self) {
+            try ContainerInspection.imageEnvironment(Data("{}".utf8))
+        }
+        #expect(throws: ContainerInspectionError.self) {
+            try ContainerInspection.imageEnvironment(Data("not json".utf8))
+        }
+    }
+
     @Test("a name dokku or buildx made is not a container this backend declares")
     func namesOtherDeclarationsOwn() {
         #expect(ContainerNames.isDokku("mwlab-2-paylab.web.1"))

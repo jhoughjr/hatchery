@@ -283,7 +283,20 @@ struct Box: AsyncParsableCommand {
         @Flag(name: .long, help: "Show what would be written without writing anything.")
         var dryRun: Bool = false
 
+        @Flag(
+            name: .long,
+            help: "Regenerate a container the stack already declares, rewriting its tofu file and its manifest entry.")
+        var replace: Bool = false
+
+        @Flag(
+            name: .long,
+            help: "With --replace, read the sidecar and the secrets file off the box again instead of keeping them.")
+        var refreshConfig: Bool = false
+
         func run() async throws {
+            guard !refreshConfig || replace else {
+                throw ValidationError("--refresh-config asks what --replace decides; pass both")
+            }
             let manifestPath = try ManifestLocator.resolve(manifest)
             let manifestDirectory = URL(fileURLWithPath: manifestPath).deletingLastPathComponent().path
             let data = try Data(contentsOf: URL(fileURLWithPath: manifestPath))
@@ -310,6 +323,9 @@ struct Box: AsyncParsableCommand {
             }
             guard provider == .dokku else {
                 throw ValidationError("adopt reads a box or a container; \(box) is \(provider.rawValue)")
+            }
+            guard !replace else {
+                throw ValidationError("--replace is a container door; a dokku app is adopted once")
             }
             let inventory = try await scanner.scan(target)
             guard inventory.apps.contains(where: { $0.name == app }) else {
@@ -384,6 +400,17 @@ struct Box: AsyncParsableCommand {
                 throw ValidationError(error.description)
             }
 
+            // The image is read a second time.
+            // docker reports the image's environment and the run's as one list, and only the image itself says which keys are its own.
+            let imageEnvironment: [String: String]
+            do {
+                imageEnvironment = try await adopter.imageEnvironment(for: facts.image, on: box)
+            } catch let error as AdoptError {
+                throw ValidationError(error.description)
+            } catch let error as ContainerInspectionError {
+                throw ValidationError(error.description)
+            }
+
             let registry = KindRegistry(manifestPath: manifestPath)
             // A container's own name is the kind the registry is asked for. Without one the kind is
             // `container`, whose contract is empty, so every key it runs with stays in the sidecar.
@@ -397,7 +424,8 @@ struct Box: AsyncParsableCommand {
             if let network = facts.spec.network { print("  network  \(network)") }
             print("  restart  \(facts.spec.restart)")
             print("  mounts   \(facts.spec.mounts.count), ports \(facts.spec.ports.count)")
-            print("  env      \(facts.environment.count) key(s)")
+            let own = facts.declaredEnvironment(against: imageEnvironment)
+            print("  env      \(facts.environment.count) key(s), \(own.count) of them the run's own")
             if let path = named?.healthcheck {
                 print("  probe    \(path), from the kind file")
             } else {
@@ -408,7 +436,9 @@ struct Box: AsyncParsableCommand {
             do {
                 result = try await adopter.planContainer(
                     facts, kind: resolvedKind, into: stack, box: box, manifest: parsed,
-                    manifestPath: manifestPath, kindFile: named)
+                    manifestPath: manifestPath, kindFile: named,
+                    imageEnvironment: imageEnvironment, replacing: replace,
+                    refreshConfig: refreshConfig)
             } catch let error as AdoptError {
                 throw ValidationError(error.description)
             }
@@ -424,7 +454,9 @@ struct Box: AsyncParsableCommand {
             guard let spec = parsed.stack(named: stack) else { return }
             let scaffolded = ScaffoldResult(
                 service: result.service, files: result.files, secrets: [], manifest: result.manifest)
-            let written = try Scaffolder().write(scaffolded, in: spec)
+            // The door opens for the files this plan carries, and for no other file in the directory.
+            let overwriting = replace ? Set(result.files.map(\.path)) : []
+            let written = try Scaffolder().write(scaffolded, in: spec, overwriting: overwriting)
             print("  wrote \(written.count) file(s)")
             try result.manifest.write(to: manifestPath)
             print("  manifest updated")

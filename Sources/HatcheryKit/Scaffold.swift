@@ -86,7 +86,8 @@ public struct Scaffolder: Sendable {
         containerID: String? = nil,
         siblings: [String: [String: String]] = [:],
         mintKeypair: Bool = false,
-        manifestPath: String? = nil
+        manifestPath: String? = nil,
+        replacing: Bool = false
     ) async throws -> ScaffoldResult {
         guard var stack = manifest.stack(named: stackName) else {
             throw ManifestError.invalidStackName(stackName)
@@ -94,8 +95,11 @@ public struct Scaffolder: Sendable {
         guard stack.tofu != nil else {
             throw ScaffoldError.noTofuBinding(stack: stackName)
         }
-        guard stack.service(named: service.name) == nil else {
-            throw ScaffoldError.serviceExists(stack: stackName, service: service.name)
+        // A replace regenerates a service that is already there, so the name it holds is not a collision.
+        if !replacing {
+            guard stack.service(named: service.name) == nil else {
+                throw ScaffoldError.serviceExists(stack: stackName, service: service.name)
+            }
         }
 
         let provider = try Providers.provider(for: stack.backend)
@@ -155,7 +159,11 @@ public struct Scaffolder: Sendable {
                 GeneratedFile(path: secretsFile, contents: secretsJSON + "\n", role: .config))
         }
 
-        stack.services.append(resolved)
+        if let index = stack.services.firstIndex(where: { $0.name == resolved.name }) {
+            stack.services[index] = resolved
+        } else {
+            stack.services.append(resolved)
+        }
         var updated = manifest
         for index in updated.stacks.indices where updated.stacks[index].name == stackName {
             updated.stacks[index] = stack
@@ -168,11 +176,14 @@ public struct Scaffolder: Sendable {
     /// Writes what ``plan(service:into:manifest:containerPort:network:gated:siblings:mintKeypair:)``
     /// worked out.
     ///
-    /// A whole file is never overwritten. Appends are appended. The tofu directory holds live
-    /// declarations and real secrets, so clobbering one is the one mistake that cannot be undone
-    /// from inside hatchery.
+    /// A whole file is never overwritten. Appends are appended.
+    /// The tofu directory holds live declarations and real secrets, so clobbering one is the one mistake
+    /// that cannot be undone from inside hatchery.
+    /// `overwriting` is the one door through that rule, and it opens for the named paths alone.
     @discardableResult
-    public func write(_ result: ScaffoldResult, in stack: StackSpec) throws -> [String] {
+    public func write(
+        _ result: ScaffoldResult, in stack: StackSpec, overwriting: Set<String> = []
+    ) throws -> [String] {
         guard let binding = stack.tofu else {
             throw ScaffoldError.noTofuBinding(stack: stack.name)
         }
@@ -180,7 +191,8 @@ public struct Scaffolder: Sendable {
 
         // Every destination is checked before anything is written, so a collision cannot leave
         // half a service on disk.
-        for file in result.files where file.role != .variableAppend {
+        for file in result.files
+        where file.role != .variableAppend && !overwriting.contains(file.path) {
             let path = Paths.join(directory, file.path)
             if fileExists(path) {
                 throw ScaffoldError.fileExists(path)

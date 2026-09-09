@@ -15,6 +15,21 @@ public struct HostProvider: ServiceProvider {
 
     public var setupSteps: [SetupStep] { Onboarding.hostSteps }
 
+    /// The guard an unmanaged container carries, which is every container hatchery adopts today.
+    ///
+    /// tofu is the registry of the container's existence.
+    /// hatchery's status grade and roost's answers are the truth about how it runs, so the guard stops a
+    /// plan from destroying or reshaping what the box holds.
+    static let lifecycle = """
+
+          # This container is declared and observed, not managed, so tofu records it and never reshapes it.
+          lifecycle {
+            prevent_destroy = true
+            ignore_changes  = all
+          }
+
+        """
+
     public func readiness(
         host: String?, execute: @escaping CommandExecutor
     ) async -> [PreflightCheck] {
@@ -87,17 +102,34 @@ public struct HostProvider: ServiceProvider {
         let identifier = DokkuProvider.identifier(service.name)
         var body = """
             # container '\(service.name)', authored by hatchery.
-            resource "docker_image" "\(identifier)" {
-              name = "\(container.image)"
 
-              # An adopted container's image is already on the box, and a scaffolded one needs a pull.
-              # keep_locally stops a destroy from deleting an image other containers share.
-              keep_locally = true
-            }
+            """
 
+        // Only a managed container gets an image resource.
+        // An unmanaged one names the image reference the box already runs.
+        // The declaration holds a literal string, so nothing about it is known after apply.
+        if container.managed {
+            body += """
+                resource "docker_image" "\(identifier)" {
+                  name = "\(Self.escaped(container.image))"
+
+                  # An adopted container's image is already on the box, and a scaffolded one needs a pull.
+                  # keep_locally stops a destroy from deleting an image other containers share.
+                  keep_locally = true
+                }
+
+
+                """
+        }
+
+        let image = container.managed
+            ? "docker_image.\(identifier).image_id"
+            : "\"\(Self.escaped(container.image))\""
+
+        body += """
             resource "docker_container" "\(identifier)" {
               name  = "\(service.name)"
-              image = docker_image.\(identifier).image_id
+              image = \(image)
 
               restart = "\(container.restart)"
 
@@ -125,6 +157,9 @@ public struct HostProvider: ServiceProvider {
         body += Self.volumeBlocks(container.mounts)
         body += Self.hostBlocks(container.extraHosts)
         body += Self.environmentBlock(for: service)
+        if !container.managed {
+            body += Self.lifecycle
+        }
 
         body += """
             }

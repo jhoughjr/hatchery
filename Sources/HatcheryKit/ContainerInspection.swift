@@ -43,16 +43,22 @@ public struct ContainerInspection: Sendable, Equatable {
 ///
 /// - `notAContainer`: the answer is not the array of one object `docker inspect <name>` returns.
 /// - `noSuchContainer`: the box answered, and it holds no container of that name.
+/// - `notAnImageEnvironment`: the answer is not the array of `KEY=value` strings the image env format returns.
 public enum ContainerInspectionError: Error, CustomStringConvertible, Equatable {
     case notAContainer(String)
     case noSuchContainer(String)
+    case notAnImageEnvironment(String)
 
     public var description: String {
         switch self {
         case .notAContainer(let detail):
             return "docker inspect did not answer with a container (\(detail))"
+
         case .noSuchContainer(let name):
             return "the box holds no container named '\(name)'"
+
+        case .notAnImageEnvironment(let detail):
+            return "docker image inspect did not answer with an environment (\(detail))"
         }
     }
 }
@@ -163,6 +169,37 @@ extension ContainerInspection {
             result[String(key)] = parts.count == 2 ? String(parts[1]) : ""
         }
         return result
+    }
+}
+
+// MARK: - What the image already sets
+
+extension ContainerInspection {
+    /// The image's own environment, from `docker image inspect <image> --format '{{json .Config.Env}}'`.
+    ///
+    /// That format answers with the bare array of `KEY=value` strings, and not the whole inspect document.
+    public static func imageEnvironment(_ json: Data) throws -> [String: String] {
+        guard let entries = try? JSONSerialization.jsonObject(with: json) as? [String] else {
+            throw ContainerInspectionError.notAnImageEnvironment("the answer is not a JSON array of strings")
+        }
+        return Self.environment(entries)
+    }
+
+    /// The part of a container's environment the run added, which is what the sidecar records.
+    ///
+    /// docker reports the image's environment and the run's as one list.
+    /// A sidecar built from that list records the image's build facts as declarations.
+    /// A key the image sets to the same value is the image speaking, and it is dropped.
+    /// A key a `-e` flag overrides carries a different value, so it stays.
+    /// A key a kind file's contract declares or marks secret stays whatever its value is, because the
+    /// contract asked for it. A key the contract only ignores belongs to the platform, so it still drops.
+    public func declaredEnvironment(
+        against imageEnvironment: [String: String], contract: EnvContract? = nil
+    ) -> [String: String] {
+        self.environment.filter { key, value in
+            if let contract, contract.isDeclared(key) || contract.secret.contains(key) { return true }
+            return imageEnvironment[key] != value
+        }
     }
 }
 

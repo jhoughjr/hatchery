@@ -220,14 +220,39 @@ public struct Adopter: Sendable {
         return try ContainerInspection.decode(Data(output.standardOutput.utf8))
     }
 
+    /// What the image itself sets, so adopt can tell the run's own environment from the image's.
+    ///
+    /// A container's inspect reports the image's environment and the run's as one list.
+    /// This second call is the only way to separate them.
+    /// Without it a sidecar records the image's build facts as declarations.
+    public func imageEnvironment(for image: String, on box: String) async throws -> [String: String] {
+        let output: CommandOutput
+        do {
+            output = try await self.execute(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box,
+                 "docker image inspect \(image) --format '{{json .Config.Env}}'"], nil)
+        } catch {
+            throw AdoptError.unreadable("docker image inspect \(image)")
+        }
+        guard output.status == 0 else {
+            throw AdoptError.unreadable("docker image inspect \(image)")
+        }
+        return try ContainerInspection.imageEnvironment(Data(output.standardOutput.utf8))
+    }
+
     /// The plan for a container: the service joins `stackName` on the host backend, with the box's own
     /// environment in place of minted values, and a declaration that imports what is already running.
     ///
     /// `kindFile`, when the registry holds one under the container's name, wins for `healthcheck`. Without
     /// one the service records no health path, and the container's own HEALTHCHECK is what status reads.
+    /// `imageEnvironment` is what `imageEnvironment(for:on:)` read, and the sidecar keeps only what the run adds to it.
+    /// `replacing` regenerates a service the named stack already declares.
+    /// Without `refreshConfig` the sidecar and the secrets file it already has are left alone.
     public func planContainer(
         _ facts: ContainerInspection, kind: ServiceKind, into stackName: String, box: String,
-        manifest: StackManifest, manifestPath: String, kindFile: KindFile? = nil
+        manifest: StackManifest, manifestPath: String, kindFile: KindFile? = nil,
+        imageEnvironment: [String: String] = [:], replacing: Bool = false,
+        refreshConfig: Bool = false
     ) async throws -> AdoptResult {
         guard let stack = manifest.stack(named: stackName) else {
             throw AdoptError.stackNotOnBox(stack: stackName, box: box)
@@ -241,7 +266,11 @@ public struct Adopter: Sendable {
         }
         for declared in manifest.stacks
         where declared.services.contains(where: { $0.name == facts.name }) {
-            throw AdoptError.alreadyDeclared(app: facts.name, stack: declared.name)
+            // A replace regenerates the service where it already stands.
+            // A service declared in another stack is still a refusal, because moving it is not what this door does.
+            guard replacing, declared.name == stackName else {
+                throw AdoptError.alreadyDeclared(app: facts.name, stack: declared.name)
+            }
         }
 
         let service = ServiceSpec(
@@ -251,14 +280,15 @@ public struct Adopter: Sendable {
             container: facts.spec)
         let scaffolded = try await Scaffolder().plan(
             service: service, into: stackName, manifest: manifest, containerID: facts.id,
-            manifestPath: manifestPath)
+            manifestPath: manifestPath, replacing: replacing)
 
         // The scaffolder minted nothing, because a container's kind carries no built-in contract. The box's
         // environment replaces the empty sidecar, split by whatever contract the kind does have.
         let contract = EnvContract.contract(
             for: kind, backend: .host, registry: KindRegistry(manifestPath: manifestPath))
-        let split = contract.map { ConfigSync.split(facts.environment, by: $0) }
-            ?? (config: facts.environment, secrets: [:])
+        let declared = facts.declaredEnvironment(against: imageEnvironment, contract: contract)
+        let split = contract.map { ConfigSync.split(declared, by: $0) }
+            ?? (config: declared, secrets: [:])
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -280,6 +310,12 @@ public struct Adopter: Sendable {
             let secretsJSON = String(decoding: try encoder.encode(split.secrets), as: UTF8.self)
             files.append(
                 GeneratedFile(path: secretsFile, contents: secretsJSON + "\n", role: .config))
+        }
+
+        // A replace rewrites the declaration and the manifest entry.
+        // The sidecar and the secrets file hold what the service is running with, so they stay as they are until --refresh-config asks for them.
+        if replacing, !refreshConfig {
+            files.removeAll { $0.role == .config }
         }
 
         return AdoptResult(
