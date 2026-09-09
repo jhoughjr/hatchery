@@ -18,6 +18,8 @@ public enum FindingCode {
     public static let secretNoRotation = "secret-no-rotation"
     /// How many of a service's secrets declare a rotation, and how many do not.
     public static let rotationCoverage = "rotation-coverage"
+    /// The box holds a different proxy map than the kind file declares, so the app answers somewhere else.
+    public static let portMapDrift = "port-map-drift"
 }
 
 /// Fills the declaration's findings by comparing what each service declares against what it runs with.
@@ -66,6 +68,7 @@ public struct DeclarationAudit: Sendable {
         // They are added before the job arm below, which returns.
         if let kind = try? registry.kindFile(for: service.kind) {
             findings += Self.rotationFindings(in: kind)
+            findings += await self.portMapFindings(for: service, in: stack, kind: kind)
         }
         // A job's findings are its own, plus its sidecar's. Its environment lives in no container, so the live read
         // below would ask the daemon about a name it has never heard of, once per job, and learn nothing.
@@ -126,6 +129,24 @@ public struct DeclarationAudit: Sendable {
             findings.append(stale)
         }
         return findings
+    }
+
+    /// Whether the box still holds the proxy map the kind file declares.
+    ///
+    /// A deploy from an image re-detects the map from the image's `EXPOSE` and overwrites it. The app stays healthy and stops answering at its own name, and dokku reports both maps without saying that one of them is wrong.
+    /// Only a service that declares a map is asked, so this costs one call for the services that made a claim and none for the rest.
+    func portMapFindings(
+        for service: ServiceSpec, in stack: StackSpec, kind: KindFile
+    ) async -> [Declaration.Finding] {
+        guard stack.backend == .dokku, let declared = kind.portMap, !declared.isEmpty else { return [] }
+        guard let live = try? await self.reader.portMap(for: service, in: stack) else { return [] }
+        guard Set(live) != Set(declared) else { return [] }
+        let held = live.isEmpty ? "nothing" : live.joined(separator: " ")
+        return [
+            Declaration.Finding(
+                code: FindingCode.portMapDrift,
+                text: "the box maps \(held) and the declaration says \(declared.joined(separator: " ")); a deploy re-detected the map from the image")
+        ]
     }
 
     /// What a service's own kind file says about replacing its secrets.
