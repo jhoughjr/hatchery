@@ -61,7 +61,7 @@ public struct DeclarationAudit: Sendable {
         // A job's findings are all the job has. Its environment lives in no container, so the live read below
         // would ask the daemon about a name it has never heard of, once per job, and learn nothing.
         if service.job != nil {
-            findings += Self.jobFindings(for: service)
+            findings += Self.jobFindings(for: service, platform: stack.platform)
             return findings
         }
 
@@ -125,7 +125,7 @@ public struct DeclarationAudit: Sendable {
     ///
     /// This reads no box. Both findings are true of the manifest alone, which is what lets a manifest write publish
     /// them and what makes them the two a person can fix without ssh.
-    static func jobFindings(for service: ServiceSpec) -> [Declaration.Finding] {
+    static func jobFindings(for service: ServiceSpec, platform: HostPlatform = .linux) -> [Declaration.Finding] {
         guard let job = service.job else { return [] }
         var findings: [Declaration.Finding] = []
 
@@ -137,7 +137,9 @@ public struct DeclarationAudit: Sendable {
                         + "on the machine; set environmentFromVault and read it from vault at start"))
         }
         let path = job.log ?? ""
-        if path.isEmpty || path.hasPrefix("/tmp/") {
+        // A log under /tmp is always a finding. An absent log (empty path) is a finding on darwin
+        // but not on linux, where the journal is the default.
+        if path.hasPrefix("/tmp/") || (path.isEmpty && platform == .darwin) {
             findings.append(
                 Declaration.Finding(
                     code: FindingCode.noLog,

@@ -209,8 +209,8 @@ extension HostProvider {
     /// The timer beside the unit.
     ///
     /// `Persistent=true` replays a window the box slept through, which is the case a scheduled job exists for.
-    /// An interval carries `OnBootSec` beside `OnUnitActiveSec`, because a timer with only the second anchors off its
-    /// own last run and a timer that has never run computes no next elapse.
+    /// An interval uses `OnCalendar=` with a calendar expression rather than `OnBootSec` and `OnUnitActiveSec`,
+    /// because a timer anchoring off boot and last activation computes no next elapse if it has never run.
     static func systemdTimer(name: String, schedule: Schedule) -> String {
         var body = """
             # Written by hatchery.
@@ -222,8 +222,7 @@ extension HostProvider {
             """
         switch schedule {
         case .interval(let seconds):
-            body += "OnBootSec=\(seconds)\n"
-            body += "OnUnitActiveSec=\(seconds)\n"
+            body += "OnCalendar=\(Self.onCalendarInterval(seconds))\n"
 
         case .calendar:
             body += "OnCalendar=\(Self.onCalendar(schedule))\n"
@@ -254,6 +253,29 @@ extension HostProvider {
         let hourField = hour.map { String(format: "%02d", $0) } ?? "*"
         let minuteField = minute.map { String(format: "%02d", $0) } ?? (hour == nil ? "*" : "00")
         return "\(prefix)*-*-\(monthDay) \(hourField):\(minuteField):00"
+    }
+
+    /// An interval schedule converted to systemd's OnCalendar format.
+    ///
+    /// For a whole number of minutes that divides 60 evenly, use `*:0/N` format.
+    /// For an hourly interval (3600 seconds), use `hourly`.
+    /// For a daily interval (86400 seconds), use `daily`.
+    /// For all others, use `*-*-* *:*:0/N` seconds format.
+    static func onCalendarInterval(_ seconds: Int) -> String {
+        // Special cases for common intervals
+        if seconds == 3600 { return "hourly" }
+        if seconds == 86400 { return "daily" }
+
+        // Check if it's a whole number of minutes that divides 60 evenly
+        if seconds % 60 == 0 {
+            let minutes = seconds / 60
+            if 60 % minutes == 0 {
+                return "*:0/\(minutes)"
+            }
+        }
+
+        // Fall back to seconds format
+        return "*-*-* *:*:0/\(seconds)"
     }
 
     // MARK: - escaping

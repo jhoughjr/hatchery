@@ -194,11 +194,13 @@ final class JobScaffoldTests: XCTestCase {
             "Mon *-*-* 09:30:00")
     }
 
-    /// An interval timer anchors off boot as well as its own last run, or a timer that has never run never elapses.
-    func testAnIntervalTimerCarriesBothAnchors() throws {
+    /// An interval timer uses OnCalendar with a calendar expression rather than OnBootSec+OnUnitActiveSec,
+    /// because a timer that has never run computes no next elapse and silently never runs.
+    func testAnIntervalTimerUsesOnCalendarExpression() throws {
         let files = try HostProvider.jobFiles(for: nodeReport(), platform: .linux)
-        XCTAssertTrue(files[1].contents.contains("OnBootSec=30"), files[1].contents)
-        XCTAssertTrue(files[1].contents.contains("OnUnitActiveSec=30"), files[1].contents)
+        XCTAssertTrue(files[1].contents.contains("OnCalendar=*-*-* *:*:0/30"), files[1].contents)
+        XCTAssertFalse(files[1].contents.contains("OnBootSec"), files[1].contents)
+        XCTAssertFalse(files[1].contents.contains("OnUnitActiveSec"), files[1].contents)
     }
 
     /// launchd's calendar is a dictionary of fields, so a systemd expression has nothing to become on a Mac.

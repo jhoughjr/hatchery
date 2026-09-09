@@ -82,7 +82,7 @@ final class JobDeclarationTests: XCTestCase {
     /// The laptop's hatchery-serve agent, recorded on 2026-09-09 with its token replaced.
     /// `ps` shows the whole command line to every account on the machine, so the plist is not the only copy.
     func testACredentialOnTheCommandLineRaisesSecretInPlist() {
-        let findings = DeclarationAudit.jobFindings(for: laptop().services[1])
+        let findings = DeclarationAudit.jobFindings(for: laptop().services[1], platform: .darwin)
         let secret = findings.first { $0.code == FindingCode.secretInPlist }
 
         XCTAssertNotNil(secret)
@@ -90,22 +90,32 @@ final class JobDeclarationTests: XCTestCase {
     }
 
     func testALogUnderTmpRaisesNoLog() {
-        let findings = DeclarationAudit.jobFindings(for: laptop().services[0])
+        let findings = DeclarationAudit.jobFindings(for: laptop().services[0], platform: .darwin)
 
         XCTAssertEqual(findings.map(\.code), [FindingCode.noLog])
         XCTAssertTrue(
             findings[0].text.contains("/tmp/roost-node-report.log"), findings[0].text)
     }
 
-    func testAJobThatNamesNoLogRaisesNoLogToo() {
+    func testAJobThatNamesNoLogRaisesNoLogOnDarwin() {
         let service = ServiceSpec(
             name: "phoenix-builds", kind: .job, image: "",
             configFile: "phoenix-builds.config.json",
             job: JobSpec(program: ["python3", "-m", "http.server", "8090"]))
-        let findings = DeclarationAudit.jobFindings(for: service)
+        let findings = DeclarationAudit.jobFindings(for: service, platform: .darwin)
 
         XCTAssertEqual(findings.map(\.code), [FindingCode.noLog])
         XCTAssertTrue(findings[0].text.contains("names no log"), findings[0].text)
+    }
+
+    func testAJobThatNamesNoLogDoesNotRaiseNoLogOnLinux() {
+        let service = ServiceSpec(
+            name: "phoenix-builds", kind: .job, image: "",
+            configFile: "phoenix-builds.config.json",
+            job: JobSpec(program: ["python3", "-m", "http.server", "8090"]))
+        let findings = DeclarationAudit.jobFindings(for: service, platform: .linux)
+
+        XCTAssertTrue(findings.isEmpty, "absent log on linux is the journal and is not a finding")
     }
 
     func testACleanJobRaisesNothing() {
@@ -117,7 +127,7 @@ final class JobDeclarationTests: XCTestCase {
                 schedule: .interval(seconds: 86400),
                 log: "/Users/jimmyhoughjr/Library/Logs/hatchery-declared.log"))
 
-        XCTAssertTrue(DeclarationAudit.jobFindings(for: service).isEmpty)
+        XCTAssertTrue(DeclarationAudit.jobFindings(for: service, platform: .darwin).isEmpty)
     }
 
     /// A flag at the end of the arguments carries no value, so it is a flag and not a credential.
@@ -133,7 +143,7 @@ final class JobDeclarationTests: XCTestCase {
     func testTheFindingsReachThePublishedDocument() {
         let manifest = StackManifest(stacks: [laptop()])
         let found = [
-            "laptop-jobs/hatchery-serve": DeclarationAudit.jobFindings(for: laptop().services[1])
+            "laptop-jobs/hatchery-serve": DeclarationAudit.jobFindings(for: laptop().services[1], platform: .darwin)
         ]
         let document = Declaration(
             manifests: [(manifest: manifest, path: "/tmp/hatchery.json")], findings: found)
