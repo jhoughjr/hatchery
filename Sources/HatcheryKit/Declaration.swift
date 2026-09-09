@@ -79,7 +79,15 @@ public struct Declaration: Codable, Sendable, Equatable {
         self.at = Int(now.timeIntervalSince1970 * 1000)
         self.manifests = manifests.map(\.path)
         self.stacks = manifests.flatMap { loaded in
-            loaded.manifest.stacks.map { stack in
+            // The kind registry beside the manifest answers for a service that names no path of its own.
+            // The estate's apps were adopted before the registry existed, so their manifests hold no `healthPath`, and the kind file is the only place that path is written.
+            // The built-in `/health` guess stays out of the document, because a reader cannot tell a guess from a declaration once it is published.
+            let declaredHealth = Dictionary(
+                ((try? KindRegistry(manifestPath: loaded.path).all()) ?? []).compactMap { file in
+                    file.healthcheck.map { (file.kind, $0) }
+                },
+                uniquingKeysWith: { first, _ in first })
+            return loaded.manifest.stacks.map { stack in
                 Stack(
                     name: stack.name,
                     backend: stack.backend.rawValue,
@@ -95,7 +103,7 @@ public struct Declaration: Codable, Sendable, Equatable {
                             kind: service.kind.rawValue,
                             image: service.image,
                             domains: service.domains,
-                            healthPath: service.healthPath,
+                            healthPath: service.healthPath ?? declaredHealth[service.kind.rawValue],
                             restart: service.container?.restart,
                             databases: service.databases.map { $0.map(Database.init) },
                             schedule: service.job?.schedule.map(Declaration.words(for:)),
