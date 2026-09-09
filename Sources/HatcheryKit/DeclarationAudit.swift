@@ -67,10 +67,16 @@ public struct DeclarationAudit: Sendable {
         if let kind = try? registry.kindFile(for: service.kind) {
             findings += Self.rotationFindings(in: kind)
         }
-        // A job's findings are all the job has. Its environment lives in no container, so the live read below
-        // would ask the daemon about a name it has never heard of, once per job, and learn nothing.
+        // A job's findings are its own, plus its sidecar's. Its environment lives in no container, so the live read
+        // below would ask the daemon about a name it has never heard of, once per job, and learn nothing.
         if service.job != nil {
             findings += Self.jobFindings(for: service, platform: stack.platform)
+            let jobSidecarURL = ConfigSync.configURL(for: service, in: stack, manifestPath: manifestPath)
+            if let jobSidecar = try? ConfigSync.readDeclared(at: jobSidecarURL) {
+                let contract = EnvContract.contract(
+                    for: service.kind, backend: stack.backend, registry: registry)
+                findings += Self.secretInSidecar(jobSidecar, under: contract)
+            }
             return findings
         }
 
@@ -183,6 +189,30 @@ public struct DeclarationAudit: Sendable {
                         : "the job logs to \(path), which is cleared on reboot"))
         }
         return findings
+    }
+
+    /// The keys in a job's sidecar that hold a credential, one finding each.
+    ///
+    /// This follows the rule the adopt split follows. A contract that knows the key answers for it in both
+    /// directions, and every other key falls to the name rule, so a credential nobody declared is still reported.
+    /// A job usually declares no kind file, and then the name rule is the whole answer.
+    /// Only key names appear in the text, the same rule the other findings keep.
+    static func secretInSidecar(
+        _ sidecar: [String: String], under contract: EnvContract?
+    ) -> [Declaration.Finding] {
+        sidecar.keys
+            .filter { key in
+                guard let contract, contract.recognizes(key) else {
+                    return EnvContract.isSecretEnvironmentName(key)
+                }
+                return contract.secret.contains(key)
+            }
+            .sorted()
+            .map {
+                Declaration.Finding(
+                    code: FindingCode.secretInSidecar,
+                    text: "\($0) is a secret still in the sidecar; hatchery config split moves it out")
+            }
     }
 
     /// The first credential flag that carries a non-redacted value, or `nil` when the command line names none.

@@ -44,6 +44,47 @@ private struct AuditWorld {
     }
 }
 
+/// A manifest directory holding one job, because a job's sidecar is audited on an arm of its own.
+private struct JobAuditWorld {
+    let directory: URL
+    let manifestPath: String
+    let manifest: StackManifest
+
+    init() throws {
+        self.directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hatchery-job-findings-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: self.directory, withIntermediateDirectories: true)
+        self.manifestPath = self.directory.appendingPathComponent("hatchery.json").path
+
+        let job = ServiceSpec(
+            name: "roost-node-report", kind: .job, image: "",
+            configFile: "roost-node-report.config.json",
+            job: JobSpec(
+                program: ["/Users/jimmyhoughjr/repos/roost/bin/node-report.sh"],
+                schedule: .interval(seconds: 30),
+                log: "/Users/jimmyhoughjr/Library/Logs/roost-node-report.log"))
+        let jobs = StackSpec(
+            name: "laptop-jobs", backend: .host, environment: .prod, host: "jimmy@127.0.0.1",
+            tofu: TofuBinding(directory: self.directory.path), services: [job])
+        self.manifest = StackManifest(version: 1, stacks: [jobs])
+    }
+
+    func write(_ name: String, _ values: [String: String]) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(values).write(to: self.directory.appendingPathComponent(name))
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: self.directory)
+    }
+}
+
+/// The audit reads no box for a job, and this reader is here only to keep the live path off this machine.
+private func jobAudit() -> DeclarationAudit {
+    DeclarationAudit(reader: LiveConfigReader(run: { _ in Data("{}".utf8) }))
+}
+
 @Suite("What the declaration says about the saying of it")
 struct DeclarationFindingsTests {
     @Test("a container service carries the host backend, its image and its restart policy")
@@ -191,6 +232,35 @@ struct DeclarationFindingsTests {
         #expect(finding.count == 1)
         #expect(finding[0].code == FindingCode.staleSidecar)
         #expect(finding[0].text.contains("the box also runs with UNDECLARED"))
+    }
+
+    @Test("a job holding a credential in its sidecar is reported the way an app's sidecar is")
+    func aJobSidecarSecretIsAFinding() async throws {
+        let world = try JobAuditWorld()
+        defer { world.remove() }
+        try world.write(
+            "roost-node-report.config.json",
+            ["API_KEY": "the-api-key-value", "PULSE_URL": "https://pulse.lab"])
+
+        let findings = await jobAudit().findings(for: [(world.manifest, world.manifestPath)])
+
+        let job = try #require(findings["laptop-jobs/roost-node-report"])
+        #expect(job.map(\.code) == [FindingCode.secretInSidecar])
+        #expect(job[0].text.hasPrefix("API_KEY is a secret still in the sidecar"))
+        // A value is never named, because the sidecar is gitignored for the values it holds.
+        #expect(!job[0].text.contains("the-api-key-value"))
+    }
+
+    @Test("a job whose credential moved to the secrets file reports clean")
+    func aJobSplitSecretIsClean() async throws {
+        let world = try JobAuditWorld()
+        defer { world.remove() }
+        try world.write("roost-node-report.config.json", ["PULSE_URL": "https://pulse.lab"])
+        try world.write("roost-node-report.secrets.json", ["API_KEY": "the-api-key-value"])
+
+        let findings = await jobAudit().findings(for: [(world.manifest, world.manifestPath)])
+
+        #expect(findings["laptop-jobs/roost-node-report"] == nil)
     }
 
     @Test("a manifest write publishes a document with no findings, because a write never reads a box")

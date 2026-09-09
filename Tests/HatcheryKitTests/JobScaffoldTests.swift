@@ -127,8 +127,9 @@ final class JobScaffoldTests: XCTestCase {
         XCTAssertFalse(agent[0].contents.contains("StartInterval"), agent[0].contents)
     }
 
-    /// The ruling of 2026-09-09: a job's secrets come from vault at boot, never from a plist value or a unit line.
-    func testASecretKeyReachesNeitherThePlistNorTheUnit() throws {
+    /// The ruling of 2026-09-09: a job's secret value comes from vault at boot, never from a plist value or a unit line.
+    /// The key name stays, as the reference `${NAME}`, so a reader of the repository sees which key the secrets file answers for.
+    func testASecretValueBecomesAReferenceInThePlistAndTheUnit() throws {
         var serve = ServiceSpec(
             name: "hatchery-serve", kind: .job, image: "",
             configFile: "hatchery-serve.config.json",
@@ -142,15 +143,38 @@ final class JobScaffoldTests: XCTestCase {
             for: serve, platform: .darwin, environment: environment,
             secretKeys: ["HATCHERY_TOKEN"])
         XCTAssertTrue(agent[0].contents.contains("<key>HATCHERY_BIND</key>"), agent[0].contents)
-        XCTAssertFalse(agent[0].contents.contains("HATCHERY_TOKEN"), agent[0].contents)
+        XCTAssertTrue(agent[0].contents.contains("<string>${HATCHERY_TOKEN}</string>"), agent[0].contents)
         XCTAssertFalse(agent[0].contents.contains("the-bearer-token"), agent[0].contents)
 
         let unit = try HostProvider.jobFiles(
             for: serve, platform: .linux, environment: environment,
             secretKeys: ["HATCHERY_TOKEN"])
         XCTAssertTrue(unit[0].contents.contains("Environment=HATCHERY_BIND=0.0.0.0"), unit[0].contents)
-        XCTAssertFalse(unit[0].contents.contains("HATCHERY_TOKEN"), unit[0].contents)
+        XCTAssertTrue(
+            unit[0].contents.contains("Environment=HATCHERY_TOKEN=${HATCHERY_TOKEN}"), unit[0].contents)
         XCTAssertFalse(unit[0].contents.contains("the-bearer-token"), unit[0].contents)
+    }
+
+    /// The installed plist is scaffolded from the sidecar and the secrets file merged, and names no secret key,
+    /// so launchd hands the job the real values while the copy the stack keeps carries the references above.
+    func testTheInstalledPlistCarriesTheMergedValues() throws {
+        var serve = ServiceSpec(
+            name: "hatchery-serve", kind: .job, image: "",
+            configFile: "hatchery-serve.config.json",
+            job: JobSpec(
+                program: ["/usr/local/bin/hatchery", "serve"],
+                environmentFromVault: true))
+        serve.job?.log = "/var/log/hatchery-serve.log"
+        let sidecar = ["HATCHERY_BIND": "0.0.0.0"]
+        let secrets = ["HATCHERY_TOKEN": "the-bearer-token"]
+        let merged = sidecar.merging(secrets) { _, new in new }
+
+        let agent = try HostProvider.jobFiles(
+            for: serve, platform: .darwin, environment: merged)
+        XCTAssertTrue(agent[0].contents.contains("<key>HATCHERY_BIND</key>"), agent[0].contents)
+        XCTAssertTrue(agent[0].contents.contains("<key>HATCHERY_TOKEN</key>"), agent[0].contents)
+        XCTAssertTrue(agent[0].contents.contains("<string>the-bearer-token</string>"), agent[0].contents)
+        XCTAssertFalse(agent[0].contents.contains("${HATCHERY_TOKEN}"), agent[0].contents)
     }
 
     func testACalendarScheduleBecomesBothSupervisorsCalendars() throws {

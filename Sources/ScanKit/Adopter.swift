@@ -434,8 +434,10 @@ public struct Adopter: Sendable {
     ///
     /// No tofu file is written and no import is needed. A job's declaration is the manifest, and the artifact is what
     /// the box follows, so `importCommand` is empty and the caller prints nothing after the write.
-    /// The supervisor's own environment lands in the sidecar, split by whatever contract the kind has, and a
-    /// secret-marked key reaches neither the plist nor the unit.
+    /// The supervisor's own environment lands in the sidecar, split by whatever contract the kind has. A key the
+    /// contract does not speak for is split by ``isSecretEnvironmentName(_:)`` instead, so a credential nobody
+    /// declared still reaches the secrets file. The plist and the unit carry `${NAME}` for every secret key, and
+    /// the value reaches neither of them.
     public func planJob(
         _ read: ReadJob, kind: ServiceKind, into stackName: String, box: String,
         manifest: StackManifest, manifestPath: String, replacing: Bool = false
@@ -480,7 +482,14 @@ public struct Adopter: Sendable {
             for: kind, backend: .host, registry: KindRegistry(manifestPath: manifestPath))
         let split = contract.map { ConfigSync.split(read.environment, by: $0) }
             ?? (config: read.environment, secrets: [:])
+        var config = split.config
         var jobSecrets = split.secrets
+        // The contract wins in both directions for a key it knows, and the name rule answers for every other key.
+        for (key, value) in config {
+            guard contract?.recognizes(key) != true, Self.isSecretEnvironmentName(key) else { continue }
+            jobSecrets[key] = value
+            config[key] = nil
+        }
         jobSecrets.merge(programSecrets) { _, new in new }
 
         var files = try HostProvider.jobFiles(
@@ -492,7 +501,7 @@ public struct Adopter: Sendable {
         files.append(
             GeneratedFile(
                 path: service.configFile,
-                contents: String(decoding: try encoder.encode(split.config), as: UTF8.self) + "\n",
+                contents: String(decoding: try encoder.encode(config), as: UTF8.self) + "\n",
                 role: .config))
         if !jobSecrets.isEmpty {
             files.append(
@@ -592,6 +601,14 @@ public struct Adopter: Sendable {
             name = String(name.dropFirst(2))
         }
         return name.uppercased().replacingOccurrences(of: "-", with: "_")
+    }
+
+    /// Whether an environment name says its value is a credential.
+    ///
+    /// The rule is declared once, on ``EnvContract/isSecretEnvironmentName(_:)``, because the audit reads it too and
+    /// HatcheryKit is the module the adopter and the audit both reach. This is the adopter's door onto it.
+    public static func isSecretEnvironmentName(_ name: String) -> Bool {
+        EnvContract.isSecretEnvironmentName(name)
     }
 
     static func image(fromInspect json: String, app: String) -> String {

@@ -38,9 +38,11 @@ extension HostProvider {
     /// The supervisor's artifact for one job: a launchd agent on a Mac, a systemd user unit and its timer on Linux.
     ///
     /// Tofu writes none of this. The plist or the unit is the declaration's artifact, and the manifest is the declaration.
-    /// A key named in `secretKeys` reaches neither file, because a plist value is readable by every account on the
-    /// machine and a unit's `Environment=` line is readable by everything that can read the unit. A job collects its
-    /// secrets from vault at start instead.
+    /// A key named in `secretKeys` carries the reference `${NAME}` in place of its value, because a plist value is
+    /// readable by every account on the machine and a unit's `Environment=` line is readable by everything that can
+    /// read the unit. The value stays in the secrets file beside the declaration, and the caller that installs the
+    /// artifact on the box passes the merged map with no `secretKeys` so the installed copy carries the real values.
+    /// The reference is what the reader of the repository sees, and it names the key the secrets file answers for.
     public static func jobFiles(
         for service: ServiceSpec,
         platform: HostPlatform,
@@ -50,7 +52,9 @@ extension HostProvider {
         guard let job = service.job else {
             throw ProviderError.missingDetail("a job spec on service '\(service.name)'")
         }
-        let declared = environment.filter { !secretKeys.contains($0.key) }.sorted { $0.key < $1.key }
+        let declared = environment
+            .map { (key: $0.key, value: secretKeys.contains($0.key) ? "${\($0.key)}" : $0.value) }
+            .sorted { $0.key < $1.key }
         // The artifact is committed beside the stack under its bare name, and the installer is what knows where on
         // the box it goes. A path relative to the box's home would make no sense in the repository.
         let names = Self.jobDestinations(for: service, platform: platform)
