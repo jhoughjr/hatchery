@@ -73,9 +73,31 @@ public struct DeclarationAudit: Sendable {
         // The declaration is both files, because a key moved to the secrets file is declared, not missing.
         let secretsURL = ConfigSync.secretsURL(for: service, in: stack, manifestPath: manifestPath)
         let declared = (try? ConfigSync.readDeclared(config: sidecarURL, secrets: secretsURL)) ?? sidecar
-        if let live = try? await self.reader.config(for: service, in: stack),
-            let stale = Self.staleSidecar(live: live, declared: declared)
-        {
+
+        // For host backend services, the live config includes the image's own environment, so we need
+        // to strip it before comparing with the declared config. Dokku services don't need this because
+        // dokku's config:export already returns only the runtime-set values.
+        var live: [String: String]?
+        if stack.backend == .host {
+            // Fetch the full container environment and the image environment
+            if let liveData = try? await self.reader.config(for: service, in: stack),
+               let imageEnv = try? await self.reader.imageEnvironment(
+                   for: service.image, on: stack.host ?? "") {
+                // Use the contract if available to understand which keys are declared
+                let contract = EnvContract.contract(
+                    for: service.kind, backend: stack.backend, registry: registry)
+                // The image inspection already carries the full environment, so we can use
+                // a dummy ContainerInspection to apply the declaredEnvironment logic
+                let dummy = ContainerInspection(
+                    id: "", name: service.name, image: service.image, state: "running", running: true,
+                    environment: liveData, spec: ContainerSpec(image: service.image))
+                live = dummy.declaredEnvironment(against: imageEnv, contract: contract)
+            }
+        } else {
+            live = try? await self.reader.config(for: service, in: stack)
+        }
+
+        if let live, let stale = Self.staleSidecar(live: live, declared: declared) {
             findings.append(stale)
         }
         return findings

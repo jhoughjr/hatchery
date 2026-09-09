@@ -130,6 +130,69 @@ struct DeclarationFindingsTests {
         #expect(findings["lab/paylab"] == nil)
     }
 
+    @Test("a host service whose container env is exactly the image's env plus the sidecar's keys is not stale")
+    func hostServiceWithImageEnvNotStale() async throws {
+        let world = try AuditWorld()
+        defer { world.remove() }
+
+        // The sidecar declares only what the run adds, not what the image sets
+        try world.write("lan-dns.config.json", ["CUSTOM_VAR": "custom"])
+
+        let audit = DeclarationAudit(
+            reader: LiveConfigReader(run: { argv in
+                let command = argv.last ?? ""
+                if command.hasPrefix("docker inspect") {
+                    // The container environment includes both image env and runtime env
+                    return Data("""
+                        [{"Id": "a", "Name": "/lan-dns", "Config": {"Image": "4km3/dnsmasq:latest",
+                          "Env": ["PATH=/usr/bin", "CUSTOM_VAR=custom"]}, "State": {"Status": "running", "Running": true},
+                          "HostConfig": {"NetworkMode": "host", "RestartPolicy": {"Name": "unless-stopped"}}}]
+                        """.utf8)
+                }
+                // The image inspect returns only the image's own environment
+                return Data("""
+                    ["PATH=/usr/bin"]
+                    """.utf8)
+            }))
+        let findings = await audit.findings(for: [(world.manifest, world.manifestPath)])
+
+        // No stale-sidecar finding because the container env is image env + declared env
+        #expect(findings["box/lan-dns"] == nil)
+    }
+
+    @Test("a host service carrying a key the sidecar lacks is stale")
+    func hostServiceWithExtraEnvIsStale() async throws {
+        let world = try AuditWorld()
+        defer { world.remove() }
+
+        // The sidecar declares only what the run adds
+        try world.write("lan-dns.config.json", ["CUSTOM_VAR": "custom"])
+
+        let audit = DeclarationAudit(
+            reader: LiveConfigReader(run: { argv in
+                let command = argv.last ?? ""
+                if command.hasPrefix("docker inspect") {
+                    // The container environment includes an extra variable not in the sidecar
+                    return Data("""
+                        [{"Id": "a", "Name": "/lan-dns", "Config": {"Image": "4km3/dnsmasq:latest",
+                          "Env": ["PATH=/usr/bin", "CUSTOM_VAR=custom", "UNDECLARED=value"]}, "State": {"Status": "running", "Running": true},
+                          "HostConfig": {"NetworkMode": "host", "RestartPolicy": {"Name": "unless-stopped"}}}]
+                        """.utf8)
+                }
+                // The image inspect returns only the image's own environment
+                return Data("""
+                    ["PATH=/usr/bin"]
+                    """.utf8)
+            }))
+        let findings = await audit.findings(for: [(world.manifest, world.manifestPath)])
+
+        // A stale-sidecar finding because the container carries UNDECLARED
+        let finding = try #require(findings["box/lan-dns"])
+        #expect(finding.count == 1)
+        #expect(finding[0].code == FindingCode.staleSidecar)
+        #expect(finding[0].text.contains("the box also runs with UNDECLARED"))
+    }
+
     @Test("a manifest write publishes a document with no findings, because a write never reads a box")
     func aWriteNeverAudits() throws {
         let world = try AuditWorld()

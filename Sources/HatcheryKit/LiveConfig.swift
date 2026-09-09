@@ -181,9 +181,25 @@ public struct LiveConfigReader: Sendable {
         }
     }
 
+    /// The image's own environment for a container, from `docker image inspect <image>`.
+    ///
+    /// Only host backend services carry an image environment that needs to be factored out.
+    /// This fetches the image's declared environment over ssh, the same way adopt does,
+    /// so the audit can strip it before comparing with the declared sidecar.
+    public func imageEnvironment(for image: String, on host: String) async throws -> [String: String] {
+        let data = try await run(Self.imageInspectCommand(host: host, image: image))
+        return try ContainerInspection.imageEnvironment(data)
+    }
+
     /// One `docker inspect` over ssh. The command is one string, because the remote shell parses it.
     static func inspectCommand(host: String, container: String) -> [String] {
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "docker inspect \(container)"]
+    }
+
+    /// One `docker image inspect` over ssh for the image's own environment.
+    static func imageInspectCommand(host: String, image: String) -> [String] {
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
+         "docker image inspect \(image) --format '{{json .Config.Env}}'"]
     }
 
     static func dokkuCommand(host: String, app: String) -> [String] {
