@@ -1028,6 +1028,12 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .long, help: "POST worsening transitions to this URL as JSON.")
     var alertWebhook: String?
 
+    @Option(name: .long, help: "POST health transitions to this pulse URL.")
+    var pulse: String?
+
+    @Option(name: .long, help: "Path to the pulse node key file. Defaults to ~/.roost_node_key.")
+    var pulseKeyFile: String?
+
     @Flag(name: .long, help: "Install serve as a launchd agent with these options, so it runs at login and is kept alive, then exit.")
     var install: Bool = false
 
@@ -1085,6 +1091,23 @@ struct Serve: AsyncParsableCommand {
             alert = AlertWebhook.sink(url: url)
         }
 
+        var pulseEventSink: HealthWatcher.AlertSink?
+        if let pulseURL = pulse {
+            guard let url = URL(string: pulseURL), url.scheme == "http" || url.scheme == "https" else {
+                throw ValidationError("--pulse must be an http(s) URL")
+            }
+            let keyFilePath = pulseKeyFile ?? "~/.roost_node_key"
+            let expandedPath = NSString(string: keyFilePath).expandingTildeInPath
+            guard let keyData = try? Data(contentsOf: URL(fileURLWithPath: expandedPath)) else {
+                throw ValidationError("--pulse-key-file not found at \(expandedPath)")
+            }
+            let key = String(data: keyData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !key.isEmpty else {
+                throw ValidationError("--pulse-key-file is empty")
+            }
+            pulseEventSink = PulseEventSink.sink(url: url, key: key)
+        }
+
         var resolvedToken = token
         if resolvedToken == nil {
             let env = ProcessInfo.processInfo.environment
@@ -1116,10 +1139,27 @@ struct Serve: AsyncParsableCommand {
         let server = try WebServer(api: api, host: bind, port: port, hasToken: resolvedToken != nil)
 
         if watchInterval > 0 {
+            // Combine alert and pulse sinks
+            let combinedAlert: HealthWatcher.AlertSink?
+            if alert != nil || pulseEventSink != nil {
+                let alertSink = alert
+                let pulseSink = pulseEventSink
+                combinedAlert = { transitions in
+                    if let sink = alertSink {
+                        await sink(transitions)
+                    }
+                    if let sink = pulseSink {
+                        await sink(transitions)
+                    }
+                }
+            } else {
+                combinedAlert = nil
+            }
+
             let watcher = HealthWatcher(
                 probe: { await reporter.status(of: (try? load()) ?? StackManifest()) },
                 log: transitionLog,
-                alert: alert)
+                alert: combinedAlert)
             let interval = watchInterval
             Task {
                 // The server process narrates its own record: each transition is one line on
