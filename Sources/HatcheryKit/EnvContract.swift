@@ -59,6 +59,32 @@ public struct EnvContract: Sendable, Equatable {
         isDeclared(key) || isIgnored(key) || secret.contains(key)
     }
 
+    /// The words that make an environment name a credential.
+    ///
+    /// These are the words the credential flags carry, read as names rather than as flags.
+    static let secretEnvironmentWords = [
+        "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "API_KEY", "APIKEY", "AUTH",
+    ]
+
+    /// Whether an environment name says its value is a credential.
+    ///
+    /// The name is read in its `_`-separated parts, and one of the words above must be the whole name, its first parts, or its last parts.
+    /// `VAULT_APP_KEY` and `AUTH_HEADER` are credentials, and `VAULT_APP` is not.
+    /// A name ending `_FILE` is never a credential, because it holds a path and the file at that path holds the value.
+    /// This is the fallback for a name no contract speaks for, and a contract's own word wins over it in both directions.
+    public static func isSecretEnvironmentName(_ name: String) -> Bool {
+        let upper = name.uppercased()
+        guard !upper.hasSuffix("_FILE") else { return false }
+        let parts = upper.split(separator: "_").map(String.init)
+        for word in Self.secretEnvironmentWords {
+            let wordParts = word.split(separator: "_").map(String.init)
+            guard parts.count >= wordParts.count else { continue }
+            if Array(parts.prefix(wordParts.count)) == wordParts { return true }
+            if Array(parts.suffix(wordParts.count)) == wordParts { return true }
+        }
+        return false
+    }
+
     /// The keys in `updates` this contract does not know, ignoring removals: deleting a typo
     /// must not require spelling it correctly a second time.
     public func unknownKeys(in updates: [String: String]) -> [String] {
