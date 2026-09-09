@@ -8,6 +8,11 @@ public struct KindFile: Codable, Sendable, Equatable {
     public var summary: String?
     public var image: String?
     public var port: Int?
+    /// The proxy map dokku must hold for this service, in dokku's own `scheme:host:container` words.
+    ///
+    /// `port` is the port inside the container. This is the whole map, and the two are different facts: a deploy from an image re-detects the map from the image's `EXPOSE` and overwrites it, which leaves the app healthy and unreachable at its own name.
+    /// Declaring it here is what lets the audit say the box has moved off the map. Absent means the service makes no claim, and nothing is compared.
+    public var portMap: [String]?
     public var healthcheck: String?
     public var notes: [String]?
     public var storage: [Mount]?
@@ -63,6 +68,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         summary: String? = nil,
         image: String? = nil,
         port: Int? = nil,
+        portMap: [String]? = nil,
         healthcheck: String? = nil,
         notes: [String]? = nil,
         storage: [Mount]? = nil,
@@ -75,6 +81,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         self.summary = summary
         self.image = image
         self.port = port
+        self.portMap = portMap
         self.healthcheck = healthcheck
         self.notes = notes
         self.storage = storage
@@ -86,7 +93,7 @@ public struct KindFile: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case kind, summary, image, port, healthcheck, notes, storage, environment, runner, bootstrap
-        case capabilities
+        case capabilities, portMap
     }
 
     /// `notes` decodes a single string or a list, so a one-line declaration needs no array wrapper.
@@ -96,6 +103,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         self.summary = try container.decodeIfPresent(String.self, forKey: .summary)
         self.image = try container.decodeIfPresent(String.self, forKey: .image)
         self.port = try container.decodeIfPresent(Int.self, forKey: .port)
+        self.portMap = try container.decodeIfPresent([String].self, forKey: .portMap)
         self.healthcheck = try container.decodeIfPresent(String.self, forKey: .healthcheck)
         self.storage = try container.decodeIfPresent([Mount].self, forKey: .storage)
         self.environment =
@@ -117,6 +125,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         try container.encodeIfPresent(summary, forKey: .summary)
         try container.encodeIfPresent(image, forKey: .image)
         try container.encodeIfPresent(port, forKey: .port)
+        try container.encodeIfPresent(portMap, forKey: .portMap)
         try container.encodeIfPresent(healthcheck, forKey: .healthcheck)
         try container.encodeIfPresent(notes, forKey: .notes)
         try container.encodeIfPresent(storage, forKey: .storage)

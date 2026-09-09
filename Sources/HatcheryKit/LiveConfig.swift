@@ -181,6 +181,22 @@ public struct LiveConfigReader: Sendable {
         }
     }
 
+    /// The proxy map dokku holds for a dokku app, one entry per line of `ports:report --ports-map`.
+    ///
+    /// Only the dokku backend answers this. Every other backend owns its own routing, so there is no map to read.
+    public func portMap(for service: ServiceSpec, in stack: StackSpec) async throws -> [String] {
+        guard stack.backend == .dokku else { throw LiveConfigError.unsupportedBackend(stack.backend) }
+        guard let host = stack.host, !host.isEmpty else {
+            throw LiveConfigError.noHost(stack: stack.name)
+        }
+        let data = try await run(
+            Self.portMapCommand(host: DokkuProvider.sshTarget(host), app: service.name))
+        // dokku answers one map per line, and separates several on one line with a space.
+        return String(decoding: data, as: UTF8.self)
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+    }
+
     /// The image's own environment for a container, from `docker image inspect <image>`.
     ///
     /// Only host backend services carry an image environment that needs to be factored out.
@@ -200,6 +216,10 @@ public struct LiveConfigReader: Sendable {
     static func imageInspectCommand(host: String, image: String) -> [String] {
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
          "docker image inspect \(image) --format '{{json .Config.Env}}'"]
+    }
+
+    static func portMapCommand(host: String, app: String) -> [String] {
+        ["ssh", "-o", "BatchMode=yes", host, "ports:report", app, "--ports-map"]
     }
 
     static func dokkuCommand(host: String, app: String) -> [String] {
