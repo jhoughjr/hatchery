@@ -1,0 +1,23 @@
+{
+  "kind": "hatchery-serve",
+  "summary": "The hatchery status face, run as a job under the box's supervisor.",
+  "notes": [
+    "Serve reads its token from vault at boot, so vault is both the issuer and one of the holders. The two roost hosts and the coop bear the same value, and a new value invalidates all of them at once."
+  ],
+  "environment": {
+    "HATCHERY_SERVE_TOKEN": {
+      "required": true,
+      "secret": true,
+      "why": "The door on the status face. Four holders bear it, so the step names them all before it turns the value over.",
+      "rotation": {
+        "issuer": { "type": "vaultSecret", "app": "hatchery", "name": "HATCHERY_SERVE_TOKEN" },
+        "holders": [
+          { "type": "vaultSecret", "app": "hatchery", "name": "HATCHERY_SERVE_TOKEN" },
+          { "type": "roostrc", "host": "mini", "key": "ROOST_HATCHERY_TOKEN" },
+          { "type": "roostrc", "host": "air", "key": "ROOST_HATCHERY_TOKEN" },
+          { "type": "dokkuConfig", "app": "coop", "key": "HATCHERY_TOKEN", "restart": "rolling" }
+        ]
+      }
+    }
+  }
+}

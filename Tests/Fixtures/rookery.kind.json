@@ -1,0 +1,48 @@
+{
+  "kind": "rookery",
+  "summary": "A control plane for a company of Claude sessions: seats, gates, and a board.",
+  "image": "rookery",
+  "port": 5000,
+  "healthcheck": "/healthz",
+  "notes": [
+    "Three of the estate's six exposed secrets are rookery's, so this file is the first real rotation declaration."
+  ],
+  "environment": {
+    "ROOKERY_HOST": { "default": "127.0.0.1", "deployed": "0.0.0.0" },
+    "ROOKERY_PORT": { "default": "8422", "deployed": "5000" },
+    "VAULT_APP_KEY": {
+      "required": true,
+      "secret": true,
+      "why": "The app key rookery reads at boot to fetch its own secrets from vault.",
+      "rotation": {
+        "issuer": { "type": "vaultAppKey" },
+        "holders": [
+          { "type": "dokkuConfig", "app": "rookery", "key": "VAULT_APP_KEY", "restart": "rolling" }
+        ]
+      }
+    },
+    "ROOKERY_TOKEN": {
+      "required": true,
+      "secret": true,
+      "why": "The machine door. The coop bears the same token, so a new value invalidates the coop at the same moment.",
+      "rotation": {
+        "issuer": { "type": "random", "bytes": 32 },
+        "holders": [
+          { "type": "dokkuConfig", "app": "rookery", "key": "ROOKERY_TOKEN", "restart": "rolling" },
+          { "type": "dokkuConfig", "app": "coop", "key": "ROOKERY_TOKEN", "restart": "rolling" }
+        ]
+      }
+    },
+    "DATABASE_URL": {
+      "required": true,
+      "secret": true,
+      "why": "The owner role's connection string. The password inside it is the role's, so the role is the issuer.",
+      "rotation": {
+        "issuer": { "type": "postgresRole", "server": "rookery-pg", "role": "rookery" },
+        "holders": [
+          { "type": "dokkuConfig", "app": "rookery", "key": "DATABASE_URL", "restart": "rolling" }
+        ]
+      }
+    }
+  }
+}
