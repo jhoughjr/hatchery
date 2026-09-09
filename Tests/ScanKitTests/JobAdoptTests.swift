@@ -15,14 +15,21 @@ private final class LockedBox<T>: @unchecked Sendable {
     }
 }
 
-/// The supervisor files recorded on 2026-09-09, read only: two launchd agents off this Mac and the
+/// The supervisor files recorded on 2026-09-09, read only: three launchd agents off this Mac and the
 /// dokku-reconcile unit and timer off the opi.
+/// The serve agent is recorded twice, once as it ran with the token on its command line and once as it ran after
+/// the vault move, with the app key in its environment. Every recorded credential value is replaced.
 private func recordedJob(_ name: String) throws -> String {
     let fixtures = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
         .deletingLastPathComponent()
         .appendingPathComponent("Fixtures")
     return try String(contentsOf: fixtures.appendingPathComponent(name), encoding: .utf8)
+}
+
+/// A generated sidecar or secrets file, read back as the map it holds.
+private func decodedMap(_ contents: String) throws -> [String: String] {
+    try JSONDecoder().decode([String: String].self, from: Data(contents.utf8))
 }
 
 private func hostStack() -> StackSpec {
@@ -166,6 +173,72 @@ struct JobAdoptTests {
                 "dokku-reconcile.service", "dokku-reconcile.timer", "dokku-reconcile.config.json",
             ])
         #expect(try StackManifest.decode(from: result.manifest.encoded()) == result.manifest)
+    }
+
+    @Test("a secret in an agent's environment goes to the secrets file, and the plist copy names it instead")
+    func splitsTheAgentEnvironment() throws {
+        let read = try JobReader.agent(
+            Data(try recordedJob("hatchery-serve-vault.agent.plist").utf8))
+        let manifest = StackManifest(stacks: [macStack()])
+        let result = try Adopter().planJob(
+            read, kind: .job, into: "laptop-jobs", box: "jimmy@127.0.0.1", manifest: manifest,
+            manifestPath: "/tmp/hatchery.json")
+
+        let secrets = try #require(result.files.first { $0.path == "hatchery-serve.secrets.json" })
+        #expect(try decodedMap(secrets.contents) == ["VAULT_APP_KEY": "abc"])
+
+        let sidecar = try #require(result.files.first { $0.path == "hatchery-serve.config.json" })
+        #expect(try decodedMap(sidecar.contents) == ["VAULT_URL": "https://x", "PATH": "/usr/bin"])
+
+        let plist = try #require(
+            result.files.first { $0.path == "net.jimmyhoughjr.hatchery-serve.plist" })
+        #expect(plist.contents.contains("<key>VAULT_APP_KEY</key>"))
+        #expect(plist.contents.contains("<string>${VAULT_APP_KEY}</string>"))
+        #expect(plist.contents.contains("<string>https://x</string>"))
+        #expect(!plist.contents.contains("abc"))
+
+        // The manifest is the declaration, and no value of any kind belongs in it.
+        let encoded = String(decoding: try result.manifest.encoded(), as: UTF8.self)
+        #expect(!encoded.contains("abc"))
+    }
+
+    @Test("a secret in a unit's environment goes to the secrets file, and the unit copy names it instead")
+    func splitsTheUnitEnvironment() throws {
+        let read = try JobReader.unit(
+            named: "roost-tapo-poll",
+            service: """
+                [Unit]
+                Description=Poll the Tapo plugs
+
+                [Service]
+                Type=simple
+                ExecStart=%h/roost/bin/tapo-poll.py --watch
+                Environment=VAULT_APP_KEY=abc
+                Environment=VAULT_URL=https://x
+                Environment=PATH=/usr/bin
+                Restart=always
+
+                [Install]
+                WantedBy=default.target
+                """)
+        let manifest = StackManifest(stacks: [hostStack()])
+        let result = try Adopter().planJob(
+            read, kind: .job, into: "opi-jobs", box: "jimmy@192.168.0.103", manifest: manifest,
+            manifestPath: "/tmp/hatchery.json")
+
+        let secrets = try #require(result.files.first { $0.path == "roost-tapo-poll.secrets.json" })
+        #expect(try decodedMap(secrets.contents) == ["VAULT_APP_KEY": "abc"])
+
+        let sidecar = try #require(result.files.first { $0.path == "roost-tapo-poll.config.json" })
+        #expect(try decodedMap(sidecar.contents) == ["VAULT_URL": "https://x", "PATH": "/usr/bin"])
+
+        let unit = try #require(result.files.first { $0.path == "roost-tapo-poll.service" })
+        #expect(unit.contents.contains("Environment=VAULT_APP_KEY=${VAULT_APP_KEY}"))
+        #expect(unit.contents.contains("Environment=VAULT_URL=https://x"))
+        #expect(!unit.contents.contains("abc"))
+
+        let encoded = String(decoding: try result.manifest.encoded(), as: UTF8.self)
+        #expect(!encoded.contains("abc"))
     }
 
     @Test("adopting a job the stack already declares is refused without --replace")
