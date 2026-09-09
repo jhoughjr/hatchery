@@ -14,6 +14,10 @@ public enum FindingCode {
     public static let secretInPlist = "secret-in-plist"
     /// A job writes its log where nothing reads it back: under `/tmp`, or nowhere at all.
     public static let noLog = "no-log"
+    /// A key the contract marks secret declares no rotation, so only a person can replace it.
+    public static let secretNoRotation = "secret-no-rotation"
+    /// How many of a service's secrets declare a rotation, and how many do not.
+    public static let rotationCoverage = "rotation-coverage"
 }
 
 /// Fills the declaration's findings by comparing what each service declares against what it runs with.
@@ -58,6 +62,11 @@ public struct DeclarationAudit: Sendable {
         // A cluster is asked about first, because its findings are about what is inside it rather than
         // about its sidecar, and a cluster's sidecar is usually just the image's own environment.
         var findings = await self.databaseFindings(for: service, in: stack)
+        // The rotation findings read the kind file alone, so they hold for a job as much as for an app.
+        // They are added before the job arm below, which returns.
+        if let kind = try? registry.kindFile(for: service.kind) {
+            findings += Self.rotationFindings(in: kind)
+        }
         // A job's findings are all the job has. Its environment lives in no container, so the live read below
         // would ask the daemon about a name it has never heard of, once per job, and learn nothing.
         if service.job != nil {
@@ -110,6 +119,32 @@ public struct DeclarationAudit: Sendable {
         if let live, let stale = Self.staleSidecar(live: live, declared: declared) {
             findings.append(stale)
         }
+        return findings
+    }
+
+    /// What a service's own kind file says about replacing its secrets.
+    ///
+    /// This reads no box. A rotation is a declaration, so the whole answer is in the kind file, which is what
+    /// lets a published document carry it beside the gap.
+    ///
+    /// Only key names appear in the text, the same rule the other findings keep. The coverage line is a
+    /// finding rather than a new field, because the document already has one shape for a fact about a service.
+    static func rotationFindings(in kind: KindFile) -> [Declaration.Finding] {
+        let rotations = kind.secretRotations()
+        guard !rotations.isEmpty else { return [] }
+
+        let missing = rotations.filter { $0.rotation == nil }
+        var findings = missing.map { entry in
+            Declaration.Finding(
+                code: FindingCode.secretNoRotation,
+                text: "\(entry.key) is a secret with no declared rotation, so only a person can replace it; "
+                    + "declare its issuer and its holders in the kind file")
+        }
+        findings.append(
+            Declaration.Finding(
+                code: FindingCode.rotationCoverage,
+                text: "\(rotations.count - missing.count) of \(rotations.count) secret(s) declare a rotation, "
+                    + "and \(missing.count) do not"))
         return findings
     }
 

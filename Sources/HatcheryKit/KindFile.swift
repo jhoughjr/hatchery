@@ -27,7 +27,7 @@ public struct KindFile: Codable, Sendable, Equatable {
     }
 
     /// One environment key, as the owning service asks it to be treated: its default, its
-    /// deployed value, whether it is required, and whether it is a secret.
+    /// deployed value, whether it is required, whether it is a secret, and how it rotates.
     public struct EnvEntry: Codable, Sendable, Equatable {
         public var `default`: String?
         public var deployed: String?
@@ -35,10 +35,15 @@ public struct KindFile: Codable, Sendable, Equatable {
         public var required: Bool?
         public var secret: Bool?
         public var why: String?
+        /// What issues a new value for this key, and who holds it.
+        /// Absent on a key that is not a secret, and absent on a secret whose rotation nobody has declared,
+        /// which is the `secret-no-rotation` finding. Optional, so every kind file written before it still reads.
+        public var rotation: Rotation?
 
         public init(
             default: String? = nil, deployed: String? = nil, example: String? = nil,
-            required: Bool? = nil, secret: Bool? = nil, why: String? = nil
+            required: Bool? = nil, secret: Bool? = nil, why: String? = nil,
+            rotation: Rotation? = nil
         ) {
             self.default = `default`
             self.deployed = deployed
@@ -46,6 +51,7 @@ public struct KindFile: Codable, Sendable, Equatable {
             self.required = required
             self.secret = secret
             self.why = why
+            self.rotation = rotation
         }
     }
 

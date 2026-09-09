@@ -1,0 +1,67 @@
+{
+  "kind": "forgejo",
+  "summary": "The house forge: git, packages, and the actions runners.",
+  "image": "codeberg.org/forgejo/forgejo",
+  "port": 3000,
+  "notes": [
+    "A forge config change is never a rolling deploy. Two forge containers alive at once fight over the database lock, so every key here restarts by stop then start."
+  ],
+  "environment": {
+    "FORGEJO__storage__MINIO_ACCESS_KEY_ID": {
+      "required": true,
+      "secret": true,
+      "why": "One half of the S3 key vault rotates. Vault answers both halves at once, so both keys carry the same rotation and hatchery runs it once.",
+      "rotation": {
+        "issuer": { "type": "vaultS3Key", "app": "forgejo" },
+        "holders": [
+          {
+            "type": "dokkuConfig",
+            "app": "forgejo",
+            "key": "FORGEJO__storage__MINIO_ACCESS_KEY_ID",
+            "restart": "stopStart"
+          },
+          {
+            "type": "dokkuConfig",
+            "app": "forgejo",
+            "key": "FORGEJO__storage__MINIO_SECRET_ACCESS_KEY",
+            "restart": "stopStart"
+          }
+        ]
+      }
+    },
+    "FORGEJO__storage__MINIO_SECRET_ACCESS_KEY": {
+      "required": true,
+      "secret": true,
+      "why": "The other half of the same key. It declares the same rotation, because one issuer answers for both.",
+      "rotation": {
+        "issuer": { "type": "vaultS3Key", "app": "forgejo" },
+        "holders": [
+          {
+            "type": "dokkuConfig",
+            "app": "forgejo",
+            "key": "FORGEJO__storage__MINIO_ACCESS_KEY_ID",
+            "restart": "stopStart"
+          },
+          {
+            "type": "dokkuConfig",
+            "app": "forgejo",
+            "key": "FORGEJO__storage__MINIO_SECRET_ACCESS_KEY",
+            "restart": "stopStart"
+          }
+        ]
+      }
+    },
+    "FORGE_PULL_TOKEN": {
+      "required": true,
+      "secret": true,
+      "why": "The forge access token the boxes log in to the package registry with. The forge refuses token creation over its API, so a person issues this one.",
+      "rotation": {
+        "issuer": {
+          "type": "manual",
+          "recipe": "Revoke the old token on the forge's token page. Mint a new one with package read. Then, on each box that pulls: dokku registry:login --password-stdin forgejo.jimmyhoughjr.net jimmy"
+        },
+        "holders": []
+      }
+    }
+  }
+}
