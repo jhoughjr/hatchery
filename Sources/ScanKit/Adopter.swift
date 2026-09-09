@@ -340,9 +340,17 @@ public struct Adopter: Sendable {
     /// A Mac is asked for the label as given and then for the label with the estate's prefix, because a person
     /// naming a job at the command line names the service and not the reverse-domain label.
     /// Linux is asked for the service, and then for its timer if one exists.
+    /// On Linux, a label `cron:<n>` reads line n (1-based, counting non-comment, non-empty lines) from the crontab.
     public func job(
-        named label: String, on box: String, platform: HostPlatform
+        named label: String, on box: String, platform: HostPlatform, name: String? = nil
     ) async throws -> ReadJob {
+        if platform == .linux, label.hasPrefix("cron:") {
+            guard let lineStr = label.dropFirst("cron:".count) as Substring?, let lineNum = Int(lineStr), lineNum > 0 else {
+                throw AdoptError.notAJobFile("a systemd user unit named \(label)")
+            }
+            return try await self.jobFromCrontab(lineNum: lineNum, on: box, name: name)
+        }
+
         switch platform {
         case .darwin:
             let agents = "$HOME/Library/LaunchAgents"
@@ -362,6 +370,60 @@ public struct Adopter: Sendable {
             return try JobReader.unit(
                 named: label, service: service, timer: timer.isEmpty ? nil : timer)
         }
+    }
+
+    /// One crontab line at the given 1-based index, read from the box and parsed into a job.
+    ///
+    /// The job's name is derived from the command's basename without extension, unless the caller provides one.
+    /// The schedule is converted from cron fields to systemd OnCalendar format.
+    private func jobFromCrontab(lineNum: Int, on box: String, name: String?) async throws -> ReadJob {
+        let crontabText = try await self.read("crontab -l 2>/dev/null || echo ''", on: box, what: "the crontab")
+        var nonCommentLines: [(index: Int, line: String)] = []
+        for (fullIndex, line) in crontabText.split(separator: "\n").enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+            nonCommentLines.append((index: nonCommentLines.count + 1, line: String(line)))
+        }
+
+        guard lineNum > 0, lineNum <= nonCommentLines.count else {
+            throw AdoptError.unreadable("crontab line \(lineNum); the crontab has \(nonCommentLines.count) non-comment, non-empty line(s)")
+        }
+
+        let cronLine = nonCommentLines[lineNum - 1].line
+        guard let parsed = Scanner.parseCrontabLine(cronLine) else {
+            throw AdoptError.unreadable("crontab line \(lineNum): failed to parse")
+        }
+
+        var program = parsed.program
+        if let redirectIndex = program.range(of: ">>") {
+            let beforeRedirect = String(program[program.startIndex..<redirectIndex.lowerBound]).trimmingCharacters(in: .whitespaces)
+            program = beforeRedirect
+        }
+
+        let programWords = JobReader.words(program)
+        guard !programWords.isEmpty else {
+            throw AdoptError.unreadable("crontab line \(lineNum): no program")
+        }
+
+        let serviceName = name ?? Self.serviceName(for: programWords[0])
+        let job = JobSpec(
+            program: programWords,
+            workingDirectory: nil,
+            schedule: parsed.schedule.map { .at($0) },
+            keepAlive: false,
+            log: parsed.log,
+            runAtLoad: false,
+            label: nil)
+
+        return ReadJob(label: "cron:\(lineNum)", name: serviceName, job: job, environment: [:])
+    }
+
+    /// The service name derived from a program path: the basename without extension.
+    private static func serviceName(for program: String) -> String {
+        let expanded = program.replacingOccurrences(of: "~", with: FileManager.default.homeDirectoryForCurrentUser.path)
+        let lastComponent = (expanded as NSString).lastPathComponent
+        let noExtension = (lastComponent as NSString).deletingPathExtension
+        return noExtension.isEmpty ? lastComponent : noExtension
     }
 
     /// The line between a unit and its timer, in the one command both are asked for.

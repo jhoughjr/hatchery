@@ -63,18 +63,19 @@ extension HostProvider {
 
         case .linux:
             let unit = Self.jobLabel(for: service, platform: .linux)
+            let isCronAdoption = job.label?.hasPrefix("cron:") ?? false
             var files = [
                 GeneratedFile(
                     path: names[0],
                     contents: Self.systemdService(
-                        name: unit, service: service.name, job: job, environment: declared),
+                        name: unit, service: service.name, job: job, environment: declared, cronAdoption: isCronAdoption),
                     role: .declaration)
             ]
             if let schedule = job.schedule {
                 files.append(
                     GeneratedFile(
                         path: names[1],
-                        contents: Self.systemdTimer(name: unit, schedule: schedule),
+                        contents: Self.systemdTimer(name: unit, schedule: schedule, cronAdoption: isCronAdoption),
                         role: .declaration))
             }
             return files
@@ -168,10 +169,14 @@ extension HostProvider {
     /// A scheduled job carries no `[Install]` section: the timer is what is enabled, and a oneshot service with its
     /// own install target would be started once at login as well as on its schedule.
     static func systemdService(
-        name: String, service: String, job: JobSpec, environment: [(key: String, value: String)]
+        name: String, service: String, job: JobSpec, environment: [(key: String, value: String)],
+        cronAdoption: Bool = false
     ) -> String {
-        var body = """
-            # Written by hatchery.
+        var body = "# Written by hatchery.\n"
+        if cronAdoption {
+            body += "# The crontab line must be removed by hand once the timer is installed.\n"
+        }
+        body += """
             [Unit]
             Description=\(service), declared by hatchery
 
@@ -211,9 +216,12 @@ extension HostProvider {
     /// `Persistent=true` replays a window the box slept through, which is the case a scheduled job exists for.
     /// An interval uses `OnCalendar=` with a calendar expression rather than `OnBootSec` and `OnUnitActiveSec`,
     /// because a timer anchoring off boot and last activation computes no next elapse if it has never run.
-    static func systemdTimer(name: String, schedule: Schedule) -> String {
-        var body = """
-            # Written by hatchery.
+    static func systemdTimer(name: String, schedule: Schedule, cronAdoption: Bool = false) -> String {
+        var body = "# Written by hatchery.\n"
+        if cronAdoption {
+            body += "# The crontab line must be removed by hand once the timer is installed.\n"
+        }
+        body += """
             [Unit]
             Description=\(name), on the schedule the manifest declares
 
