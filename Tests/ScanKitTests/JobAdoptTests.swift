@@ -122,6 +122,29 @@ struct JobAdoptTests {
         #expect(JobReader.seconds("whenever") == nil)
     }
 
+    // MARK: - the name rule
+
+    @Test(
+        "an environment name that says credential is read as one",
+        arguments: [
+            "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "API_KEY", "APIKEY", "AUTH",
+            "VAULT_APP_KEY", "HATCHERY_SERVE_TOKEN", "AUTH_HEADER", "KEY_MATERIAL",
+            "MY_API_KEY", "DATABASE_PASSWORD", "token", "Vault_App_Key",
+        ])
+    func readsACredentialName(name: String) {
+        #expect(Adopter.isSecretEnvironmentName(name))
+    }
+
+    @Test(
+        "an environment name that says something else is left in the sidecar",
+        arguments: [
+            "PATH", "HOME", "PORT", "VAULT_URL", "VAULT_APP", "HATCHERY_PULSE_URL",
+            "NODE_KEY_FILE", "TOKEN_FILE", "APP_URL", "KEYSTONE", "MONKEY",
+        ])
+    func readsAPlainName(name: String) {
+        #expect(!Adopter.isSecretEnvironmentName(name))
+    }
+
     @Test("adopt declares the job into the stack, with the artifact beside it and no tofu import")
     func plansTheJob() throws {
         let read = try JobReader.unit(
