@@ -155,6 +155,28 @@ final class JobScaffoldTests: XCTestCase {
         XCTAssertFalse(unit[0].contents.contains("the-bearer-token"), unit[0].contents)
     }
 
+    /// The installed plist is scaffolded from the sidecar and the secrets file merged, and names no secret key,
+    /// so launchd hands the job the real values while the copy the stack keeps carries the references above.
+    func testTheInstalledPlistCarriesTheMergedValues() throws {
+        var serve = ServiceSpec(
+            name: "hatchery-serve", kind: .job, image: "",
+            configFile: "hatchery-serve.config.json",
+            job: JobSpec(
+                program: ["/usr/local/bin/hatchery", "serve"],
+                environmentFromVault: true))
+        serve.job?.log = "/var/log/hatchery-serve.log"
+        let sidecar = ["HATCHERY_BIND": "0.0.0.0"]
+        let secrets = ["HATCHERY_TOKEN": "the-bearer-token"]
+        let merged = sidecar.merging(secrets) { _, new in new }
+
+        let agent = try HostProvider.jobFiles(
+            for: serve, platform: .darwin, environment: merged)
+        XCTAssertTrue(agent[0].contents.contains("<key>HATCHERY_BIND</key>"), agent[0].contents)
+        XCTAssertTrue(agent[0].contents.contains("<key>HATCHERY_TOKEN</key>"), agent[0].contents)
+        XCTAssertTrue(agent[0].contents.contains("<string>the-bearer-token</string>"), agent[0].contents)
+        XCTAssertFalse(agent[0].contents.contains("${HATCHERY_TOKEN}"), agent[0].contents)
+    }
+
     func testACalendarScheduleBecomesBothSupervisorsCalendars() throws {
         // The laptop's watts-refresh: day 3 of every month at 07:00.
         let refresh = ServiceSpec(
