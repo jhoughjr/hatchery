@@ -121,7 +121,11 @@ public struct Scanner: Sendable {
             }
             return (.appPlatform, "api.digitalocean.com")
         }
-        let box = DokkuProvider.sshTarget(target!)
+        let normalizedTarget = target!.trimmingCharacters(in: .whitespaces)
+        if Self.isLocalTarget(normalizedTarget) {
+            return (.host, normalizedTarget)
+        }
+        let box = DokkuProvider.sshTarget(normalizedTarget)
         let probe = await self.dokku("apps:list", on: box)
         if probe.status == 0 {
             return (.dokku, box)
@@ -129,18 +133,23 @@ public struct Scanner: Sendable {
         // A target that names its own account is asking for the docker plane. The dokku account cannot
         // answer for it: dokku will not speak about a container it did not make, and a bare address is
         // rewritten to `dokku@` above, so this is only reached for a user someone typed.
-        let shell = target!.trimmingCharacters(in: .whitespaces)
-        let docker = await self.run("docker info --format '{{.ServerVersion}}'", on: shell)
+        let docker = await self.run("docker info --format '{{.ServerVersion}}'", on: normalizedTarget)
         let version = docker.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         if docker.status == 0, !version.isEmpty {
-            return (.host, shell)
+            return (.host, normalizedTarget)
         }
         throw ScanError.noProviderAnswered(
             target: target!,
             tried: [
                 "dokku: \(box) did not answer apps:list (\(probe.combined))",
-                "host: \(shell) did not answer docker info (\(docker.combined))",
+                "host: \(normalizedTarget) did not answer docker info (\(docker.combined))",
             ])
+    }
+
+    /// Whether a target refers to the local machine.
+    static func isLocalTarget(_ target: String) -> Bool {
+        let normalized = target.trimmingCharacters(in: .whitespaces).lowercased()
+        return ["local", "localhost", "127.0.0.1"].contains(normalized)
     }
 
     /// Everything that runs on the target.
@@ -303,8 +312,11 @@ public struct Scanner: Sendable {
     ///
     /// The command is not split here, unlike the dokku door: a docker `--format` argument carries quotes and
     /// braces, and splitting it on spaces would hand the remote shell half a template.
+    /// For local targets, the command runs on this machine without SSH.
     private func run(_ command: String, on box: String) async -> CommandOutput {
-        let argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box, command]
+        let argv = Self.isLocalTarget(box)
+            ? ["sh", "-c", command]
+            : ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box, command]
         do {
             return try await self.execute(argv, nil)
         } catch {

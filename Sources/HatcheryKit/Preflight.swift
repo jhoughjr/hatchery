@@ -236,11 +236,11 @@ public struct Preflight: Sendable {
         return checks
     }
 
-    /// What a host backend needs: tofu here, an ssh client here, a box that answers, and a docker daemon
-    /// that answers as this account.
+    /// What a host backend needs: tofu here, an ssh client here, a box that answers, and either
+    /// a docker daemon or a supervisor for jobs.
     ///
-    /// `docker info` rather than `docker version`: version answers from the client alone, so an account
-    /// that cannot reach the daemon still passes it.
+    /// A host with jobs but no docker passes preflight for job adoption. A container-only host
+    /// needs docker. One with both reports both, and a host with neither fails.
     public func host(host: String?) async -> [PreflightCheck] {
         var checks: [PreflightCheck] = []
         checks.append(await tofu())
@@ -250,7 +250,7 @@ public struct Preflight: Sendable {
                 remedy: InstallHint.forTool("ssh")))
 
         guard let host, !host.isEmpty else {
-            for name in ["box reachable", "docker responds", "platform"] {
+            for name in ["box reachable", "services"] {
                 checks.append(
                     PreflightCheck(
                         name: name, status: .skipped, detail: "no host given", remedy: nil))
@@ -263,13 +263,48 @@ public struct Preflight: Sendable {
         guard reachable.status == .ok else {
             checks.append(
                 PreflightCheck(
-                    name: "docker responds", status: .skipped,
+                    name: "services", status: .skipped,
                     detail: "the box could not be reached", remedy: nil))
             return checks
         }
-        checks.append(await docker(host: host))
+        checks.append(await services(host: host))
         checks.append(await self.platform(host: host))
         return checks
+    }
+
+    /// What services the box can host. Reports both docker and supervisor availability, and
+    /// passes if at least one is present.
+    private func services(host: String) async -> PreflightCheck {
+        do {
+            let docker = try await execute(
+                Self.sshCommand(
+                    host: host, remote: ["docker", "info", "--format", "{{.ServerVersion}}"]), nil)
+            let dockerAvailable = docker.status == 0
+            let dockerVersion = docker.combined.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let uname = try await execute(
+                Self.sshCommand(host: host, remote: ["uname", "-s"]), nil)
+            let supervisorAvailable = uname.status == 0
+                && HostPlatform.named(uname.standardOutput) != nil
+
+            let available = (dockerAvailable ? ["docker"] : [])
+                + (supervisorAvailable ? ["supervisor"] : [])
+
+            if available.isEmpty {
+                return PreflightCheck(
+                    name: "services", status: .failed,
+                    detail: "docker and supervisor both unavailable",
+                    remedy: "install docker or enable launchd/systemd on the box")
+            }
+
+            let detail = available.joined(separator: " and ")
+            return PreflightCheck(
+                name: "services", status: .ok,
+                detail: detail)
+        } catch {
+            return PreflightCheck(
+                name: "services", status: .failed, detail: "\(error)", remedy: nil)
+        }
     }
 
     /// Which supervisor this box runs jobs under.

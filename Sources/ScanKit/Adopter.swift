@@ -209,13 +209,15 @@ public struct Adopter: Sendable {
     ///
     /// One `docker inspect` carries the whole run: the image, the network, the mounts, the ports, the
     /// restart policy and the environment. A dokku app takes six calls to say as much, because dokku keeps
-    /// each of those in a report of its own.
+    /// each of those in a report of its own. For local targets, the command runs without SSH.
     public func container(named name: String, on box: String) async throws -> ContainerInspection {
         let output: CommandOutput
         do {
-            output = try await self.execute(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box,
-                 "docker inspect \(name)"], nil)
+            let argv = Self.isLocalTarget(box)
+                ? ["docker", "inspect", name]
+                : ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box,
+                   "docker inspect \(name)"]
+            output = try await self.execute(argv, nil)
         } catch {
             throw AdoptError.unreadable("docker inspect \(name)")
         }
@@ -230,12 +232,15 @@ public struct Adopter: Sendable {
     /// A container's inspect reports the image's environment and the run's as one list.
     /// This second call is the only way to separate them.
     /// Without it a sidecar records the image's build facts as declarations.
+    /// For local targets, the command runs without SSH.
     public func imageEnvironment(for image: String, on box: String) async throws -> [String: String] {
         let output: CommandOutput
         do {
-            output = try await self.execute(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box,
-                 "docker image inspect \(image) --format '{{json .Config.Env}}'"], nil)
+            let argv = Self.isLocalTarget(box)
+                ? ["docker", "image", "inspect", image, "--format", "{{json .Config.Env}}"]
+                : ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box,
+                   "docker image inspect \(image) --format '{{json .Config.Env}}'"]
+            output = try await self.execute(argv, nil)
         } catch {
             throw AdoptError.unreadable("docker image inspect \(image)")
         }
@@ -342,16 +347,16 @@ public struct Adopter: Sendable {
         case .darwin:
             let agents = "$HOME/Library/LaunchAgents"
             let text = try await self.read(
-                "cat '\(agents)/\(label).plist' 2>/dev/null "
-                    + "|| cat '\(agents)/net.jimmyhoughjr.\(label).plist'",
+                "cat \"\(agents)/\(label).plist\" 2>/dev/null "
+                    + "|| cat \"\(agents)/net.jimmyhoughjr.\(label).plist\"",
                 on: box, what: "a launchd agent named \(label)")
             return try JobReader.agent(Data(text.utf8))
 
         case .linux:
             let units = "$HOME/.config/systemd/user"
             let text = try await self.read(
-                "cat '\(units)/\(label).service'; echo '\(Self.unitMarker)'; "
-                    + "cat '\(units)/\(label).timer' 2>/dev/null || true",
+                "cat \"\(units)/\(label).service\"; echo '\(Self.unitMarker)'; "
+                    + "cat \"\(units)/\(label).timer\"",
                 on: box, what: "a systemd user unit named \(label)")
             let halves = text.components(separatedBy: Self.unitMarker)
             let timer = halves.count > 1 ? halves[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
@@ -438,16 +443,25 @@ public struct Adopter: Sendable {
     }
 
     /// One command on the box, whose output is the answer and whose nonzero status is a refusal.
+    /// For local targets, the command runs on this machine without SSH.
     private func read(_ command: String, on box: String, what: String) async throws -> String {
         let output: CommandOutput
         do {
-            output = try await self.execute(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box, command], nil)
+            let argv = Self.isLocalTarget(box)
+                ? ["sh", "-c", command]
+                : ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box, command]
+            output = try await self.execute(argv, nil)
         } catch {
             throw AdoptError.unreadable(what)
         }
         guard output.status == 0 else { throw AdoptError.notAJobFile(what) }
         return output.standardOutput
+    }
+
+    /// Whether a target refers to the local machine.
+    static func isLocalTarget(_ target: String) -> Bool {
+        let normalized = target.trimmingCharacters(in: .whitespaces).lowercased()
+        return ["local", "localhost", "127.0.0.1"].contains(normalized)
     }
 
     // MARK: parsing

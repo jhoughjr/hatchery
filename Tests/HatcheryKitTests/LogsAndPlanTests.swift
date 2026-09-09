@@ -250,6 +250,35 @@ struct PreflightTests {
         #expect(argv.contains("ConnectTimeout=5"))
         #expect(argv.last == "version")
     }
+
+    @Test("a host with docker absent but a supervisor present passes for job stacks")
+    func hostWithoutDockerButWithSupervisor() async {
+        let checks = await preflight({ argv in
+            // docker info fails
+            if argv.contains("docker") && argv.contains("info") {
+                return CommandOutput(
+                    status: 1, standardOutput: "", standardError: "Cannot connect to Docker daemon")
+            }
+            // tofu and ssh are present
+            if argv.first == "tofu" {
+                return CommandOutput(status: 0, standardOutput: "OpenTofu v1.12.5")
+            }
+            if argv.contains("-V") {
+                return CommandOutput(status: 0, standardOutput: "OpenSSH_10.2p1")
+            }
+            // uname says Darwin (launchd available)
+            if argv.contains("uname") {
+                return CommandOutput(status: 0, standardOutput: "Darwin")
+            }
+            // Box is reachable
+            return CommandOutput(status: 0, standardOutput: "ok")
+        }).host(host: "jimmy@192.168.0.103")
+
+        #expect(checks.allPassed)
+        let services = checks.first { $0.name == "services" }
+        #expect(services?.status == .ok)
+        #expect(services?.detail.contains("supervisor") == true)
+    }
 }
 
 @Suite("Onboarding")

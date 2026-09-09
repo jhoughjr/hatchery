@@ -5,6 +5,16 @@ import HatcheryKit
 
 @testable import ScanKit
 
+private final class LockedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: T
+    init(_ value: T) { self.stored = value }
+    var value: T {
+        get { self.lock.withLock { self.stored } }
+        set { self.lock.withLock { self.stored = newValue } }
+    }
+}
+
 /// The supervisor files recorded on 2026-09-09, read only: two launchd agents off this Mac and the
 /// dokku-reconcile unit and timer off the opi.
 private func recordedJob(_ name: String) throws -> String {
@@ -232,5 +242,83 @@ struct JobAdoptTests {
         #expect(Scanner.jobCommand(platform: .darwin).contains("Library/LaunchAgents"))
         #expect(Scanner.jobCommand(platform: .linux).contains("systemctl --user list-units"))
         #expect(Scanner.jobCommand(platform: .linux).contains(".config/systemd/user"))
+    }
+
+    @Test("adopt uses double quotes around $HOME so the remote shell expands it")
+    func adopterQuotesHomeForExpansion() async throws {
+        let capturedCommands = LockedBox<[String]>([])
+        let mockExecutor: CommandExecutor = { argv, _ in
+            if let command = argv.last {
+                var current = capturedCommands.value
+                current.append(command)
+                capturedCommands.value = current
+            }
+            return CommandOutput(status: 0, standardOutput: "", standardError: "")
+        }
+
+        let adopter = Adopter(execute: mockExecutor)
+        do {
+            _ = try await adopter.job(named: "test", on: "example.com", platform: .darwin)
+        } catch {
+            // Expected to fail because the plist is empty; we only verify the command format.
+        }
+
+        let commands = capturedCommands.value
+        #expect(commands.count == 1)
+        let command = commands[0]
+        #expect(command.contains("\"$HOME/Library/LaunchAgents/test.plist\""))
+        #expect(command.contains("\"$HOME/Library/LaunchAgents/net.jimmyhoughjr.test.plist\""))
+    }
+
+    @Test("adopt uses double quotes around $HOME for Linux units")
+    func adopterQuotesHomeForLinuxUnits() async throws {
+        let capturedCommands = LockedBox<[String]>([])
+        let mockExecutor: CommandExecutor = { argv, _ in
+            if let command = argv.last {
+                var current = capturedCommands.value
+                current.append(command)
+                capturedCommands.value = current
+            }
+            return CommandOutput(status: 0, standardOutput: "", standardError: "")
+        }
+
+        let adopter = Adopter(execute: mockExecutor)
+        do {
+            _ = try await adopter.job(named: "test", on: "example.com", platform: .linux)
+        } catch {
+            // Expected to fail because the unit is empty; we only verify the command format.
+        }
+
+        let commands = capturedCommands.value
+        #expect(commands.count == 1)
+        let command = commands[0]
+        #expect(command.contains("\"$HOME/.config/systemd/user/test.service\""))
+        #expect(command.contains("\"$HOME/.config/systemd/user/test.timer\""))
+    }
+
+    @Test("a local target builds commands with no ssh prefix")
+    func localTargetNeedsNoSSH() async throws {
+        let capturedArgs = LockedBox<[[String]]>([])
+        let mockExecutor: CommandExecutor = { argv, _ in
+            var current = capturedArgs.value
+            current.append(argv)
+            capturedArgs.value = current
+            return CommandOutput(status: 0, standardOutput: "", standardError: "")
+        }
+
+        let adopter = Adopter(execute: mockExecutor)
+        do {
+            _ = try await adopter.job(named: "test", on: "local", platform: .linux)
+        } catch {
+            // Expected to fail because the unit is empty; we only verify the command format.
+        }
+
+        let args = capturedArgs.value
+        #expect(args.count == 1)
+        let argv = args[0]
+        // Local target uses sh -c, not ssh
+        #expect(argv.first == "sh")
+        #expect(argv[1] == "-c")
+        #expect(!argv.contains("ssh"))
     }
 }
