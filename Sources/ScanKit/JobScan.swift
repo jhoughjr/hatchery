@@ -52,6 +52,8 @@ public enum JobNames {
 extension Scanner {
     /// The line before each artifact in the one command that reads them all.
     static let jobMarker = "=== hatchery job "
+    /// The line before the crontab entries on Linux.
+    static let crontabMarker = "=== hatchery crontab ==="
     /// The line before the supervisor's own listing.
     static let supervisorMarker = "=== hatchery supervisor ==="
 
@@ -69,6 +71,7 @@ extension Scanner {
             return "for f in \"$HOME\"/.config/systemd/user/*.service "
                 + "\"$HOME\"/.config/systemd/user/*.timer; do "
                 + "[ -e \"$f\" ] || continue; echo \"\(Self.jobMarker)$f\"; cat \"$f\"; done; "
+                + "echo '=== hatchery crontab ==='; crontab -l 2>/dev/null || true; "
                 + "echo '\(Self.supervisorMarker)'; "
                 + "systemctl --user list-units --type=service,timer --all --no-legend --no-pager"
         }
@@ -76,11 +79,16 @@ extension Scanner {
 
     /// Every job the answer describes. Split out so a test can hand it recorded text.
     public static func jobInventory(from text: String, platform: HostPlatform) -> [FoundJob] {
-        let halves = text.components(separatedBy: Self.supervisorMarker)
-        let running = Self.runningLabels(halves.count > 1 ? halves[1] : "", platform: platform)
+        let parts = text.components(separatedBy: Self.supervisorMarker)
+        let beforeSupervisor = parts[0]
+        let supervisorText = parts.count > 1 ? parts[1] : ""
+        let running = Self.runningLabels(supervisorText, platform: platform)
 
         var artifacts: [String: String] = [:]
-        for block in halves[0].components(separatedBy: Self.jobMarker).dropFirst() {
+        let crontabParts = beforeSupervisor.components(separatedBy: Self.crontabMarker)
+        let beforeCrontab = crontabParts[0]
+
+        for block in beforeCrontab.components(separatedBy: Self.jobMarker).dropFirst() {
             guard let newline = block.firstIndex(of: "\n") else { continue }
             let path = String(block[block.startIndex..<newline]).trimmingCharacters(in: .whitespaces)
             artifacts[(path as NSString).lastPathComponent] = String(block[block.index(after: newline)...])
@@ -100,6 +108,24 @@ extension Scanner {
                     lastExit: running[read.label]?.lastExit,
                     running: running[read.label]?.running ?? false))
         }
+
+        if platform == .linux, crontabParts.count > 1 {
+            let crontabText = crontabParts[1]
+            for (index, line) in crontabText.split(separator: "\n").enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+                if let parsed = Self.parseCrontabLine(String(line)) {
+                    found.append(
+                        FoundJob(
+                            label: "cron:\(index)",
+                            schedule: parsed.schedule,
+                            program: parsed.program,
+                            log: parsed.log,
+                            running: false))
+                }
+            }
+        }
+
         return found
     }
 
@@ -131,7 +157,6 @@ extension Scanner {
     ) -> [String: (running: Bool, lastExit: Int?)] {
         var found: [String: (running: Bool, lastExit: Int?)] = [:]
         for line in text.split(separator: "\n") {
-            // launchctl separates its columns with tabs and systemctl with runs of spaces, so both are whitespace.
             let columns = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
             switch platform {
             case .darwin:
@@ -147,5 +172,80 @@ extension Scanner {
             }
         }
         return found
+    }
+
+    /// Parse a crontab line into schedule and program components.
+    ///
+    /// Returns a tuple with the schedule (OnCalendar format), program (the command), and optional log path.
+    static func parseCrontabLine(_ line: String) -> (schedule: String?, program: String, log: String?)? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
+
+        let parts = trimmed.split(separator: " ", maxSplits: 5, omittingEmptySubsequences: false)
+        guard parts.count >= 6 else { return nil }
+
+        let minute = String(parts[0])
+        let hour = String(parts[1])
+        let dayOfMonth = String(parts[2])
+        let month = String(parts[3])
+        let dayOfWeek = String(parts[4])
+        let command = String(parts[5])
+
+        let onCalendar = cronToOnCalendar(minute: minute, hour: hour, day: dayOfMonth, month: month, dow: dayOfWeek)
+        var log: String?
+        if let redirectIndex = command.range(of: ">>") {
+            let afterRedirect = String(command[redirectIndex.upperBound...]).trimmingCharacters(in: .whitespaces)
+            let logParts = afterRedirect.split(separator: " ", maxSplits: 1)
+            if !logParts.isEmpty {
+                log = String(logParts[0]).replacingOccurrences(of: "~", with: FileManager.default.homeDirectoryForCurrentUser.path)
+            }
+        }
+
+        return (schedule: onCalendar, program: command, log: log)
+    }
+
+    /// Convert cron expression fields to systemd OnCalendar format.
+    static func cronToOnCalendar(minute: String, hour: String, day: String, month: String, dow: String) -> String {
+        let minuteStr = normalizeField(minute, max: 59)
+        let hourStr = normalizeField(hour, max: 23)
+        let dayStr = normalizeField(day, max: 31)
+        let monthStr = normalizeField(month, max: 12)
+        let dowStr = normalizeFieldDow(dow)
+
+        if dayStr != "*" && dowStr != "*" {
+            return "*-\(monthStr)-\(dayStr) \(hourStr):\(minuteStr):00"
+        } else if dowStr != "*" {
+            return "\(dowStr) \(hourStr):\(minuteStr):00"
+        } else {
+            return "*-\(monthStr)-\(dayStr) \(hourStr):\(minuteStr):00"
+        }
+    }
+
+    /// Normalize a cron field to systemd format.
+    static func normalizeField(_ field: String, max: Int) -> String {
+        if field == "*" { return "*" }
+        if field.contains("/") {
+            let parts = field.split(separator: "/", maxSplits: 1)
+            if parts.count == 2 {
+                let base = parts[0] == "*" ? "*" : String(parts[0])
+                return base + "/" + String(parts[1])
+            }
+        }
+        if field.contains(",") {
+            return field
+        }
+        if field.contains("-") {
+            return field
+        }
+        if let val = Int(field) {
+            return String(format: "%02d", val)
+        }
+        return field
+    }
+
+    /// Normalize day of week field.
+    static func normalizeFieldDow(_ field: String) -> String {
+        if field == "*" || field == "?" { return "*" }
+        return field
     }
 }

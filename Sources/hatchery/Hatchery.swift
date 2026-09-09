@@ -237,18 +237,21 @@ struct Box: AsyncParsableCommand {
             }
 
             guard !inventory.jobs.isEmpty else { return }
-            // A job is claimed by the label the box knows it as, and a manifest that gave it no label declares it
-            // under the estate's own prefix, so both names are asked about.
-            let declared = Set(
+            let stacks = (parsed?.stacks ?? []).filter { $0.backend == inventory.provider }
+            let declaringStack = stacks.first { stack in
+                guard inventory.provider.isSelfHosted, let host = stack.hostAddress else { return true }
+                return inventory.target.hasSuffix(host)
+            }
+            let platform = declaringStack?.platform ?? .linux
+            let declaredLabels = Set(
                 (parsed?.stacks ?? [])
                     .flatMap(\.services)
                     .filter { $0.job != nil }
-                    .flatMap { [$0.name, $0.job?.label].compactMap { $0 } })
+                    .map { HostProvider.jobLabel(for: $0, platform: platform) })
             print("")
             print("  \(inventory.jobs.count) job(s) under the account")
             for job in inventory.jobs {
-                let claimed = declared.contains(job.label)
-                    || declared.contains(JobReader.name(forLabel: job.label))
+                let claimed = declaredLabels.contains(job.label)
                 var line = "  \(job.label.padding(toLength: 40, withPad: " ", startingAt: 0))"
                 line += (claimed ? "declared" : "undeclared")
                     .padding(toLength: 12, withPad: " ", startingAt: 0)
@@ -519,11 +522,12 @@ struct Box: AsyncParsableCommand {
             let named = try? registry.kindFile(for: ServiceKind(rawValue: read.name))
             let resolvedKind = named.map { ServiceKind(rawValue: $0.kind) } ?? kind?.kind ?? .job
 
+            let (cleanProgram, _) = Adopter.extractSecrets(from: read.job.program)
             print("\(read.label) on \(box)")
             print("  name     \(read.name)")
             print("  kind     \(resolvedKind.rawValue)\(named != nil ? " (from a kind file)" : "")")
             print("  platform \(spec.platform.rawValue)")
-            print("  program  \(read.job.program.joined(separator: " "))")
+            print("  program  \(cleanProgram.joined(separator: " "))")
             print("  when     \(read.job.schedule.map(Declaration.words(for:)) ?? "kept alive")")
             print("  log      \(read.job.log ?? "none declared")")
             print("  env      \(read.environment.count) key(s)")

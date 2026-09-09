@@ -118,6 +118,19 @@ final class JobDeclarationTests: XCTestCase {
         XCTAssertTrue(findings.isEmpty, "absent log on linux is the journal and is not a finding")
     }
 
+    func testALogUnderTmpOnLinuxRaisesNoLog() {
+        let service = ServiceSpec(
+            name: "opi-backup", kind: .job, image: "",
+            configFile: "opi-backup.config.json",
+            job: JobSpec(
+                program: ["~/bin/opi-backup.sh"],
+                log: "/tmp/opi-backup.log"))
+        let findings = DeclarationAudit.jobFindings(for: service, platform: .linux)
+
+        XCTAssertEqual(findings.map(\.code), [FindingCode.noLog])
+        XCTAssertTrue(findings[0].text.contains("/tmp/opi-backup.log"), findings[0].text)
+    }
+
     func testACleanJobRaisesNothing() {
         let service = ServiceSpec(
             name: "hatchery-declared", kind: .job, image: "",
@@ -150,5 +163,30 @@ final class JobDeclarationTests: XCTestCase {
 
         XCTAssertEqual(
             document.stacks[0].services[1].findings.map(\.code), [FindingCode.secretInPlist])
+    }
+
+    /// The published document carries the effective supervisor label for each job.
+    func testTheDocumentCarriesJobLabels() {
+        let stack = StackSpec(
+            name: "jobs", backend: .host, settings: ["platform": "darwin"],
+            services: [
+                ServiceSpec(
+                    name: "hatchery-serve", kind: .job, image: "",
+                    configFile: "hatchery-serve.config.json",
+                    job: JobSpec(program: ["hatchery", "serve"])),
+                ServiceSpec(
+                    name: "roost-report", kind: .job, image: "",
+                    configFile: "roost-report.config.json",
+                    job: JobSpec(
+                        program: ["roost", "report"],
+                        label: "com.example.roost-report"))
+            ])
+        let manifest = StackManifest(stacks: [stack])
+        let document = Declaration(manifests: [(manifest: manifest, path: "/tmp/hatchery.json")])
+
+        let serve = document.stacks[0].services[0]
+        XCTAssertEqual(serve.label, "net.jimmyhoughjr.hatchery-serve")
+        let report = document.stacks[0].services[1]
+        XCTAssertEqual(report.label, "com.example.roost-report")
     }
 }

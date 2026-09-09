@@ -45,6 +45,9 @@ public struct Declaration: Codable, Sendable, Equatable {
         /// The operating system of the box this job runs on, which says which supervisor holds it.
         /// Absent for every service that is not a job.
         public var platform: String?
+        /// The effective supervisor label the job carries on the box, computed from the spec's label if set,
+        /// or from the service name and platform. Absent for services that are not jobs.
+        public var label: String?
         /// Empty when the service is clean. Filled by ``DeclarationAudit``, never by a manifest write.
         public var findings: [Finding] = []
     }
@@ -84,7 +87,10 @@ public struct Declaration: Codable, Sendable, Equatable {
                     host: stack.host,
                     manifest: loaded.path,
                     services: stack.services.map { service in
-                        Service(
+                        let jobLabel = service.job.map { _ in
+                            HostProvider.jobLabel(for: service, platform: stack.platform)
+                        }
+                        return Service(
                             name: service.name,
                             kind: service.kind.rawValue,
                             image: service.image,
@@ -96,6 +102,7 @@ public struct Declaration: Codable, Sendable, Equatable {
                             keepAlive: service.job?.keepAlive,
                             log: service.job?.log,
                             platform: service.job.map { _ in stack.platform.rawValue },
+                            label: jobLabel,
                             findings: findings["\(stack.name)/\(service.name)"] ?? []
                         )
                     }

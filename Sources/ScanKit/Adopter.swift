@@ -489,7 +489,7 @@ public struct Adopter: Sendable {
     /// Extracts credential flags and their values from a program's argument array.
     /// Replaces the values with `${KEY}` references and returns both the cleaned program and a dictionary of secrets.
     /// Flag names are upper-cased and dashes converted to underscores for the secret key.
-    static func extractSecrets(from program: [String]) -> (program: [String], secrets: [String: String]) {
+    public static func extractSecrets(from program: [String]) -> (program: [String], secrets: [String: String]) {
         let credentialFlags = [
             "--token", "--password", "--secret", "--api-key", "--apikey", "--auth", "--key",
         ]
@@ -524,7 +524,7 @@ public struct Adopter: Sendable {
 
     /// Converts a flag name to a secret key name.
     /// `--token` becomes `TOKEN`, `--api-key` becomes `API_KEY`.
-    static func secretKeyName(for flag: String) -> String {
+    public static func secretKeyName(for flag: String) -> String {
         var name = flag
         if name.hasPrefix("--") {
             name = String(name.dropFirst(2))

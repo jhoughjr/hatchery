@@ -321,4 +321,31 @@ struct JobAdoptTests {
             #expect(!argv.contains("ssh"))
         }
     }
+
+    @Test("a cron expression converts to systemd OnCalendar format")
+    func cronToOnCalendar() {
+        let result = Scanner.cronToOnCalendar(minute: "30", hour: "3", day: "*", month: "*", dow: "*")
+        #expect(result == "*-*-* 03:30:00")
+
+        let specificDay = Scanner.cronToOnCalendar(minute: "0", hour: "0", day: "1", month: "*", dow: "*")
+        #expect(specificDay == "*-*-01 00:00:00")
+    }
+
+    @Test("the opi backup crontab line parses into a job")
+    func parsesCrontabLine() {
+        let line = "30 3 * * * ~/bin/opi-backup.sh >> ~/.local/state/opi-backup/cron.log 2>&1"
+        let parsed = Scanner.parseCrontabLine(line)
+
+        #expect(parsed != nil)
+        #expect(parsed?.schedule == "*-*-* 03:30:00")
+        #expect(parsed?.program == "~/bin/opi-backup.sh >> ~/.local/state/opi-backup/cron.log 2>&1")
+        #expect(parsed?.log?.hasSuffix("/.local/state/opi-backup/cron.log") ?? false)
+    }
+
+    @Test("a comment line is not parsed as a crontab entry")
+    func ignoresCommentLines() {
+        let comment = "# This is a comment"
+        let result = Scanner.parseCrontabLine(comment)
+        #expect(result == nil)
+    }
 }

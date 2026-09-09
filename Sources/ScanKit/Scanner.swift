@@ -278,7 +278,9 @@ public struct Scanner: Sendable {
     private func scanHost(box: String) async throws -> Inventory {
         let jobs = await self.jobs(on: box)
         let listed = await self.run("docker ps --format '{{.Names}}'", on: box)
-        guard listed.status == 0 else { throw ScanError.providerRefused(listed.combined) }
+        guard listed.status == 0 else {
+            return Inventory(provider: .host, target: box, apps: [], databases: nil, jobs: jobs)
+        }
         let names = listed.standardOutput
             .split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }

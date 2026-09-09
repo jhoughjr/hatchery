@@ -150,15 +150,28 @@ public struct DeclarationAudit: Sendable {
         return findings
     }
 
-    /// The first credential flag that carries a value, or `nil` when the command line names none.
+    /// The first credential flag that carries a non-redacted value, or `nil` when the command line names none.
     ///
     /// A flag at the very end of the arguments carries nothing, so it is a flag rather than a credential.
+    /// A value that is already redacted as `${...}` is not reported.
     static func credentialFlag(in program: [String]) -> String? {
         for (index, argument) in program.enumerated() {
             let name = argument.split(separator: "=", maxSplits: 1).first.map(String.init) ?? argument
             guard Self.credentialFlags.contains(name.lowercased()) else { continue }
-            if argument.contains("=") { return name }
-            if index + 1 < program.count { return name }
+            if argument.contains("=") {
+                let parts = argument.split(separator: "=", maxSplits: 1)
+                if parts.count == 2 {
+                    let value = String(parts[1])
+                    if !value.hasPrefix("${") || !value.hasSuffix("}") {
+                        return name
+                    }
+                }
+            } else if index + 1 < program.count {
+                let value = program[index + 1]
+                if !value.hasPrefix("${") || !value.hasSuffix("}") {
+                    return name
+                }
+            }
         }
         return nil
     }
