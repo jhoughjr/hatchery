@@ -29,6 +29,7 @@ struct Secrets: AsyncParsableCommand {
         var kind: KindFile
         var apps: Set<String>
         var hosts: Set<String>
+        var manifests: [StackManifest]
         var manifestPath: String
     }
 
@@ -56,6 +57,7 @@ struct Secrets: AsyncParsableCommand {
                 kind: kind,
                 apps: RotationPlanner.apps(in: manifests),
                 hosts: RotationPlanner.hosts(in: manifests),
+                manifests: manifests,
                 manifestPath: entry.path)
         }
         throw ValidationError("no manifest declares \(target.stack)/\(target.service)")
@@ -164,13 +166,68 @@ struct Secrets: AsyncParsableCommand {
                 print("  nothing changed. Run it again with --yes to execute this plan.")
                 return
             }
-            if plans.contains(where: { $0.rotation.issuer.needsVaultSession }),
-                VaultSession.read() == nil
-            {
-                throw RotationRefusal.noVaultSession
+            let session: String
+            if plans.contains(where: { $0.rotation.issuer.needsVaultSession }) {
+                guard let read = VaultSession.read() else { throw RotationRefusal.noVaultSession }
+                session = read
+            } else {
+                session = ""
             }
-            print("  --yes is not accepted by this build, which carries the plan only.")
-            throw ExitCode.failure
+
+            let executor = RotationExecutor(
+                vault: VaultAdmin(session: session),
+                secrets: .onDisk(at: Secrets.secretsURL(for: resolved)),
+                dokkuTargets: Secrets.dokkuTargets(for: resolved),
+                adminTargets: Secrets.adminTargets(for: resolved))
+
+            // One plan at a time, and the first failure ends the run. A later plan would issue a value while
+            // an earlier one had already turned a value over that nothing took.
+            for plan in plans {
+                let report = await executor.execute(plan)
+                report.lines().forEach { print($0) }
+                guard report.succeeded else { throw ExitCode.failure }
+            }
+            print("  run hatchery state seal so the new values reach the encrypted backup.")
         }
+    }
+
+    /// The service's own secrets file, which every issued value is written to before any holder is told.
+    static func secretsURL(for target: Target) -> URL {
+        ConfigSync.secretsURL(
+            for: target.service, in: target.stack, manifestPath: target.manifestPath)
+            ?? ConfigSync.configURL(
+                for: target.service, in: target.stack, manifestPath: target.manifestPath)
+    }
+
+    /// Every dokku app in every stack, with the target its commands arrive at.
+    static func dokkuTargets(for target: Target) -> [String: String] {
+        var targets: [String: String] = [:]
+        for manifest in target.manifests {
+            for stack in manifest.stacks where stack.backend == .dokku {
+                guard let host = stack.host, !host.isEmpty else { continue }
+                for service in stack.services {
+                    targets[service.name] = DokkuProvider.sshTarget(host)
+                }
+            }
+        }
+        return targets
+    }
+
+    /// Every postgres cluster, with the shell account that can `docker exec` its container.
+    ///
+    /// `db_admin` is the setting that names it, the same one `db provision` reads. Without one the stack's own
+    /// host is used, which is right when that host takes a plain shell.
+    static func adminTargets(for target: Target) -> [String: String] {
+        var targets: [String: String] = [:]
+        for manifest in target.manifests {
+            for stack in manifest.stacks {
+                let admin = stack.settings?[BackendSetting.dbAdmin.key] ?? stack.host
+                guard let admin, !admin.isEmpty else { continue }
+                for service in stack.services where service.isPostgresCluster {
+                    targets[service.name] = admin
+                }
+            }
+        }
+        return targets
     }
 }

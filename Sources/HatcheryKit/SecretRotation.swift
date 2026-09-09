@@ -143,6 +143,17 @@ public struct RotationPlan: Sendable, Equatable {
         self.rotation.holders.filter(\.restarts)
     }
 
+    /// The plan's one key, for an issuer that answers one value.
+    ///
+    /// Only the S3 pair carries two keys, and only `vaultS3Key` issues for it. Any other issuer holding two
+    /// keys is a declaration that says one value belongs in two places, which is not a thing hatchery invents.
+    public func singleKey() throws -> String {
+        guard self.keys.count == 1, let key = self.keys.first else {
+            throw RotationExecutorError.notASingleKey(keys: self.keys)
+        }
+        return key
+    }
+
     /// The plan as printed, in the ruled order: the issuer, then the holders, then the restarts.
     ///
     /// The order is the whole point of printing it. A value reissued elsewhere rotates issuer first, then the
