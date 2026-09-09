@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import HatcheryKit
+import ScanKit
 
 /// Databases, outside a clone.
 ///
@@ -12,8 +13,104 @@ struct Database: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "db",
         abstract: "Provision a database server and a database on it.",
-        subcommands: [Provision.self]
+        subcommands: [Provision.self, Adopt.self]
     )
+
+    /// The databases inside a cluster that already runs, declared into the manifest.
+    ///
+    /// The box stack declares the three clusters as containers, and a container declaration says nothing
+    /// about what is inside it. This reads the cluster and writes what is there, so a declared database
+    /// becomes a `hatchery db provision` that has already run.
+    struct Adopt: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Declare the databases inside a postgres cluster the box already runs.",
+            discussion: """
+                Reads `pg_database` and `pg_roles` over a read-only docker exec, and writes one \
+                declaration per database into the cluster's service: its name, the role \
+                `pg_get_userbyid(datdba)` names as its owner, and a role named `<database>_app` as \
+                its app role when the cluster holds one.
+
+                The cluster's own databases — postgres, template0 and template1 — belong to the \
+                image, so nothing declares them. The whole list is replaced rather than merged, \
+                because a database that has left the cluster must leave the declaration with it.
+
+                Nothing is written to the cluster. Provisioning owns the writes, and this reads.
+                """
+        )
+
+        @Argument(help: "The box the cluster runs on, as user@host, or `local`.")
+        var target: String
+
+        @Argument(help: "The postgres container, as docker names it, which is also the service in the stack.")
+        var container: String
+
+        @Option(name: .shortAndLong, help: "The stack that declares the cluster.")
+        var stack: String
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        @Flag(name: .long, help: "Show what would be written without writing anything.")
+        var dryRun: Bool = false
+
+        func run() async throws {
+            let manifestPath = try ManifestLocator.resolve(manifest)
+            let manifestDirectory = URL(fileURLWithPath: manifestPath).deletingLastPathComponent().path
+            let data = try Data(contentsOf: URL(fileURLWithPath: manifestPath))
+            let parsed = try StackManifest.decode(from: data)
+
+            guard let spec = parsed.stack(named: stack) else {
+                throw ValidationError("no stack named '\(stack)' in \(manifestPath)")
+            }
+            guard let service = spec.service(named: container) else {
+                throw ValidationError("stack '\(stack)' declares no service named '\(container)'")
+            }
+            guard service.isPostgresCluster else {
+                throw ValidationError(
+                    "service '\(container)' in stack '\(stack)' is not a postgres container; "
+                        + "its image is \(service.container?.image ?? service.image)")
+            }
+
+            // Two adopters against one manifest collide, so this takes the same lock the box
+            // door takes. A dry run writes nothing and takes no lock.
+            let lock = AdoptLock(manifestDirectory: manifestDirectory)
+            if !dryRun {
+                do {
+                    try lock.acquire()
+                } catch let error as AdoptLockError {
+                    throw ValidationError(error.description)
+                }
+            }
+            defer { if !dryRun { lock.release() } }
+
+            let inventory: ClusterInventory
+            do {
+                inventory = try await ClusterReader().inventory(of: container, on: target)
+            } catch let failure as CommandFailure {
+                throw ValidationError("could not read \(container) on \(target): \(failure.message)")
+            }
+
+            let specs = inventory.specs()
+            print("\(container) on \(target)")
+            for database in specs {
+                let appRole = database.appRole.map { ", app role \($0)" } ?? ", no app role"
+                print("  \(database.name)  owner \(database.owner)\(appRole)")
+            }
+            let orphans = inventory.orphanRoles(against: specs)
+            if !orphans.isEmpty {
+                print("  roles owning no database: \(orphans.joined(separator: ", "))")
+            }
+
+            if dryRun {
+                print("  dry run; nothing written")
+                return
+            }
+            let written = parsed.settingDatabases(stack: stack, service: container, to: specs)
+            try written.write(to: manifestPath)
+            print("  declared \(specs.count) database(s) on \(stack)/\(container)")
+            if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
+        }
+    }
 
     /// Creates the server if it is absent, then the database, the roles and the grants.
     struct Provision: AsyncParsableCommand {

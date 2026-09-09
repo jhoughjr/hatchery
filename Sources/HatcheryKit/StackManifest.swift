@@ -108,6 +108,28 @@ public struct ContainerSpec: Codable, Sendable, Equatable {
     }
 }
 
+/// One database inside a declared postgres cluster.
+///
+/// A declared database is a `hatchery db provision` that has already run: the role, the database and the
+/// grants exist, and this records what they are so the run can be re-issued and the cluster can be graded.
+/// No password lives here. Provisioning mints one and prints it once, and the manifest is committed.
+public struct DatabaseSpec: Codable, Sendable, Equatable {
+    public var name: String
+    /// The role `pg_database.datdba` points at, which is not always named after the database.
+    public var owner: String
+    /// The reduced-privilege role the service connects as, when one exists.
+    public var appRole: String?
+    /// Anything a reader needs that the cluster itself does not say.
+    public var notes: String?
+
+    public init(name: String, owner: String, appRole: String? = nil, notes: String? = nil) {
+        self.name = name
+        self.owner = owner
+        self.appRole = appRole
+        self.notes = notes
+    }
+}
+
 /// A service instance within a stack.
 ///
 /// `configFile` points at a sidecar holding the resolved environment. The sidecar is
@@ -145,6 +167,12 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// Absent for every other backend, and left out of the encoded manifest when absent.
     /// A manifest written before this therefore still reads, and a dokku manifest gains no empty field.
     public var container: ContainerSpec?
+    /// What this service holds inside it, for a service that is a postgres cluster.
+    ///
+    /// A cluster carries its databases as facts of the cluster, whatever the service's kind is.
+    /// Box adopt gives a container its own name as its kind, so the image is what says this is a cluster.
+    /// Absent for every other service, and left out of the encoded manifest when absent.
+    public var databases: [DatabaseSpec]?
 
     public init(
         name: String,
@@ -157,7 +185,8 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         healthPath: String? = nil,
         deploymentID: String? = nil,
         imageVariable: String? = nil,
-        container: ContainerSpec? = nil
+        container: ContainerSpec? = nil,
+        databases: [DatabaseSpec]? = nil
     ) {
         self.name = name
         self.kind = kind
@@ -171,6 +200,20 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         self.deploymentID = deploymentID
         self.imageVariable = imageVariable
         self.container = container
+        self.databases = databases
+    }
+
+    /// Whether this service is a postgres cluster, which is the one service a database is declared on.
+    ///
+    /// The image is the whole test. A cluster's kind is its own name, because box adopt names a container's
+    /// kind after the container, so the kind says nothing about what the container runs.
+    public var isPostgresCluster: Bool {
+        self.container?.image.hasPrefix("postgres") ?? false
+    }
+
+    /// The databases this service declares, and an empty list when it declares none.
+    public var declaredDatabases: [DatabaseSpec] {
+        self.databases ?? []
     }
 }
 
@@ -407,6 +450,23 @@ public struct StackManifest: Codable, Sendable, Equatable {
         }
         return copy
     }
+
+    /// The same manifest with one service's declared databases replaced.
+    ///
+    /// Adopt reads the cluster and writes the whole list, because a database that has left the cluster must
+    /// leave the declaration with it. A merge would keep declaring a database that is no longer there.
+    public func settingDatabases(
+        stack stackName: String, service serviceName: String, to databases: [DatabaseSpec]
+    ) -> StackManifest {
+        var copy = self
+        for stackIndex in copy.stacks.indices where copy.stacks[stackIndex].name == stackName {
+            for serviceIndex in copy.stacks[stackIndex].services.indices
+            where copy.stacks[stackIndex].services[serviceIndex].name == serviceName {
+                copy.stacks[stackIndex].services[serviceIndex].databases = databases
+            }
+        }
+        return copy
+    }
 }
 
 public enum ManifestError: Error, CustomStringConvertible, Equatable {
@@ -414,6 +474,8 @@ public enum ManifestError: Error, CustomStringConvertible, Equatable {
     case invalidStackName(String)
     case duplicateStack(String)
     case missingHost(stack: String)
+    /// A service declares databases and runs something other than postgres.
+    case databasesOffCluster(stack: String, service: String)
 
     public var description: String {
         switch self {
@@ -425,6 +487,8 @@ public enum ManifestError: Error, CustomStringConvertible, Equatable {
             return "stack '\(name)' is declared more than once"
         case .missingHost(let stack):
             return "stack '\(stack)' targets dokku but declares no host"
+        case .databasesOffCluster(let stack, let service):
+            return "service '\(service)' in stack '\(stack)' declares databases, and its image is not postgres"
         }
     }
 }
@@ -458,6 +522,9 @@ extension StackManifest {
             }
             if stack.backend == .dokku, (stack.host ?? "").isEmpty {
                 throw ManifestError.missingHost(stack: stack.name)
+            }
+            for service in stack.services where service.databases != nil && !service.isPostgresCluster {
+                throw ManifestError.databasesOffCluster(stack: stack.name, service: service.name)
             }
         }
     }

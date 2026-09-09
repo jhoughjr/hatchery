@@ -1,0 +1,6 @@
+{
+    "container": "rookery-pg",
+    "databases": "postgres|postgres\ntemplate1|postgres\ntemplate0|postgres\nrookery|rookery\n",
+    "readAt": "2026-09-09",
+    "roles": "pg_database_owner\npg_read_all_data\npg_write_all_data\npg_monitor\npg_read_all_settings\npg_read_all_stats\npg_stat_scan_tables\npg_read_server_files\npg_write_server_files\npg_execute_server_program\npg_signal_backend\npg_checkpoint\npg_maintain\npg_use_reserved_connections\npg_create_subscription\npostgres\nrookery\nrookery_app\n"
+}
