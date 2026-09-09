@@ -241,3 +241,87 @@ public enum AlertWebhook {
         }
     }
 }
+
+/// Posts all health transitions to pulse as individual events.
+///
+/// Every transition (worsening or improving) is posted to pulse. The poster is replaceable
+/// so no test opens a socket.
+public enum PulseEventSink {
+    /// Returns `nil` when delivered, or a short reason.
+    public typealias Poster = @Sendable (URL, Data, String) async -> String?
+
+    public static let live: Poster = { url, body, key in
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(key, forHTTPHeaderField: "x-roost-node-key")
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return "no HTTP response" }
+            guard (200..<300).contains(http.statusCode) else { return "HTTP \(http.statusCode)" }
+            return nil
+        } catch {
+            return URLSessionTransport.reason(for: error)
+        }
+    }
+
+    struct PulseEvent: Encodable {
+        let at: Int
+        let kind: String
+        let source: String
+        let subject: String
+        let tone: String
+        let message: String
+        let detail: DetailDict
+
+        struct DetailDict: Encodable {
+            let from: String
+            let to: String
+        }
+    }
+
+    struct EventPayload: Encodable {
+        let events: [PulseEvent]
+    }
+
+    /// Convert a health transition to a pulse event.
+    static func transitionToEvent(_ transition: HealthTransition) -> PulseEvent {
+        let tone: String
+        if transition.to == .ready || transition.to == .responding {
+            tone = "go"
+        } else if transition.to == .degraded {
+            tone = "warn"
+        } else {
+            tone = "err"
+        }
+
+        return PulseEvent(
+            at: Int(transition.at.timeIntervalSince1970),
+            kind: "health",
+            source: "hatchery",
+            subject: "\(transition.stack)/\(transition.service)",
+            tone: tone,
+            message: transition.line,
+            detail: PulseEvent.DetailDict(
+                from: transition.from.rawValue,
+                to: transition.to.rawValue
+            )
+        )
+    }
+
+    public static func sink(url: URL, key: String, post: @escaping Poster = live) -> HealthWatcher.AlertSink {
+        { transitions in
+            // Post all transitions, not just worsening ones
+            let events = transitions.map { transitionToEvent($0) }
+            let payload = EventPayload(events: events)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let body = try? encoder.encode(payload) else { return }
+            if let failure = await post(url, body, key) {
+                // Failed post is logged but never stops the watcher
+                print("pulse event: \(failure)")
+            }
+        }
+    }
+}
