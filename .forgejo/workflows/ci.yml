@@ -7,11 +7,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-# One live run per ref. A force-push should not leave the runner finishing a build
-# nobody can merge.
+# One run of this repository at a time. The runner takes two jobs, and two
+# builds of one repository share one scratch directory, which SwiftPM refuses
+# with "database is locked" rather than waiting. Run 66 proved it.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: build-hatchery
 
 jobs:
   test:
