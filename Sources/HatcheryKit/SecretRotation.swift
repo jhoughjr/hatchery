@@ -183,7 +183,7 @@ public struct RotationPlan: Sendable, Equatable {
 /// - `unknownHolder`: a holder names something the manifest does not know, so the value would be turned over
 ///   while one bearer of it was never told.
 /// - `manualIssuer`: only a person can issue this value. The recipe is the answer, and the run stops.
-/// - `noVaultSession`: `VAULT_SESSION` is not in the environment, and a vault issuer needs it.
+/// - `noVaultSession`: this machine holds no vault credential, and a vault issuer needs one.
 public enum RotationRefusal: Error, CustomStringConvertible, Equatable {
     case noKindFile(service: String, kind: String)
     case notRotatable(key: String, service: String, rotatable: [String])
@@ -213,8 +213,8 @@ public enum RotationRefusal: Error, CustomStringConvertible, Equatable {
                 + "    \(recipe)"
 
         case .noVaultSession:
-            return "\(VaultSession.variable) is not set, and this rotation needs vault's admin routes.\n"
-                + "    " + VaultSession.recipe
+            return "This machine holds no vault credential, and vault's admin routes need one.\n"
+                + "    " + VaultAdminCredential.recipe
         }
     }
 }
@@ -315,17 +315,13 @@ public enum RotationPlanner {
 
 // MARK: - The vault session
 
-/// The signed-in admin's `vault_session` cookie, which vault's admin routes take.
+/// The signed-in admin's `vault_session` cookie, which vault's admin routes still take.
 ///
 /// It is read from the environment and never from an argument. An argument lands in the shell history and in
 /// `ps`, where every account on the machine reads it, which is the house pattern `rookery-vault-key` set.
+/// It is the last door ``VaultAdminCredential`` tries, so a person who already has a session keeps working.
 public enum VaultSession {
     public static let variable = "VAULT_SESSION"
-
-    /// What to tell a person who has no session set. The browser is the only place this cookie exists.
-    public static let recipe =
-        "In the browser at https://vault.jimmyhoughjr.net: devtools > Application > Cookies > vault_session. "
-        + "Then run this again as VAULT_SESSION=<cookie value> hatchery secrets rotate ..."
 
     /// The session, or `nil` when the environment carries none or carries an empty one.
     public static func read(

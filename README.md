@@ -329,6 +329,32 @@ PKCS#1 structure directly — nine DER integers that are exactly a private RSA J
 Not everything is an environment variable. Stripe credentials for the lab live in the database,
 so the origins above cover the config half of the problem and not the whole of it.
 
+### Signing in to vault
+
+Every value hatchery mints in vault goes through vault's admin routes, and the credential for those routes used to be the signed-in admin's browser cookie, copied out of devtools by hand and passed in `VAULT_SESSION`. `hatchery vault login` replaces that. It binds a free loopback port, opens vault's own browser sign-in, and vault redirects the operator token back to that port. The value never passes through an argument or the shell history, and no person reads it.
+
+```
+$ hatchery vault login
+  sign in at:
+    https://vault.jimmyhoughjr.net/auth/cli?port=51234&name=mini.local
+  signed in to https://vault.jimmyhoughjr.net as jimmy@example.com
+  the token is at /Users/you/.config/hatchery/vault/vault.jimmyhoughjr.net.token
+```
+
+The token lands in `~/.config/hatchery/vault/<vault host>.token`, mode 600 in a directory of mode 700, written through the file system and never through a shell. One file per host, so a lab vault signs in beside the estate's and neither takes the other's place. The token is checked against vault before it is written, so a file on the machine is always a credential vault answered for.
+
+Every admin call looks for a credential in one order:
+
+| Where | What the call carries |
+| --- | --- |
+| `VAULT_OPERATOR_TOKEN` in the environment | `Authorization: Bearer <token>` |
+| the token file for the vault's host | `Authorization: Bearer <token>` |
+| `VAULT_SESSION` in the environment | `Cookie: vault_session=<session>` |
+
+The variable comes first, so a one-off run against another identity needs no sign-out. The session stays last, so a person who already has one keeps working. A machine holding none of the three is told `run: hatchery vault login`, in place of the devtools recipe it used to print.
+
+`hatchery vault status` asks vault who the credential belongs to rather than trusting the file. `hatchery vault logout` removes the file and calls no route. A token is revoked in vault's console, so a token that got loose stays loose until it is revoked there.
+
 ### Keeping the backup current
 
 The files holding those secrets cannot be committed, and cannot be gitignored and forgotten

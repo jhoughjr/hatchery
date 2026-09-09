@@ -28,7 +28,7 @@ struct Hatchery: AsyncParsableCommand {
             Box.self, Config.self, Database.self, Declared.self, Deploy.self, Doctor.self, Events.self,
             Host.self, Kind.self, Secrets.self, Serve.self,
             Service.self, Setup.self, Stack.self, State.self, Status.self,
-            Up.self, Down.self, Restart.self,
+            Up.self, Down.self, Restart.self, Vault.self,
         ]
     )
 }

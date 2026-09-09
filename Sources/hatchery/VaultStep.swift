@@ -48,9 +48,11 @@ enum VaultStep {
             return
         }
 
-        guard let session = VaultSession.read() else { throw RotationRefusal.noVaultSession }
+        guard let credential = VaultAdminCredential.resolve(vault: baseURL) else {
+            throw RotationRefusal.noVaultSession
+        }
         let registrar = VaultRegistrar(
-            vault: VaultAdmin(baseURL: baseURL, session: session), baseURL: baseURL)
+            vault: VaultAdmin(baseURL: baseURL, credential: credential), baseURL: baseURL)
         let registration = try await registrar.register(
             app: service.name, secrets: document, holding: held)
         registration.lines().forEach { print($0) }
