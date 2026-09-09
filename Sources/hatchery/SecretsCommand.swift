@@ -19,7 +19,7 @@ struct Secrets: AsyncParsableCommand {
             The vault session is read from VAULT_SESSION in the environment and never from an argument, \
             because an argument lands in the shell history and in ps.
             """,
-        subcommands: [Holders.self, Rotate.self]
+        subcommands: [Holders.self, Rotate.self, Sync.self]
     )
 
     /// What a `<stack>/<service>` target resolves to: the service, and the kind file that declares its rotations.
@@ -188,6 +188,60 @@ struct Secrets: AsyncParsableCommand {
                 guard report.succeeded else { throw ExitCode.failure }
             }
             print("  run hatchery state seal so the new values reach the encrypted backup.")
+        }
+    }
+
+    /// Puts a declared service's own secrets into its vault document, so the app reads them at boot.
+    ///
+    /// One direction only. The secrets file is what hatchery declares and what `state seal` backs up, so it is
+    /// the source and the document is the copy. Reading the document back would make two sources of one fact.
+    struct Sync: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "sync",
+            abstract: "Set a declared service's secrets into its vault document.",
+            discussion: """
+                Every secret-marked key of the service goes into the app's document, less the three vault \
+                keys: the app key never goes into the document it opens, and the URL is how the app finds \
+                vault before it has read anything.
+
+                The session is read from VAULT_SESSION in the environment and never from an argument.
+                """
+        )
+
+        @Argument(help: "The service, as <stack>/<service>.")
+        var target: String
+
+        @Option(name: .shortAndLong, help: "Path to a stack manifest. Repeat it to read several.")
+        var manifest: [String] = []
+
+        @Flag(name: .long, help: "Print the names that would be set and stop.")
+        var dryRun = false
+
+        func run() async throws {
+            let resolved = try Secrets.resolve(self.target, manifest: self.manifest)
+            let contract = resolved.kind.contract(backend: resolved.stack.backend)
+            let declared = try ConfigSync.readDeclared(
+                config: ConfigSync.configURL(
+                    for: resolved.service, in: resolved.stack, manifestPath: resolved.manifestPath),
+                secrets: ConfigSync.secretsURL(
+                    for: resolved.service, in: resolved.stack, manifestPath: resolved.manifestPath))
+            let values = VaultRegistrar.documentSecrets(in: declared, contract: contract)
+
+            print("  \(resolved.stack.name)/\(resolved.service.name), \(values.count) secret(s):")
+            for name in values.keys.sorted() { print("    \(name)") }
+            guard !values.isEmpty else { return }
+            guard !self.dryRun else {
+                print("  dry run; vault was not called")
+                return
+            }
+
+            guard let session = VaultSession.read() else { throw RotationRefusal.noVaultSession }
+            let app = declared[VaultRegistrar.appNameKey] ?? resolved.service.name
+            let baseURL = declared[VaultRegistrar.urlKey].flatMap { $0.isEmpty ? nil : $0 }
+                ?? VaultAdmin.defaultBaseURL
+            let vault = VaultAdmin(baseURL: baseURL, session: session)
+            let held = try await vault.setSecrets(app: app, values: values)
+            print("  \(app) now holds \(held.joined(separator: " + "))")
         }
     }
 

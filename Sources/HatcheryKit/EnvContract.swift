@@ -18,6 +18,9 @@ public struct EnvContract: Sendable, Equatable {
     public var ignored: Set<String>
     /// Prefixes treated as `ignored`.
     public var ignoredPrefixes: [String]
+    /// The house services the declaration asks hatchery to wire the service into.
+    /// Only a kind file states one. The built-in kinds declare none, so this is empty for them.
+    public var capabilities: Set<String>
 
     public init(
         required: Set<String> = [],
@@ -25,7 +28,8 @@ public struct EnvContract: Sendable, Equatable {
         secret: Set<String> = [],
         retired: Set<String> = [],
         ignored: Set<String> = [],
-        ignoredPrefixes: [String] = []
+        ignoredPrefixes: [String] = [],
+        capabilities: Set<String> = []
     ) {
         self.required = required
         self.optional = optional
@@ -33,7 +37,14 @@ public struct EnvContract: Sendable, Equatable {
         self.retired = retired
         self.ignored = ignored
         self.ignoredPrefixes = ignoredPrefixes
+        self.capabilities = capabilities
     }
+
+    /// The one capability hatchery acts on: register the service with vault and put its secrets there.
+    public static let vaultCapability = "vault"
+
+    /// Whether the declaration asks for vault registration.
+    public var declaresVault: Bool { self.capabilities.contains(Self.vaultCapability) }
 
     public func isIgnored(_ key: String) -> Bool {
         ignored.contains(key) || ignoredPrefixes.contains { key.hasPrefix($0) }

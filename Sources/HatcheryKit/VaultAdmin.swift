@@ -12,10 +12,12 @@ public typealias HTTPExchange = @Sendable (URLRequest) async throws -> (Data, HT
 /// - `refused`: the session is not a signed-in admin's, or vault does not hold the app.
 /// - `failed`: vault answered a status this route does not document, with whatever it said.
 /// - `unreadable`: vault answered 200 without the field the route promises.
+/// - `badSecretName`: a name is not `[A-Z][A-Z0-9_]{0,63}`, which vault refuses the whole call for.
 public enum VaultAdminError: Error, CustomStringConvertible, Equatable {
     case refused(route: String, message: String)
     case failed(route: String, status: Int, message: String)
     case unreadable(route: String, field: String)
+    case badSecretName(String)
 
     public var description: String {
         switch self {
@@ -27,6 +29,9 @@ public enum VaultAdminError: Error, CustomStringConvertible, Equatable {
 
         case .unreadable(let route, let field):
             return "vault answered \(route) without a \(field), which the route promises"
+
+        case .badSecretName(let name):
+            return "\(name) is not a secret name of A-Z, 0-9 and underscores that starts with a letter"
         }
     }
 }
@@ -55,6 +60,29 @@ public struct VaultAdmin: Sendable {
         self.exchange = exchange
     }
 
+    /// Registers an app with vault, and answers the app key vault shows once.
+    ///
+    /// An app vault already holds is left exactly as it is, and this answers `nil` for it. Registration is
+    /// the one route that both creates an app and shows a key, so a caller that gets `nil` and still needs a
+    /// key asks ``rotateAppKey(app:)`` for one.
+    public func registerApp(slug: String, name: String? = nil) async throws -> String? {
+        let route = "/api/admin/apps"
+        var payload: [String: Any] = ["slug": slug]
+        if let name { payload["name"] = name }
+        do {
+            let answer = try await self.call(
+                route, method: "POST", body: try JSONSerialization.data(withJSONObject: payload))
+            guard let key = answer["app_key"] as? String, !key.isEmpty else {
+                throw VaultAdminError.unreadable(route: route, field: "app_key")
+            }
+            return key
+        } catch let error as VaultAdminError {
+            // 409 is vault saying it already holds the app, which is the answer a second run wants.
+            guard case .failed(_, 409, _) = error else { throw error }
+            return nil
+        }
+    }
+
     /// A new app key for an app, which stops the old one at the same moment.
     public func rotateAppKey(app: String) async throws -> String {
         let route = "/api/admin/apps/\(app)/key"
@@ -80,12 +108,40 @@ public struct VaultAdmin: Sendable {
 
     /// Stores a named secret on an app, which the app reads back with its app key at boot.
     public func setSecret(app: String, name: String, value: String) async throws {
-        let route = "/api/admin/apps/\(app)/secrets"
-        let body = try JSONSerialization.data(withJSONObject: [name: value])
+        let names = try await self.setSecrets(app: app, values: [name: value])
+        guard names.contains(name) else {
+            throw VaultAdminError.unreadable(route: Self.secretsRoute(app), field: "names")
+        }
+    }
+
+    /// Merges named secrets into an app's document, and answers every name the document then holds.
+    ///
+    /// A merge and not a replacement, because the document is the app's whole boot environment and a caller
+    /// setting one key must not take the rest away. The names are checked before the call, so one bad name
+    /// says which name it was rather than arriving as a 400 that names a route.
+    @discardableResult
+    public func setSecrets(app: String, values: [String: String]) async throws -> [String] {
+        if let bad = values.keys.sorted().first(where: { !Self.isValidSecretName($0) }) {
+            throw VaultAdminError.badSecretName(bad)
+        }
+        let route = Self.secretsRoute(app)
+        let body = try JSONSerialization.data(withJSONObject: values)
         let answer = try await self.call(route, method: "PUT", body: body)
-        guard let names = answer["names"] as? [String], names.contains(name) else {
+        guard let names = answer["names"] as? [String] else {
             throw VaultAdminError.unreadable(route: route, field: "names")
         }
+        return names
+    }
+
+    static func secretsRoute(_ app: String) -> String { "/api/admin/apps/\(app)/secrets" }
+
+    /// A legal secret name is `[A-Z][A-Z0-9_]{0,63}`, which is vault's own rule for one.
+    /// The shape is an environment variable's, because that is where the value lands in the app that reads it.
+    public static func isValidSecretName(_ name: String) -> Bool {
+        guard (1...64).contains(name.count), let first = name.first, ("A"..."Z").contains(first) else {
+            return false
+        }
+        return name.allSatisfy { ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "_" }
     }
 
     /// One admin call, with the session as a cookie and the answer decoded as a JSON object.

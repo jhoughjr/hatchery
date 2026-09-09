@@ -14,6 +14,9 @@ public struct KindFile: Codable, Sendable, Equatable {
     public var environment: [String: EnvEntry]
     public var runner: [String: JSONValue]?
     public var bootstrap: [String]?
+    /// The house services this kind asks hatchery to wire it into, `vault` being the one that exists.
+    /// Absent on every kind file written before it, which is why nothing here is required to carry it.
+    public var capabilities: [String]?
 
     /// A path the service persists across a redeploy, and the reason it must.
     public struct Mount: Codable, Sendable, Equatable {
@@ -65,7 +68,8 @@ public struct KindFile: Codable, Sendable, Equatable {
         storage: [Mount]? = nil,
         environment: [String: EnvEntry] = [:],
         runner: [String: JSONValue]? = nil,
-        bootstrap: [String]? = nil
+        bootstrap: [String]? = nil,
+        capabilities: [String]? = nil
     ) {
         self.kind = kind
         self.summary = summary
@@ -77,10 +81,12 @@ public struct KindFile: Codable, Sendable, Equatable {
         self.environment = environment
         self.runner = runner
         self.bootstrap = bootstrap
+        self.capabilities = capabilities
     }
 
     private enum CodingKeys: String, CodingKey {
         case kind, summary, image, port, healthcheck, notes, storage, environment, runner, bootstrap
+        case capabilities
     }
 
     /// `notes` decodes a single string or a list, so a one-line declaration needs no array wrapper.
@@ -96,6 +102,7 @@ public struct KindFile: Codable, Sendable, Equatable {
             try container.decodeIfPresent([String: EnvEntry].self, forKey: .environment) ?? [:]
         self.runner = try container.decodeIfPresent([String: JSONValue].self, forKey: .runner)
         self.bootstrap = try container.decodeIfPresent([String].self, forKey: .bootstrap)
+        self.capabilities = try container.decodeIfPresent([String].self, forKey: .capabilities)
 
         if let single = try? container.decode(String.self, forKey: .notes) {
             self.notes = [single]
@@ -116,6 +123,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         try container.encode(environment, forKey: .environment)
         try container.encodeIfPresent(runner, forKey: .runner)
         try container.encodeIfPresent(bootstrap, forKey: .bootstrap)
+        try container.encodeIfPresent(capabilities, forKey: .capabilities)
     }
 }
 
@@ -170,7 +178,9 @@ extension KindFile {
             }
         }
         let optional = Set(environment.keys).subtracting(required)
-        return EnvContract(required: required, optional: optional, secret: secret)
+        return EnvContract(
+            required: required, optional: optional, secret: secret,
+            capabilities: Set(self.capabilities ?? []))
     }
 }
 

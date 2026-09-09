@@ -326,6 +326,9 @@ struct Box: AsyncParsableCommand {
             help: "The service name for a crontab job, when the command's basename is not the desired name.")
         var name: String?
 
+        @Flag(name: .long, help: "Skip the vault registration a kind file's vault capability asks for.")
+        var noVault: Bool = false
+
         func run() async throws {
             guard !refreshConfig || replace else {
                 throw ValidationError("--refresh-config asks what --replace decides; pass both")
@@ -413,6 +416,14 @@ struct Box: AsyncParsableCommand {
             print("  wrote \(written.count) file(s)")
             try result.manifest.write(to: manifestPath)
             print("  manifest updated")
+
+            let contract = resolved.kindFile?.contract(backend: spec.backend)
+            if !noVault, VaultStep.wanted(contract: contract), let contract {
+                try await VaultStep.run(
+                    service: result.service, in: spec, manifestPath: manifestPath,
+                    contract: contract, dryRun: false)
+            }
+
             if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
             print("")
             print("  next, in \(spec.tofu?.directory ?? "the stack directory"): \(result.importCommand)")
@@ -1263,6 +1274,9 @@ struct Service: AsyncParsableCommand {
         @Flag(name: .long, help: "Mint a fresh signing key instead of sharing the stack's.")
         var mintKeypair: Bool = false
 
+        @Flag(name: .long, help: "Skip the vault registration a gated service would otherwise get.")
+        var noVault: Bool = false
+
         @Flag(name: .long, help: "Show what would be written without writing anything.")
         var dryRun: Bool = false
 
@@ -1319,6 +1333,14 @@ struct Service: AsyncParsableCommand {
             }
 
             if dryRun {
+                let contract = EnvContract.contract(
+                    for: result.service.kind, backend: spec.backend,
+                    registry: KindRegistry(manifestPath: manifest))
+                if !noVault, VaultStep.wanted(gated: gated, contract: contract), let contract {
+                    try await VaultStep.run(
+                        service: result.service, in: spec, manifestPath: manifest,
+                        contract: contract, dryRun: true)
+                }
                 print("  dry run; nothing written")
                 return
             }
@@ -1328,6 +1350,15 @@ struct Service: AsyncParsableCommand {
 
             try result.manifest.write(to: manifest)
             print("  manifest updated")
+
+            let contract = EnvContract.contract(
+                for: result.service.kind, backend: spec.backend,
+                registry: KindRegistry(manifestPath: manifest))
+            if !noVault, VaultStep.wanted(gated: gated, contract: contract), let contract {
+                try await VaultStep.run(
+                    service: result.service, in: spec, manifestPath: manifest,
+                    contract: contract, dryRun: false)
+            }
 
             // Scaffolding mints secrets — a signing key among them. This is exactly the write
             // that went unsealed before, so it seals before anything else can go wrong.
