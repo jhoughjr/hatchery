@@ -16,8 +16,8 @@ struct Secrets: AsyncParsableCommand {
             fetched per use is not config at all and needs no restart. A shared bearer invalidates every \
             holder at once, so a rotation names its holders before it turns the value over.
 
-            The vault session is read from VAULT_SESSION in the environment and never from an argument, \
-            because an argument lands in the shell history and in ps.
+            The vault credential is the operator token this machine signed in with, and never an argument, \
+            because an argument lands in the shell history and in ps. Run hatchery vault login to get one.
             """,
         subcommands: [Holders.self, Rotate.self, Sync.self]
     )
@@ -166,16 +166,19 @@ struct Secrets: AsyncParsableCommand {
                 print("  nothing changed. Run it again with --yes to execute this plan.")
                 return
             }
-            let session: String
+            let credential: VaultAdminCredential
             if plans.contains(where: { $0.rotation.issuer.needsVaultSession }) {
-                guard let read = VaultSession.read() else { throw RotationRefusal.noVaultSession }
-                session = read
+                guard let resolved = VaultAdminCredential.resolve() else {
+                    throw RotationRefusal.noVaultSession
+                }
+                credential = resolved
             } else {
-                session = ""
+                // No plan here reaches vault, so no call carries this and the empty value is never sent.
+                credential = .session("")
             }
 
             let executor = RotationExecutor(
-                vault: VaultAdmin(session: session),
+                vault: VaultAdmin(credential: credential),
                 secrets: .onDisk(at: Secrets.secretsURL(for: resolved)),
                 dokkuTargets: Secrets.dokkuTargets(for: resolved),
                 adminTargets: Secrets.adminTargets(for: resolved))
@@ -204,7 +207,7 @@ struct Secrets: AsyncParsableCommand {
                 keys: the app key never goes into the document it opens, and the URL is how the app finds \
                 vault before it has read anything.
 
-                The session is read from VAULT_SESSION in the environment and never from an argument.
+                The credential is the operator token this machine signed in with, and never an argument.
                 """
         )
 
@@ -235,11 +238,13 @@ struct Secrets: AsyncParsableCommand {
                 return
             }
 
-            guard let session = VaultSession.read() else { throw RotationRefusal.noVaultSession }
             let app = declared[VaultRegistrar.appNameKey] ?? resolved.service.name
             let baseURL = declared[VaultRegistrar.urlKey].flatMap { $0.isEmpty ? nil : $0 }
                 ?? VaultAdmin.defaultBaseURL
-            let vault = VaultAdmin(baseURL: baseURL, session: session)
+            guard let credential = VaultAdminCredential.resolve(vault: baseURL) else {
+                throw RotationRefusal.noVaultSession
+            }
+            let vault = VaultAdmin(baseURL: baseURL, credential: credential)
             let held = try await vault.setSecrets(app: app, values: values)
             print("  \(app) now holds \(held.joined(separator: " + "))")
         }

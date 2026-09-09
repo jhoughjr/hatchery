@@ -36,28 +36,64 @@ public enum VaultAdminError: Error, CustomStringConvertible, Equatable {
     }
 }
 
+/// Who vault says a credential is.
+///
+/// `tokenName` is the label the operator token was signed in under, and it is absent for a browser session, which
+/// carries no label of its own.
+public struct VaultIdentity: Sendable, Equatable {
+    public var email: String
+    public var tokenName: String?
+
+    public init(email: String, tokenName: String? = nil) {
+        self.email = email
+        self.tokenName = tokenName
+    }
+}
+
 /// Vault's admin routes, which mint the values a rotation issues.
 ///
 /// Every route here answers its value once. Vault stores only the sealed form, so a value not written down in
 /// the same breath is a value nobody can read again, which is why the executor records before it tells a holder.
 ///
-/// The gate is a signed-in admin's `vault_session` cookie, read from the environment by ``VaultSession``.
+/// The gate is a ``VaultAdminCredential``: an operator token as a bearer, or a signed-in admin's browser session as a
+/// cookie.
 public struct VaultAdmin: Sendable {
     public static let defaultBaseURL = "https://vault.jimmyhoughjr.net"
     public static let sessionCookie = "vault_session"
 
     private let baseURL: String
-    private let session: String
+    private let credential: VaultAdminCredential
     private let exchange: HTTPExchange
 
+    public init(
+        baseURL: String = VaultAdmin.defaultBaseURL,
+        credential: VaultAdminCredential,
+        exchange: @escaping HTTPExchange = VaultAdmin.live
+    ) {
+        self.baseURL = baseURL
+        self.credential = credential
+        self.exchange = exchange
+    }
+
+    /// The same routes reached with a browser session alone, for a caller that holds one and no token.
     public init(
         baseURL: String = VaultAdmin.defaultBaseURL,
         session: String,
         exchange: @escaping HTTPExchange = VaultAdmin.live
     ) {
-        self.baseURL = baseURL
-        self.session = session
-        self.exchange = exchange
+        self.init(
+            baseURL: baseURL, credential: .session(session), exchange: exchange)
+    }
+
+    /// Who vault says the credential is, which is how sign-in confirms itself and how `vault status` reads.
+    public func whoami() async throws -> VaultIdentity {
+        let route = "/api/admin/whoami"
+        let answer = try await self.call(route, method: "GET", body: nil)
+        guard let email = answer["email"] as? String, !email.isEmpty else {
+            throw VaultAdminError.unreadable(route: route, field: "email")
+        }
+        let label = (answer["token_name"] as? String) ?? (answer["token"] as? String) ?? ""
+        return VaultIdentity(email: email, tokenName: label.isEmpty ? nil : label)
     }
 
     /// Registers an app with vault, and answers the app key vault shows once.
@@ -144,17 +180,18 @@ public struct VaultAdmin: Sendable {
         return name.allSatisfy { ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "_" }
     }
 
-    /// One admin call, with the session as a cookie and the answer decoded as a JSON object.
+    /// One admin call, with the credential in its own header and the answer decoded as a JSON object.
     ///
-    /// The session travels as a cookie header rather than as a bearer, because that is the credential vault's
-    /// admin gate reads: it verifies the signed-in admin's own browser session and knows no other admin token.
+    /// The credential decides the header, because vault's admin gate now reads two: an operator token as a bearer, and
+    /// a signed-in admin's browser session as a cookie.
     private func call(_ route: String, method: String, body: Data?) async throws -> [String: Any] {
         guard let url = URL(string: self.baseURL + route) else {
             throw VaultAdminError.unreadable(route: route, field: "address")
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue("\(Self.sessionCookie)=\(self.session)", forHTTPHeaderField: "Cookie")
+        request.setValue(
+            self.credential.headerValue, forHTTPHeaderField: self.credential.headerName)
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = body

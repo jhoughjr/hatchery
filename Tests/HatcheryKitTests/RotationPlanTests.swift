@@ -187,12 +187,12 @@ struct VaultSessionTests {
         #expect(VaultSession.read(from: ["VAULT_SESSION": "   "]) == nil)
     }
 
-    @Test("the refusal for a missing session carries the browser recipe")
+    @Test("the refusal for a missing credential carries the sign-in recipe")
     func refusalCarriesTheRecipe() {
         let text = RotationRefusal.noVaultSession.description
 
-        #expect(text.contains("VAULT_SESSION"))
-        #expect(text.contains("devtools > Application > Cookies > vault_session"))
+        #expect(text.contains("no vault credential"))
+        #expect(text.contains("run: hatchery vault login"))
     }
 
     @Test("only the vault issuers need a session")
