@@ -138,11 +138,32 @@ public struct Scanner: Sendable {
         if docker.status == 0, !version.isEmpty {
             return (.host, normalizedTarget)
         }
+        // A host with a job supervisor but no docker or dokku still runs jobs.
+        let uname = await self.run("uname -s", on: normalizedTarget)
+        guard uname.status == 0, let platform = HostPlatform.named(uname.standardOutput) else {
+            throw ScanError.noProviderAnswered(
+                target: target!,
+                tried: [
+                    "dokku: \(box) did not answer apps:list (\(probe.combined))",
+                    "host: \(normalizedTarget) did not answer docker info (\(docker.combined))",
+                    "host: \(normalizedTarget) did not answer uname -s (\(uname.combined))",
+                ])
+        }
+        let supervisor: CommandOutput
+        if platform == .darwin {
+            supervisor = await self.run("launchctl print gui/$(id -u)", on: normalizedTarget)
+        } else {
+            supervisor = await self.run("systemctl --user show-environment", on: normalizedTarget)
+        }
+        if supervisor.status == 0 {
+            return (.host, normalizedTarget)
+        }
         throw ScanError.noProviderAnswered(
             target: target!,
             tried: [
                 "dokku: \(box) did not answer apps:list (\(probe.combined))",
                 "host: \(normalizedTarget) did not answer docker info (\(docker.combined))",
+                "host: \(normalizedTarget) did not answer supervisor (\(supervisor.combined))",
             ])
     }
 

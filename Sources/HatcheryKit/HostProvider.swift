@@ -43,15 +43,27 @@ public struct HostProvider: ServiceProvider {
     /// What the box answers `uname -s`, or `nil` when it does not answer at all.
     ///
     /// The read is one ssh round trip and the answer never changes, so `stack new` records it on the stack's settings
-    /// and every later scaffold reads the declaration instead of the box.
+    /// and every later scaffold reads the declaration instead of the box. For local targets, the command runs on this
+    /// machine without SSH.
     public static func platform(
         of host: String, execute: @escaping CommandExecutor
     ) async -> HostPlatform? {
         guard !host.isEmpty else { return nil }
-        let output = try? await execute(
-            Preflight.sshCommand(host: host, remote: ["uname", "-s"]), nil)
+        let argv: [String]
+        if Self.isLocalTarget(host) {
+            argv = ["sh", "-c", "uname -s"]
+        } else {
+            argv = Preflight.sshCommand(host: host, remote: ["uname", "-s"])
+        }
+        let output = try? await execute(argv, nil)
         guard let output, output.status == 0 else { return nil }
         return HostPlatform.named(output.standardOutput)
+    }
+
+    /// Whether a target refers to the local machine.
+    private static func isLocalTarget(_ target: String) -> Bool {
+        let normalized = target.trimmingCharacters(in: .whitespaces).lowercased()
+        return ["local", "localhost", "127.0.0.1"].contains(normalized)
     }
 
     /// A container's image is a field of its own declaration, not a variable a deploy moves.

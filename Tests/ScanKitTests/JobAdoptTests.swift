@@ -290,10 +290,9 @@ struct JobAdoptTests {
         }
 
         let commands = capturedCommands.value
-        #expect(commands.count == 1)
-        let command = commands[0]
-        #expect(command.contains("\"$HOME/.config/systemd/user/test.service\""))
-        #expect(command.contains("\"$HOME/.config/systemd/user/test.timer\""))
+        #expect(commands.count == 2)
+        #expect(commands[0].contains("\"$HOME/.config/systemd/user/test.service\""))
+        #expect(commands[1].contains("\"$HOME/.config/systemd/user/test.timer\""))
     }
 
     @Test("a local target builds commands with no ssh prefix")
@@ -314,11 +313,12 @@ struct JobAdoptTests {
         }
 
         let args = capturedArgs.value
-        #expect(args.count == 1)
-        let argv = args[0]
-        // Local target uses sh -c, not ssh
-        #expect(argv.first == "sh")
-        #expect(argv[1] == "-c")
-        #expect(!argv.contains("ssh"))
+        #expect(args.count == 2)
+        for argv in args {
+            // Local target uses sh -c, not ssh
+            #expect(argv.first == "sh")
+            #expect(argv[1] == "-c")
+            #expect(!argv.contains("ssh"))
+        }
     }
 }

@@ -339,7 +339,7 @@ public struct Adopter: Sendable {
     ///
     /// A Mac is asked for the label as given and then for the label with the estate's prefix, because a person
     /// naming a job at the command line names the service and not the reverse-domain label.
-    /// Linux is asked for the unit and its timer in one round trip, with a line between the two answers.
+    /// Linux is asked for the service, and then for its timer if one exists.
     public func job(
         named label: String, on box: String, platform: HostPlatform
     ) async throws -> ReadJob {
@@ -354,14 +354,13 @@ public struct Adopter: Sendable {
 
         case .linux:
             let units = "$HOME/.config/systemd/user"
-            let text = try await self.read(
-                "cat \"\(units)/\(label).service\"; echo '\(Self.unitMarker)'; "
-                    + "cat \"\(units)/\(label).timer\"",
+            let service = try await self.read(
+                "cat \"\(units)/\(label).service\"",
                 on: box, what: "a systemd user unit named \(label)")
-            let halves = text.components(separatedBy: Self.unitMarker)
-            let timer = halves.count > 1 ? halves[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            let timerCommand = "cat \"\(units)/\(label).timer\" 2>/dev/null || echo ''"
+            let timer = await self.readOptional(timerCommand, on: box)
             return try JobReader.unit(
-                named: label, service: halves[0], timer: timer.isEmpty ? nil : timer)
+                named: label, service: service, timer: timer.isEmpty ? nil : timer)
         }
     }
 
@@ -405,6 +404,11 @@ public struct Adopter: Sendable {
         {
             job.label = nil
         }
+
+        // Extract secrets from the job's command line before adding to the service.
+        let (cleanProgram, programSecrets) = Self.extractSecrets(from: job.program)
+        job.program = cleanProgram
+
         let service = ServiceSpec(
             name: read.name, kind: kind, image: "",
             configFile: "\(read.name).config.json",
@@ -414,10 +418,12 @@ public struct Adopter: Sendable {
             for: kind, backend: .host, registry: KindRegistry(manifestPath: manifestPath))
         let split = contract.map { ConfigSync.split(read.environment, by: $0) }
             ?? (config: read.environment, secrets: [:])
+        var jobSecrets = split.secrets
+        jobSecrets.merge(programSecrets) { _, new in new }
 
         var files = try HostProvider.jobFiles(
             for: service, platform: stack.platform,
-            environment: read.environment, secretKeys: Set(split.secrets.keys))
+            environment: read.environment, secretKeys: Set(jobSecrets.keys))
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -426,11 +432,11 @@ public struct Adopter: Sendable {
                 path: service.configFile,
                 contents: String(decoding: try encoder.encode(split.config), as: UTF8.self) + "\n",
                 role: .config))
-        if !split.secrets.isEmpty {
+        if !jobSecrets.isEmpty {
             files.append(
                 GeneratedFile(
                     path: "\(read.name).secrets.json",
-                    contents: String(decoding: try encoder.encode(split.secrets), as: UTF8.self) + "\n",
+                    contents: String(decoding: try encoder.encode(jobSecrets), as: UTF8.self) + "\n",
                     role: .config))
         }
 
@@ -458,6 +464,20 @@ public struct Adopter: Sendable {
         return output.standardOutput
     }
 
+    /// One command on the box, whose output is returned even if the command fails.
+    /// For local targets, the command runs on this machine without SSH.
+    private func readOptional(_ command: String, on box: String) async -> String {
+        do {
+            let argv = Self.isLocalTarget(box)
+                ? ["sh", "-c", command]
+                : ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box, command]
+            let output = try await self.execute(argv, nil)
+            return output.standardOutput
+        } catch {
+            return ""
+        }
+    }
+
     /// Whether a target refers to the local machine.
     static func isLocalTarget(_ target: String) -> Bool {
         let normalized = target.trimmingCharacters(in: .whitespaces).lowercased()
@@ -465,6 +485,52 @@ public struct Adopter: Sendable {
     }
 
     // MARK: parsing
+
+    /// Extracts credential flags and their values from a program's argument array.
+    /// Replaces the values with `${KEY}` references and returns both the cleaned program and a dictionary of secrets.
+    /// Flag names are upper-cased and dashes converted to underscores for the secret key.
+    static func extractSecrets(from program: [String]) -> (program: [String], secrets: [String: String]) {
+        let credentialFlags = [
+            "--token", "--password", "--secret", "--api-key", "--apikey", "--auth", "--key",
+        ]
+        var result = program
+        var secrets: [String: String] = [:]
+        var indexesToRemove: [Int] = []
+
+        for (index, argument) in result.enumerated() {
+            let parts = argument.split(separator: "=", maxSplits: 1)
+            let flag = parts.first.map(String.init) ?? ""
+            let flagLower = flag.lowercased()
+
+            guard credentialFlags.contains(flagLower) else { continue }
+
+            if parts.count == 2 {
+                // Format: --token=value
+                let value = String(parts[1])
+                let secretKey = Self.secretKeyName(for: flag)
+                secrets[secretKey] = value
+                result[index] = "\(flag)=${\(secretKey)}"
+            } else if index + 1 < result.count {
+                // Format: --token value
+                let value = result[index + 1]
+                let secretKey = Self.secretKeyName(for: flag)
+                secrets[secretKey] = value
+                result[index + 1] = "${\(secretKey)}"
+            }
+        }
+
+        return (result, secrets)
+    }
+
+    /// Converts a flag name to a secret key name.
+    /// `--token` becomes `TOKEN`, `--api-key` becomes `API_KEY`.
+    static func secretKeyName(for flag: String) -> String {
+        var name = flag
+        if name.hasPrefix("--") {
+            name = String(name.dropFirst(2))
+        }
+        return name.uppercased().replacingOccurrences(of: "-", with: "_")
+    }
 
     static func image(fromInspect json: String, app: String) -> String {
         struct Container: Decodable {
