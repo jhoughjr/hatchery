@@ -1012,7 +1012,7 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Port to listen on.")
     var port: Int = 7878
 
-    @Option(name: .long, help: "Require this token on every API request. Required to bind off-host.")
+    @Option(name: .long, help: "Require this token on every API request. Required to bind off-host. Reads from VAULT_URL, VAULT_APP, and VAULT_APP_KEY if absent.")
     var token: String?
 
     @Option(name: .long, help: "Seconds between server-side health polls. 0 turns the watcher off.")
@@ -1081,13 +1081,35 @@ struct Serve: AsyncParsableCommand {
             alert = AlertWebhook.sink(url: url)
         }
 
+        var resolvedToken = token
+        if resolvedToken == nil {
+            let env = ProcessInfo.processInfo.environment
+            if let vaultURL = env["VAULT_URL"], let vaultApp = env["VAULT_APP"], let vaultAppKey = env["VAULT_APP_KEY"] {
+                do {
+                    resolvedToken = try await VaultBootSecrets.fetch(
+                        baseURL: vaultURL,
+                        app: vaultApp,
+                        appKey: vaultAppKey,
+                        name: "HATCHERY_SERVE_TOKEN"
+                    )
+                    if resolvedToken != nil {
+                        FileHandle.standardError.write("serve: token from vault\n".data(using: .utf8) ?? Data())
+                    }
+                } catch VaultBootSecrets.FetchError.refused {
+                    throw ValidationError("vault refused the app key")
+                } catch {
+                    throw ValidationError("vault fetch failed: \(error)")
+                }
+            }
+        }
+
         let reporter = StatusReporter()
         let api = HatcheryAPI(
             loadManifest: load, saveManifest: save, manifestPath: { resolved },
             reporter: reporter,
             history: { transitionLog.recent(limit: $0) },
-            token: token)
-        let server = try WebServer(api: api, host: bind, port: port, hasToken: token != nil)
+            token: resolvedToken)
+        let server = try WebServer(api: api, host: bind, port: port, hasToken: resolvedToken != nil)
 
         if watchInterval > 0 {
             let watcher = HealthWatcher(
