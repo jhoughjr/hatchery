@@ -321,6 +321,11 @@ struct Box: AsyncParsableCommand {
             help: "With --replace, read the sidecar and the secrets file off the box again instead of keeping them.")
         var refreshConfig: Bool = false
 
+        @Option(
+            name: .long,
+            help: "The service name for a crontab job, when the command's basename is not the desired name.")
+        var name: String?
+
         func run() async throws {
             guard !refreshConfig || replace else {
                 throw ValidationError("--refresh-config asks what --replace decides; pass both")
@@ -346,7 +351,7 @@ struct Box: AsyncParsableCommand {
             let (provider, box) = try await scanner.identify(target)
             if provider == .host {
                 try await adoptContainer(
-                    box: box, manifestPath: manifestPath, manifest: parsed, dryRun: dryRun)
+                    box: box, manifestPath: manifestPath, manifest: parsed, dryRun: dryRun, name: self.name)
                 return
             }
             guard provider == .dokku else {
@@ -416,7 +421,7 @@ struct Box: AsyncParsableCommand {
         /// The container path: one inspect, the kind the registry knows under that name, and the same
         /// lock, dry run and write the dokku path uses.
         private func adoptContainer(
-            box: String, manifestPath: String, manifest parsed: StackManifest, dryRun: Bool
+            box: String, manifestPath: String, manifest parsed: StackManifest, dryRun: Bool, name: String?
         ) async throws {
             let adopter = Adopter()
             let facts: ContainerInspection
@@ -426,7 +431,7 @@ struct Box: AsyncParsableCommand {
                 // The daemon holds no container by that name, so the name is a job's. The two live on the same box
                 // and are told apart by which of the two answers, rather than by a flag a person has to remember.
                 try await adoptJob(
-                    box: box, manifestPath: manifestPath, manifest: parsed, dryRun: dryRun)
+                    box: box, manifestPath: manifestPath, manifest: parsed, dryRun: dryRun, name: name)
                 return
             } catch let error as AdoptError {
                 throw ValidationError(error.description)
@@ -505,7 +510,7 @@ struct Box: AsyncParsableCommand {
         /// Tofu is not asked about a job. The artifact is what the supervisor follows and the manifest is the
         /// declaration, so there is no import and no plan after this write.
         private func adoptJob(
-            box: String, manifestPath: String, manifest parsed: StackManifest, dryRun: Bool
+            box: String, manifestPath: String, manifest parsed: StackManifest, dryRun: Bool, name: String?
         ) async throws {
             guard let spec = parsed.stack(named: stack) else {
                 throw ValidationError(AdoptError.stackNotOnBox(stack: stack, box: box).description)
@@ -513,7 +518,7 @@ struct Box: AsyncParsableCommand {
             let adopter = Adopter()
             let read: ReadJob
             do {
-                read = try await adopter.job(named: app, on: box, platform: spec.platform)
+                read = try await adopter.job(named: app, on: box, platform: spec.platform, name: name)
             } catch let error as AdoptError {
                 throw ValidationError(error.description)
             }
@@ -559,6 +564,10 @@ struct Box: AsyncParsableCommand {
             print("  manifest updated")
             if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
             print("")
+            if app.hasPrefix("cron:") {
+                print("  the crontab line must be removed by hand once the timer is installed")
+                print("")
+            }
             print("  the artifact is the declaration; nothing on \(box) changes until it is installed")
         }
     }

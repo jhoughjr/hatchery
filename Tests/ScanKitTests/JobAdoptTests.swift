@@ -348,4 +348,49 @@ struct JobAdoptTests {
         let result = Scanner.parseCrontabLine(comment)
         #expect(result == nil)
     }
+
+    @Test("adopt adopts a crontab line by line number as a job")
+    func adoptsACrontabLine() async throws {
+        let crontabOutput = """
+            # Some comment
+            0 2 * * * /home/jimmy/bin/backup.sh >> /home/jimmy/.local/state/backup.log 2>&1
+            30 3 * * * ~/bin/opi-backup.sh >> ~/.local/state/opi-backup/cron.log 2>&1
+            # Another comment
+            """
+        let capturedCommands = LockedBox<[String]>([])
+        let mockExecutor: CommandExecutor = { argv, _ in
+            if let command = argv.last {
+                var current = capturedCommands.value
+                current.append(command)
+                capturedCommands.value = current
+            }
+            return CommandOutput(status: 0, standardOutput: crontabOutput, standardError: "")
+        }
+
+        let adopter = Adopter(execute: mockExecutor)
+        let read = try await adopter.job(
+            named: "cron:2", on: "example.com", platform: .linux, name: nil)
+
+        #expect(read.name == "opi-backup")
+        #expect(read.job.schedule == .at("*-*-* 03:30:00"))
+        #expect(read.job.program == ["~/bin/opi-backup.sh"])
+        #expect(read.job.keepAlive == false)
+        #expect(read.job.log?.hasSuffix("/.local/state/opi-backup/cron.log") ?? false)
+        #expect(read.environment.isEmpty)
+    }
+
+    @Test("adopt crontab with a custom name")
+    func adoptsCrontabLineWithCustomName() async throws {
+        let crontabOutput = "30 3 * * * ~/bin/opi-backup.sh >> ~/.local/state/opi-backup/cron.log 2>&1\n"
+        let mockExecutor: CommandExecutor = { argv, _ in
+            return CommandOutput(status: 0, standardOutput: crontabOutput, standardError: "")
+        }
+
+        let adopter = Adopter(execute: mockExecutor)
+        let read = try await adopter.job(
+            named: "cron:1", on: "example.com", platform: .linux, name: "my-backup")
+
+        #expect(read.name == "my-backup")
+        #expect(read.job.schedule == .at("*-*-* 03:30:00"))
+    }
 }
