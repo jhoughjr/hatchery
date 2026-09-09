@@ -1809,6 +1809,15 @@ struct Stack: ParsableCommand {
             }
 
             let resolvedHost = try HostRegistry.resolve(host, in: existing?.savedHosts ?? [:])
+            // A host stack learns its platform once, here, because the answer never changes and every later
+            // scaffold needs it. A box that will not say is left undeclared and reads as linux.
+            if kind == .host, values[BackendSetting.boxPlatform.key] == nil,
+                let platform = await HostProvider.platform(
+                    of: resolvedHost, execute: ShellRunner.liveExecutor)
+            {
+                values[BackendSetting.boxPlatform.key] = platform.rawValue
+                print("  platform \(platform.rawValue), from uname -s on the box")
+            }
             let planned = try bootstrapper.plan(
                 name: name, backend: kind, host: resolvedHost, tofuDir: tofuDir,
                 environment: Environment(rawValue: environment), settings: values,

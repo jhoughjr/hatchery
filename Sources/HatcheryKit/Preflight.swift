@@ -250,7 +250,7 @@ public struct Preflight: Sendable {
                 remedy: InstallHint.forTool("ssh")))
 
         guard let host, !host.isEmpty else {
-            for name in ["box reachable", "docker responds"] {
+            for name in ["box reachable", "docker responds", "platform"] {
                 checks.append(
                     PreflightCheck(
                         name: name, status: .skipped, detail: "no host given", remedy: nil))
@@ -268,7 +268,23 @@ public struct Preflight: Sendable {
             return checks
         }
         checks.append(await docker(host: host))
+        checks.append(await self.platform(host: host))
         return checks
+    }
+
+    /// Which supervisor this box runs jobs under.
+    ///
+    /// A box that answers neither `Darwin` nor `Linux` is not a failure. Nothing but a job needs the answer, and a
+    /// stack that records none is read as linux.
+    private func platform(host: String) async -> PreflightCheck {
+        guard let platform = await HostProvider.platform(of: host, execute: self.execute) else {
+            return PreflightCheck(
+                name: "platform", status: .skipped,
+                detail: "the box did not name itself Darwin or Linux",
+                remedy: "pass --set platform=darwin or --set platform=linux to declare it")
+        }
+        return PreflightCheck(
+            name: "platform", status: .ok, detail: platform.rawValue, remedy: nil)
     }
 
     private func docker(host: String) async -> PreflightCheck {

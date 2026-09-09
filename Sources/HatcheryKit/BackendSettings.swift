@@ -156,6 +156,17 @@ extension BackendSetting {
             """,
         defaultValue: nil)
 
+    /// What the box answered `uname -s` at preflight, as `darwin` or `linux`.
+    ///
+    /// A stack that names nothing here reads as `linux`. The value decides which supervisor a job is scaffolded onto,
+    /// so it is a declared fact of the stack rather than something the scaffolder asks the box for every run.
+    public static let boxPlatform = BackendSetting(
+        key: "platform",
+        label: "Box platform",
+        help: "The operating system the box runs: darwin for a Mac, linux for anything else. Read from `uname -s` at preflight.",
+        required: false,
+        defaultValue: nil)
+
     public static let boxKey = BackendSetting(
         key: "ssh_key",
         label: "SSH private key",

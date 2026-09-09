@@ -21,6 +21,9 @@ public struct ServiceKind: RawRepresentable, Hashable, Sendable, Codable {
     /// A container the box runs that no platform owns: dnsmasq, a Postgres cluster, a CI runner.
     /// Its contract comes from a kind file of its name, or it is empty.
     public static let container = ServiceKind(rawValue: "container")
+    /// A program a supervisor runs outside docker: a launchd agent on a Mac, a systemd user unit on Linux.
+    /// A schedule makes it periodic, and no schedule means the supervisor keeps it alive.
+    public static let job = ServiceKind(rawValue: "job")
 
     /// Every kind the estate deploys.
     ///
@@ -28,7 +31,7 @@ public struct ServiceKind: RawRepresentable, Hashable, Sendable, Codable {
     /// exactly. Keeping them character-identical makes the eventual join a mapping rather than
     /// a translation table, so do not rename one without the other.
     public static let all: [ServiceKind] = [
-        .mwserver, .paymentGateway, .communicationGateway, .gsxGateway, .bucket, .edge, .container,
+        .mwserver, .paymentGateway, .communicationGateway, .gsxGateway, .bucket, .edge, .container, .job,
     ]
 
     /// Kinds hatchery ships an environment contract for today.
@@ -84,6 +87,27 @@ public enum Backend: String, Codable, Sendable, CaseIterable {
 extension Backend {
     public var isSelfHosted: Bool {
         self == .dokku || self == .host
+    }
+}
+
+/// The operating system a box runs, which decides which supervisor a job is scaffolded onto.
+///
+/// A Mac is a host backend like any other box. The two differ only in who runs a program that is not a container:
+/// launchd on a Mac, and systemd on Linux.
+///
+/// - `darwin`: a Mac, whose jobs are launchd agents under `~/Library/LaunchAgents`.
+/// - `linux`: any other box, whose jobs are systemd user units under `~/.config/systemd/user`.
+public enum HostPlatform: String, Codable, Sendable, CaseIterable {
+    case darwin
+    case linux
+
+    /// The platform `uname -s` names, or `nil` when the answer is neither of the two.
+    public static func named(_ uname: String) -> HostPlatform? {
+        switch uname.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "darwin": return .darwin
+        case "linux": return .linux
+        default: return nil
+        }
     }
 }
 

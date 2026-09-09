@@ -37,7 +37,21 @@ public struct HostProvider: ServiceProvider {
     }
 
     public var settings: [BackendSetting] {
-        [.boxHost, .boxKey]
+        [.boxHost, .boxKey, .boxPlatform]
+    }
+
+    /// What the box answers `uname -s`, or `nil` when it does not answer at all.
+    ///
+    /// The read is one ssh round trip and the answer never changes, so `stack new` records it on the stack's settings
+    /// and every later scaffold reads the declaration instead of the box.
+    public static func platform(
+        of host: String, execute: @escaping CommandExecutor
+    ) async -> HostPlatform? {
+        guard !host.isEmpty else { return nil }
+        let output = try? await execute(
+            Preflight.sshCommand(host: host, remote: ["uname", "-s"]), nil)
+        guard let output, output.status == 0 else { return nil }
+        return HostPlatform.named(output.standardOutput)
     }
 
     /// A container's image is a field of its own declaration, not a variable a deploy moves.

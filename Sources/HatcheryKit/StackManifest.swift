@@ -108,6 +108,151 @@ public struct ContainerSpec: Codable, Sendable, Equatable {
     }
 }
 
+/// When a supervisor starts a job again.
+///
+/// The three cases are the three shapes launchd and systemd both hold, so a schedule read off one host
+/// scaffolds onto the other without a translation table.
+///
+/// - `interval`: every so many seconds, which is `StartInterval` and `OnUnitActiveSec`.
+/// - `calendar`: at a wall-clock time, which is `StartCalendarInterval` and an `OnCalendar` this type builds.
+/// - `at`: a supervisor's own calendar expression, kept verbatim because only that supervisor can read it.
+public enum Schedule: Sendable, Equatable {
+    case interval(seconds: Int)
+    case calendar(minute: Int?, hour: Int?, day: Int?, weekday: Int?)
+    case at(String)
+}
+
+extension Schedule: Codable {
+    enum CodingKeys: String, CodingKey {
+        case interval, calendar, at
+    }
+
+    enum CalendarKeys: String, CodingKey {
+        case minute, hour, day, weekday
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        if let seconds = try values.decodeIfPresent(Int.self, forKey: .interval) {
+            self = .interval(seconds: seconds)
+            return
+        }
+        if let expression = try values.decodeIfPresent(String.self, forKey: .at) {
+            self = .at(expression)
+            return
+        }
+        let calendar = try values.nestedContainer(keyedBy: CalendarKeys.self, forKey: .calendar)
+        self = .calendar(
+            minute: try calendar.decodeIfPresent(Int.self, forKey: .minute),
+            hour: try calendar.decodeIfPresent(Int.self, forKey: .hour),
+            day: try calendar.decodeIfPresent(Int.self, forKey: .day),
+            weekday: try calendar.decodeIfPresent(Int.self, forKey: .weekday))
+    }
+
+    /// One key per case, so a schedule in a manifest reads as `{"interval": 30}` rather than a wrapper.
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .interval(let seconds):
+            try values.encode(seconds, forKey: .interval)
+
+        case .at(let expression):
+            try values.encode(expression, forKey: .at)
+
+        case .calendar(let minute, let hour, let day, let weekday):
+            var calendar = values.nestedContainer(keyedBy: CalendarKeys.self, forKey: .calendar)
+            try calendar.encodeIfPresent(minute, forKey: .minute)
+            try calendar.encodeIfPresent(hour, forKey: .hour)
+            try calendar.encodeIfPresent(day, forKey: .day)
+            try calendar.encodeIfPresent(weekday, forKey: .weekday)
+        }
+    }
+}
+
+/// How a host runs one program that is not a container: the shape a launchd plist and a systemd user unit share.
+///
+/// A job is the estate's other half. A container carries its contract in its run arguments, and a job carries its
+/// contract in a plist or a unit that nobody reads until it stops working.
+/// Nothing here is a secret: the environment stays in the sidecar and the secrets file, as it does for every other service.
+public struct JobSpec: Codable, Sendable, Equatable {
+    /// The command and its arguments, as the supervisor passes them to `exec`.
+    public var program: [String]
+    public var workingDirectory: String?
+    /// When the supervisor starts it again. Absent means the job is kept alive instead.
+    public var schedule: Schedule?
+    /// Whether the supervisor restarts the program when it exits. True for a job with no schedule.
+    public var keepAlive: Bool
+    /// The file the supervisor writes stdout and stderr to. Absent means the journal on Linux, and nothing on a Mac.
+    public var log: String?
+    /// Whether the supervisor starts the program as it loads the job, rather than waiting for the first schedule.
+    public var runAtLoad: Bool
+    /// Whether the job reads its secret keys from vault at start.
+    ///
+    /// When true the scaffold writes no secret-marked key into the plist or the unit, and the program collects them
+    /// itself with the app key. A plist value is readable by every account on the machine, and `ps` shows an argument
+    /// to all of them, so vault is the only place a job's secret belongs.
+    public var environmentFromVault: Bool
+    /// The supervisor's own name for the job, when it is not the label this kind would give it.
+    /// A Mac names an agent `net.jimmyhoughjr.<service>` unless this says otherwise, and Linux names a unit `<service>`.
+    public var label: String?
+
+    public init(
+        program: [String],
+        workingDirectory: String? = nil,
+        schedule: Schedule? = nil,
+        keepAlive: Bool? = nil,
+        log: String? = nil,
+        runAtLoad: Bool = false,
+        environmentFromVault: Bool = false,
+        label: String? = nil
+    ) {
+        self.program = program
+        self.workingDirectory = workingDirectory
+        self.schedule = schedule
+        self.keepAlive = keepAlive ?? (schedule == nil)
+        self.log = log
+        self.runAtLoad = runAtLoad
+        self.environmentFromVault = environmentFromVault
+        self.label = label
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case program, workingDirectory, schedule, keepAlive, log, runAtLoad, environmentFromVault, label
+    }
+
+    /// A manifest that names no `keepAlive` reads as kept alive when it declares no schedule, which is the same
+    /// answer the initializer gives.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let schedule = try values.decodeIfPresent(Schedule.self, forKey: .schedule)
+        self.program = try values.decode([String].self, forKey: .program)
+        self.workingDirectory = try values.decodeIfPresent(String.self, forKey: .workingDirectory)
+        self.schedule = schedule
+        self.keepAlive = try values.decodeIfPresent(Bool.self, forKey: .keepAlive) ?? (schedule == nil)
+        self.log = try values.decodeIfPresent(String.self, forKey: .log)
+        self.runAtLoad = try values.decodeIfPresent(Bool.self, forKey: .runAtLoad) ?? false
+        self.environmentFromVault = try values.decodeIfPresent(Bool.self, forKey: .environmentFromVault) ?? false
+        self.label = try values.decodeIfPresent(String.self, forKey: .label)
+    }
+
+    /// The two flags are written only when they are true, so an adopted job adds no key a reader has to skip.
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(self.program, forKey: .program)
+        try values.encodeIfPresent(self.workingDirectory, forKey: .workingDirectory)
+        try values.encodeIfPresent(self.schedule, forKey: .schedule)
+        try values.encode(self.keepAlive, forKey: .keepAlive)
+        try values.encodeIfPresent(self.log, forKey: .log)
+        if self.runAtLoad {
+            try values.encode(true, forKey: .runAtLoad)
+        }
+        if self.environmentFromVault {
+            try values.encode(true, forKey: .environmentFromVault)
+        }
+        try values.encodeIfPresent(self.label, forKey: .label)
+    }
+}
+
 /// One database inside a declared postgres cluster.
 ///
 /// A declared database is a `hatchery db provision` that has already run: the role, the database and the
@@ -173,6 +318,11 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// Box adopt gives a container its own name as its kind, so the image is what says this is a cluster.
     /// Absent for every other service, and left out of the encoded manifest when absent.
     public var databases: [DatabaseSpec]?
+    /// How the host runs this service, for a service that is a job rather than a container.
+    ///
+    /// A service carries this or `container`, never both: a program under a supervisor is not a container, and the
+    /// two scaffolds write different artifacts. Absent for every other service, and left out of the encoded manifest.
+    public var job: JobSpec?
 
     public init(
         name: String,
@@ -186,7 +336,8 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         deploymentID: String? = nil,
         imageVariable: String? = nil,
         container: ContainerSpec? = nil,
-        databases: [DatabaseSpec]? = nil
+        databases: [DatabaseSpec]? = nil,
+        job: JobSpec? = nil
     ) {
         self.name = name
         self.kind = kind
@@ -201,6 +352,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         self.imageVariable = imageVariable
         self.container = container
         self.databases = databases
+        self.job = job
     }
 
     /// Whether this service is a postgres cluster, which is the one service a database is declared on.
@@ -247,6 +399,13 @@ extension StackSpec {
     public var hostAddress: String? {
         guard let host, !host.isEmpty else { return nil }
         return host.split(separator: "@").last.map(String.init)
+    }
+
+    /// The operating system this stack's box runs, from the setting preflight recorded.
+    ///
+    /// A stack that never learned reads as `linux`, which is what every box in the estate was before a Mac joined.
+    public var platform: HostPlatform {
+        HostPlatform(rawValue: self.settings?[BackendSetting.boxPlatform.key] ?? "") ?? .linux
     }
 }
 
@@ -476,6 +635,10 @@ public enum ManifestError: Error, CustomStringConvertible, Equatable {
     case missingHost(stack: String)
     /// A service declares databases and runs something other than postgres.
     case databasesOffCluster(stack: String, service: String)
+    /// A service declares both a container and a job, and it can only be one of the two.
+    case jobAndContainer(stack: String, service: String)
+    /// A service declares a job on a backend that has no supervisor hatchery can reach.
+    case jobOffHost(stack: String, service: String, backend: String)
 
     public var description: String {
         switch self {
@@ -489,6 +652,11 @@ public enum ManifestError: Error, CustomStringConvertible, Equatable {
             return "stack '\(stack)' targets dokku but declares no host"
         case .databasesOffCluster(let stack, let service):
             return "service '\(service)' in stack '\(stack)' declares databases, and its image is not postgres"
+        case .jobAndContainer(let stack, let service):
+            return "service '\(service)' in stack '\(stack)' declares both a container and a job; it is one or the other"
+        case .jobOffHost(let stack, let service, let backend):
+            return "service '\(service)' in stack '\(stack)' declares a job, and \(backend) runs no supervisor "
+                + "hatchery reaches; a job lives on a host stack"
         }
     }
 }
@@ -525,6 +693,15 @@ extension StackManifest {
             }
             for service in stack.services where service.databases != nil && !service.isPostgresCluster {
                 throw ManifestError.databasesOffCluster(stack: stack.name, service: service.name)
+            }
+            for service in stack.services where service.job != nil {
+                guard service.container == nil else {
+                    throw ManifestError.jobAndContainer(stack: stack.name, service: service.name)
+                }
+                guard stack.backend == .host else {
+                    throw ManifestError.jobOffHost(
+                        stack: stack.name, service: service.name, backend: stack.backend.rawValue)
+                }
             }
         }
     }

@@ -293,12 +293,12 @@ struct HostProviderTests {
         #expect(!bareTF.contents.contains("network_mode"))
     }
 
-    @Test("the backend declares the two things it needs, and answers for itself")
+    @Test("the backend declares the three things it needs, and answers for itself")
     func backendSurface() {
         let provider = HostProvider()
         #expect(provider.backend == .host)
         #expect(provider.authorable)
-        #expect(provider.settings.map(\.key) == ["host", "ssh_key"])
+        #expect(provider.settings.map(\.key) == ["host", "ssh_key", "platform"])
         #expect(provider.imageVariableName(for: ScaffoldRequest(stack: hostStack(), service: lanDNS())) == nil)
         #expect(Providers.support(for: .host).backend == .host)
         #expect(Backend.host.isSelfHosted)

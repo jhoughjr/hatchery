@@ -135,7 +135,7 @@ final class LifecycleTests: XCTestCase {
             ServiceKind.all.map(\.rawValue),
             [
                 "mwserver", "payment-gateway", "communication-gateway", "gsx-gateway", "bucket",
-                "edge", "container",
+                "edge", "container", "job",
             ]
         )
     }
