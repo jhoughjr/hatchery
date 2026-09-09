@@ -32,6 +32,9 @@ public struct Declaration: Codable, Sendable, Equatable {
         /// What the box does with this container when it stops, for a service on the `host` backend.
         /// Absent for every other backend, where the platform owns the answer.
         public var restart: String?
+        /// What this service holds inside it, for a service that is a postgres cluster.
+        /// Absent for every other service, so a document of dokku apps gains no empty field.
+        public var databases: [Database]?
         /// Empty when the service is clean. Filled by ``DeclarationAudit``, never by a manifest write.
         public var findings: [Finding] = []
     }
@@ -78,6 +81,7 @@ public struct Declaration: Codable, Sendable, Equatable {
                             domains: service.domains,
                             healthPath: service.healthPath,
                             restart: service.container?.restart,
+                            databases: service.databases.map { $0.map(Database.init) },
                             findings: findings["\(stack.name)/\(service.name)"] ?? []
                         )
                     }

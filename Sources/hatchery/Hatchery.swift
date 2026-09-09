@@ -1644,9 +1644,17 @@ struct Config: ParsableCommand {
             var errors = 0
             var warnings = 0
 
+            let audit = DeclarationAudit()
+
             for spec in stacks {
                 print("\(spec.name)  [\(spec.backend.rawValue)]")
                 for service in spec.services {
+                    // A cluster is asked what is inside it before it is asked about its keys, because a
+                    // database the declaration does not name is a fact about the cluster and not the sidecar.
+                    for finding in await audit.databaseFindings(for: service, in: spec) {
+                        warnings += 1
+                        print("  \(service.name): warning: \(finding.code): \(finding.text)")
+                    }
                     do {
                         let config = try await reader.config(for: service, in: spec)
                         guard let contract = EnvContract.contract(for: service.kind, backend: spec.backend, registry: registry) else {

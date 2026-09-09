@@ -185,6 +185,13 @@ public struct StatusReporter: Sendable {
                 service: service.name, state: .degraded, reasons: ["docker reports it \(health)"])
         }
 
+        // A cluster with declared databases answers a better question than a HEALTHCHECK does. A postgres
+        // that is up and missing the database a service connects to is a broken service, and docker calls it
+        // healthy. The declaration is what says which databases have to be there.
+        if service.isPostgresCluster, !service.declaredDatabases.isEmpty {
+            return await self.clusterStatus(of: service, on: box)
+        }
+
         if let path = service.healthPath, !path.isEmpty,
             let request = Self.containerProbe(path: path, container: container, box: box)
         {
@@ -208,6 +215,47 @@ public struct StatusReporter: Sendable {
                 reasons: ["running, and it reports no readiness of its own"])
         }
         return ServiceHealth(service: service.name, state: .ready, reasons: [])
+    }
+
+    /// Grades a postgres cluster against the databases its declaration says are inside it.
+    ///
+    /// `pg_isready` is asked first, because a cluster still starting up answers no select at all and would
+    /// otherwise read as a cluster missing every database it declares.
+    private func clusterStatus(of service: ServiceSpec, on box: String) async -> ServiceHealth {
+        let reader = ClusterReader(run: self.clusterRunner)
+        guard await reader.isReady(service.name, on: box) else {
+            return ServiceHealth(
+                service: service.name, state: .degraded,
+                reasons: ["the container is running, and postgres is not accepting connections"])
+        }
+        guard let inventory = try? await reader.inventory(of: service.name, on: box) else {
+            return ServiceHealth(
+                service: service.name, state: .responding,
+                reasons: ["postgres is accepting connections, and the cluster did not answer pg_database"])
+        }
+
+        let held = Set(inventory.databases.map(\.name))
+        let missing = service.declaredDatabases.map(\.name).filter { !held.contains($0) }
+        guard missing.isEmpty else {
+            return ServiceHealth(
+                service: service.name, state: .degraded,
+                reasons: ["the cluster does not hold \(missing.joined(separator: ", "))"])
+        }
+        return ServiceHealth(service: service.name, state: .ready, reasons: [])
+    }
+
+    /// The cluster reads go through this reporter's own executor, so a test that replaces the executor
+    /// replaces them too and no test opens an ssh connection.
+    private var clusterRunner: CommandRunner {
+        let execute = self.execute
+        return { argv in
+            let output = try await execute(argv, nil)
+            guard output.status == 0 else {
+                throw CommandFailure(
+                    command: argv.first ?? "command", status: output.status, message: output.combined)
+            }
+            return Data(output.standardOutput.utf8)
+        }
     }
 
     /// Where to reach a container's health path.

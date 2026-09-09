@@ -137,10 +137,10 @@ struct Database: AsyncParsableCommand {
         )
 
         @Option(name: .long, help: "The postgres container. Created when absent, if --network is given.")
-        var server: String
+        var server: String?
 
         @Option(name: .long, help: "Database to create.")
-        var database: String
+        var database: String?
 
         @Option(name: .long, help: "Role that owns the database. Defaults to the database name.")
         var owner: String?
@@ -149,7 +149,15 @@ struct Database: AsyncParsableCommand {
         var appUser: String?
 
         @Option(name: .long, help: "Shell account that can docker-exec the server, as user@host, or `local`.")
-        var admin: String
+        var admin: String?
+
+        @Option(
+            name: .long,
+            help: "Assert every database a manifest declares on one cluster, as <stack>/<service>. The stack's host is the admin channel.")
+        var declared: String?
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest, with --declared.")
+        var manifest: String = "hatchery.json"
 
         @Option(name: .long, help: "The box the server runs on. Used to reach a dokku-managed postgres.")
         var host: String = ""
@@ -166,6 +174,14 @@ struct Database: AsyncParsableCommand {
         var publish: Int?
 
         func run() async throws {
+            if let declared {
+                try await self.runDeclared(declared)
+                return
+            }
+            guard let server, let database, let admin else {
+                throw ValidationError(
+                    "provision needs --server, --database and --admin, or --declared <stack>/<service>")
+            }
             let owner = owner ?? database
             // These names reach a shell on the box. The planner folds the names it derives;
             // names given by hand are checked here instead, so this door is not the weak one.
@@ -203,6 +219,47 @@ struct Database: AsyncParsableCommand {
             let values = plan.values(credentials)
             for key in values.keys.sorted() {
                 print("\(key)=\(values[key] ?? "")")
+            }
+        }
+
+        /// Asserts every database a cluster's declaration names, and leaves the ones that are already there.
+        ///
+        /// An assertion over an existing role re-mints its password, which would lock out the service already
+        /// connecting with it, so a database the cluster holds is reported and skipped. The passwords of the
+        /// ones this does mint are printed, on the same rule the single-database door prints them.
+        private func runDeclared(_ target: String) async throws {
+            guard let parsed = DeclaredProvision.target(target) else {
+                throw ValidationError("--declared takes <stack>/<service>, for example box/rookery-pg")
+            }
+            let manifestPath = try ManifestLocator.resolve(manifest)
+            let data = try Data(contentsOf: URL(fileURLWithPath: manifestPath))
+            let loaded = try StackManifest.decode(from: data)
+
+            let resolved: (service: ServiceSpec, host: String)
+            do {
+                resolved = try DeclaredProvision.resolve(parsed, in: loaded)
+            } catch let refusal as DeclaredProvision.Refusal {
+                throw ValidationError(refusal.description)
+            }
+
+            let inventory = try await ClusterReader().inventory(
+                of: resolved.service.name, on: resolved.host)
+            let requests = DeclaredProvision.requests(for: resolved.service, in: inventory)
+
+            print("\(resolved.service.name) on \(resolved.host)")
+            let provisioner = DatabaseProvisioner()
+            for request in requests where request.exists {
+                print("  \(request.database)  already there")
+            }
+            for request in requests where !request.exists {
+                let (credentials, report) = try await provisioner.provision(
+                    request.plan, host: resolved.host, admin: resolved.host)
+                print("  \(request.database)  asserted")
+                for line in report { print("    \(line)") }
+                let values = request.plan.values(credentials)
+                for key in values.keys.sorted() {
+                    print("    \(key)=\(values[key] ?? "")")
+                }
             }
         }
     }
