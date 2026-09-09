@@ -1,0 +1,70 @@
+gui/501/net.jimmyhoughjr.roost-node-report = {
+	active count = 1
+	path = /Users/jimmyhoughjr/Library/LaunchAgents/net.jimmyhoughjr.roost-node-report.plist
+	type = LaunchAgent
+	state = running
+
+	program = /Users/jimmyhoughjr/repos/roost/bin/node-report.sh
+	arguments = {
+		/Users/jimmyhoughjr/repos/roost/bin/node-report.sh
+	}
+
+	stderr path = /tmp/roost-node-report.log
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.nRmhG1N1k0/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => net.jimmyhoughjr.roost-node-report
+	}
+
+	domain = gui/501 [100024]
+	asid = 100024
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 3482
+	pid = 92466
+	immediate reason = interval
+	forks = 14
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = 0
+
+	resource coalition = {
+		ID = 826
+		type = resource
+		state = active
+		active count = 1
+		name = net.jimmyhoughjr.roost-node-report
+	}
+
+	jetsam coalition = {
+		ID = 827
+		type = jetsam
+		state = active
+		active count = 1
+		name = net.jimmyhoughjr.roost-node-report
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+	run interval = 30 seconds
+
+	properties = runatload | inferred program | managed LWCR
+}

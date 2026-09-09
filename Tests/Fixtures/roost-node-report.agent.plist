@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>net.jimmyhoughjr.roost-node-report</string>
+  <key>ProgramArguments</key><array><string>/Users/jimmyhoughjr/repos/roost/bin/node-report.sh</string></array>
+  <key>StartInterval</key><integer>30</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>/tmp/roost-node-report.log</string>
+</dict></plist>

@@ -42,6 +42,9 @@ public enum AdoptError: Error, Equatable, CustomStringConvertible {
     case unreadable(String)
     /// A container is declared on a stack of the `host` backend, and the named stack is on another.
     case stackNotOnHost(stack: String, backend: String, box: String)
+    /// The file the box holds under a job's name is neither a launchd agent nor a systemd unit.
+    /// The value names the shape that was expected.
+    case notAJobFile(String)
 
     public var description: String {
         switch self {
@@ -62,6 +65,8 @@ public enum AdoptError: Error, Equatable, CustomStringConvertible {
                 stack. A host stack for \(box) is made with: hatchery stack new <name> --backend host \
                 --host \(box) --tofu-dir <dir>
                 """
+        case .notAJobFile(let shape):
+            return "the box holds no job by that name; adopt reads \(shape)"
         }
     }
 }
@@ -321,6 +326,128 @@ public struct Adopter: Sendable {
         return AdoptResult(
             service: scaffolded.service, files: files, manifest: scaffolded.manifest,
             importCommand: "tofu import docker_container.\(tofuIdentifier(for: facts.name)) \(facts.id)")
+    }
+
+    // MARK: jobs
+
+    /// The plist or the unit the box holds under this name, read as one job.
+    ///
+    /// A Mac is asked for the label as given and then for the label with the estate's prefix, because a person
+    /// naming a job at the command line names the service and not the reverse-domain label.
+    /// Linux is asked for the unit and its timer in one round trip, with a line between the two answers.
+    public func job(
+        named label: String, on box: String, platform: HostPlatform
+    ) async throws -> ReadJob {
+        switch platform {
+        case .darwin:
+            let agents = "$HOME/Library/LaunchAgents"
+            let text = try await self.read(
+                "cat '\(agents)/\(label).plist' 2>/dev/null "
+                    + "|| cat '\(agents)/net.jimmyhoughjr.\(label).plist'",
+                on: box, what: "a launchd agent named \(label)")
+            return try JobReader.agent(Data(text.utf8))
+
+        case .linux:
+            let units = "$HOME/.config/systemd/user"
+            let text = try await self.read(
+                "cat '\(units)/\(label).service'; echo '\(Self.unitMarker)'; "
+                    + "cat '\(units)/\(label).timer' 2>/dev/null || true",
+                on: box, what: "a systemd user unit named \(label)")
+            let halves = text.components(separatedBy: Self.unitMarker)
+            let timer = halves.count > 1 ? halves[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            return try JobReader.unit(
+                named: label, service: halves[0], timer: timer.isEmpty ? nil : timer)
+        }
+    }
+
+    /// The line between a unit and its timer, in the one command both are asked for.
+    static let unitMarker = "--- hatchery timer ---"
+
+    /// The plan for a job: the service joins `stackName` on the host backend, and the plist or the unit is the
+    /// declaration's artifact beside it.
+    ///
+    /// No tofu file is written and no import is needed. A job's declaration is the manifest, and the artifact is what
+    /// the box follows, so `importCommand` is empty and the caller prints nothing after the write.
+    /// The supervisor's own environment lands in the sidecar, split by whatever contract the kind has, and a
+    /// secret-marked key reaches neither the plist nor the unit.
+    public func planJob(
+        _ read: ReadJob, kind: ServiceKind, into stackName: String, box: String,
+        manifest: StackManifest, manifestPath: String, replacing: Bool = false
+    ) throws -> AdoptResult {
+        guard let stack = manifest.stack(named: stackName) else {
+            throw AdoptError.stackNotOnBox(stack: stackName, box: box)
+        }
+        guard stack.backend == .host else {
+            throw AdoptError.stackNotOnHost(
+                stack: stackName, backend: stack.backend.rawValue, box: box)
+        }
+        guard let host = stack.hostAddress, box.hasSuffix(host) else {
+            throw AdoptError.stackNotOnBox(stack: stackName, box: box)
+        }
+        for declared in manifest.stacks
+        where declared.services.contains(where: { $0.name == read.name }) {
+            guard replacing, declared.name == stackName else {
+                throw AdoptError.alreadyDeclared(app: read.name, stack: declared.name)
+            }
+        }
+
+        var job = read.job
+        // A label the estate itself would write adds nothing to the declaration, and one it would not is the only
+        // handle the box answers to.
+        if job.label == HostProvider.jobLabel(
+            for: ServiceSpec(name: read.name, kind: kind, image: "", configFile: ""),
+            platform: stack.platform)
+        {
+            job.label = nil
+        }
+        let service = ServiceSpec(
+            name: read.name, kind: kind, image: "",
+            configFile: "\(read.name).config.json",
+            job: job)
+
+        let contract = EnvContract.contract(
+            for: kind, backend: .host, registry: KindRegistry(manifestPath: manifestPath))
+        let split = contract.map { ConfigSync.split(read.environment, by: $0) }
+            ?? (config: read.environment, secrets: [:])
+
+        var files = try HostProvider.jobFiles(
+            for: service, platform: stack.platform,
+            environment: read.environment, secretKeys: Set(split.secrets.keys))
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        files.append(
+            GeneratedFile(
+                path: service.configFile,
+                contents: String(decoding: try encoder.encode(split.config), as: UTF8.self) + "\n",
+                role: .config))
+        if !split.secrets.isEmpty {
+            files.append(
+                GeneratedFile(
+                    path: "\(read.name).secrets.json",
+                    contents: String(decoding: try encoder.encode(split.secrets), as: UTF8.self) + "\n",
+                    role: .config))
+        }
+
+        var updated = manifest
+        for index in updated.stacks.indices where updated.stacks[index].name == stackName {
+            updated.stacks[index].services.removeAll { $0.name == read.name }
+            updated.stacks[index].services.append(service)
+        }
+        return AdoptResult(service: service, files: files, manifest: updated, importCommand: "")
+    }
+
+    /// One command on the box, whose output is the answer and whose nonzero status is a refusal.
+    private func read(_ command: String, on box: String, what: String) async throws -> String {
+        let output: CommandOutput
+        do {
+            output = try await self.execute(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box, command], nil)
+        } catch {
+            throw AdoptError.unreadable(what)
+        }
+        guard output.status == 0 else { throw AdoptError.notAJobFile(what) }
+        return output.standardOutput
     }
 
     // MARK: parsing

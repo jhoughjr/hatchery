@@ -235,6 +235,31 @@ struct Box: AsyncParsableCommand {
             if !orphans.isEmpty {
                 print("  unattached databases: \(orphans.joined(separator: ", "))")
             }
+
+            guard !inventory.jobs.isEmpty else { return }
+            // A job is claimed by the label the box knows it as, and a manifest that gave it no label declares it
+            // under the estate's own prefix, so both names are asked about.
+            let declared = Set(
+                (parsed?.stacks ?? [])
+                    .flatMap(\.services)
+                    .filter { $0.job != nil }
+                    .flatMap { [$0.name, $0.job?.label].compactMap { $0 } })
+            print("")
+            print("  \(inventory.jobs.count) job(s) under the account")
+            for job in inventory.jobs {
+                let claimed = declared.contains(job.label)
+                    || declared.contains(JobReader.name(forLabel: job.label))
+                var line = "  \(job.label.padding(toLength: 40, withPad: " ", startingAt: 0))"
+                line += (claimed ? "declared" : "undeclared")
+                    .padding(toLength: 12, withPad: " ", startingAt: 0)
+                line += (job.schedule ?? "kept alive")
+                    .padding(toLength: 22, withPad: " ", startingAt: 0)
+                line += job.running ? "running" : "idle"
+                if let exit = job.lastExit, exit != 0 { line += "  last exit \(exit)" }
+                print(line)
+                print("      \(job.program)")
+                if let log = job.log { print("      log \(log)") }
+            }
         }
     }
     /// A find from a scan becomes a manifest entry.
@@ -394,6 +419,12 @@ struct Box: AsyncParsableCommand {
             let facts: ContainerInspection
             do {
                 facts = try await adopter.container(named: app, on: box)
+            } catch AdoptError.notOnBox {
+                // The daemon holds no container by that name, so the name is a job's. The two live on the same box
+                // and are told apart by which of the two answers, rather than by a flag a person has to remember.
+                try await adoptJob(
+                    box: box, manifestPath: manifestPath, manifest: parsed, dryRun: dryRun)
+                return
             } catch let error as AdoptError {
                 throw ValidationError(error.description)
             } catch let error as ContainerInspectionError {
@@ -464,6 +495,67 @@ struct Box: AsyncParsableCommand {
             print("")
             print("  next, in \(spec.tofu?.directory ?? "the stack directory"): tofu plan")
             print("  the declaration carries its own import block, so nothing else binds it")
+        }
+
+        /// The job path: the plist or the unit the box holds, read into a spec and written beside the stack.
+        ///
+        /// Tofu is not asked about a job. The artifact is what the supervisor follows and the manifest is the
+        /// declaration, so there is no import and no plan after this write.
+        private func adoptJob(
+            box: String, manifestPath: String, manifest parsed: StackManifest, dryRun: Bool
+        ) async throws {
+            guard let spec = parsed.stack(named: stack) else {
+                throw ValidationError(AdoptError.stackNotOnBox(stack: stack, box: box).description)
+            }
+            let adopter = Adopter()
+            let read: ReadJob
+            do {
+                read = try await adopter.job(named: app, on: box, platform: spec.platform)
+            } catch let error as AdoptError {
+                throw ValidationError(error.description)
+            }
+
+            let registry = KindRegistry(manifestPath: manifestPath)
+            let named = try? registry.kindFile(for: ServiceKind(rawValue: read.name))
+            let resolvedKind = named.map { ServiceKind(rawValue: $0.kind) } ?? kind?.kind ?? .job
+
+            print("\(read.label) on \(box)")
+            print("  name     \(read.name)")
+            print("  kind     \(resolvedKind.rawValue)\(named != nil ? " (from a kind file)" : "")")
+            print("  platform \(spec.platform.rawValue)")
+            print("  program  \(read.job.program.joined(separator: " "))")
+            print("  when     \(read.job.schedule.map(Declaration.words(for:)) ?? "kept alive")")
+            print("  log      \(read.job.log ?? "none declared")")
+            print("  env      \(read.environment.count) key(s)")
+
+            let result: AdoptResult
+            do {
+                result = try adopter.planJob(
+                    read, kind: resolvedKind, into: stack, box: box, manifest: parsed,
+                    manifestPath: manifestPath, replacing: replace)
+            } catch let error as AdoptError {
+                throw ValidationError(error.description)
+            } catch let error as ProviderError {
+                throw ValidationError(error.description)
+            }
+            for file in result.files {
+                print("  write \(file.path)")
+            }
+            if dryRun {
+                print("  dry run; nothing written")
+                return
+            }
+
+            let scaffolded = ScaffoldResult(
+                service: result.service, files: result.files, secrets: [], manifest: result.manifest)
+            let overwriting = replace ? Set(result.files.map(\.path)) : []
+            let written = try Scaffolder().write(scaffolded, in: spec, overwriting: overwriting)
+            print("  wrote \(written.count) file(s)")
+            try result.manifest.write(to: manifestPath)
+            print("  manifest updated")
+            if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
+            print("")
+            print("  the artifact is the declaration; nothing on \(box) changes until it is installed")
         }
     }
 }

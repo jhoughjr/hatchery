@@ -10,6 +10,10 @@ public enum FindingCode {
     public static let undeclaredDatabase = "undeclared-database"
     /// The cluster holds a role that owns no database and answers to no declared database.
     public static let orphanRole = "orphan-role"
+    /// A job carries a credential in its plist or its unit, where every account on the machine can read it.
+    public static let secretInPlist = "secret-in-plist"
+    /// A job writes its log where nothing reads it back: under `/tmp`, or nowhere at all.
+    public static let noLog = "no-log"
 }
 
 /// Fills the declaration's findings by comparing what each service declares against what it runs with.
@@ -54,6 +58,12 @@ public struct DeclarationAudit: Sendable {
         // A cluster is asked about first, because its findings are about what is inside it rather than
         // about its sidecar, and a cluster's sidecar is usually just the image's own environment.
         var findings = await self.databaseFindings(for: service, in: stack)
+        // A job's findings are all the job has. Its environment lives in no container, so the live read below
+        // would ask the daemon about a name it has never heard of, once per job, and learn nothing.
+        if service.job != nil {
+            findings += Self.jobFindings(for: service)
+            return findings
+        }
 
         // The sidecar's own content, never the merge with the secrets file. A key still here is a key
         // `hatchery config split` has not moved yet.
@@ -101,6 +111,54 @@ public struct DeclarationAudit: Sendable {
             findings.append(stale)
         }
         return findings
+    }
+
+    /// The flags that carry a credential on a command line.
+    ///
+    /// A plist and a unit both hold the whole command line, and `ps` shows it to every account on the machine.
+    /// A value behind one of these flags is therefore already read by anything that cares to look.
+    static let credentialFlags = [
+        "--token", "--password", "--secret", "--api-key", "--apikey", "--auth", "--key",
+    ]
+
+    /// What a job's own declaration says that is wrong with the saying of it.
+    ///
+    /// This reads no box. Both findings are true of the manifest alone, which is what lets a manifest write publish
+    /// them and what makes them the two a person can fix without ssh.
+    static func jobFindings(for service: ServiceSpec) -> [Declaration.Finding] {
+        guard let job = service.job else { return [] }
+        var findings: [Declaration.Finding] = []
+
+        if let flag = Self.credentialFlag(in: job.program) {
+            findings.append(
+                Declaration.Finding(
+                    code: FindingCode.secretInPlist,
+                    text: "the job passes \(flag) on its command line, where ps shows it to every account "
+                        + "on the machine; set environmentFromVault and read it from vault at start"))
+        }
+        let path = job.log ?? ""
+        if path.isEmpty || path.hasPrefix("/tmp/") {
+            findings.append(
+                Declaration.Finding(
+                    code: FindingCode.noLog,
+                    text: path.isEmpty
+                        ? "the job names no log, so nothing off the box can read what it did"
+                        : "the job logs to \(path), which is cleared on reboot"))
+        }
+        return findings
+    }
+
+    /// The first credential flag that carries a value, or `nil` when the command line names none.
+    ///
+    /// A flag at the very end of the arguments carries nothing, so it is a flag rather than a credential.
+    static func credentialFlag(in program: [String]) -> String? {
+        for (index, argument) in program.enumerated() {
+            let name = argument.split(separator: "=", maxSplits: 1).first.map(String.init) ?? argument
+            guard Self.credentialFlags.contains(name.lowercased()) else { continue }
+            if argument.contains("=") { return name }
+            if index + 1 < program.count { return name }
+        }
+        return nil
     }
 
     /// What the cluster holds that its declaration does not account for.

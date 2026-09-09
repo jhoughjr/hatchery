@@ -35,6 +35,16 @@ public struct Declaration: Codable, Sendable, Equatable {
         /// What this service holds inside it, for a service that is a postgres cluster.
         /// Absent for every other service, so a document of dokku apps gains no empty field.
         public var databases: [Database]?
+        /// When the supervisor starts this job again, in the words a reader can act on.
+        /// Absent for a job the supervisor keeps alive, and for every service that is not a job.
+        public var schedule: String?
+        /// Whether the supervisor restarts this job when it exits. Absent for every service that is not a job.
+        public var keepAlive: Bool?
+        /// Where this job writes stdout and stderr. Absent for a job that names no path, which is the `no-log` finding.
+        public var log: String?
+        /// The operating system of the box this job runs on, which says which supervisor holds it.
+        /// Absent for every service that is not a job.
+        public var platform: String?
         /// Empty when the service is clean. Filled by ``DeclarationAudit``, never by a manifest write.
         public var findings: [Finding] = []
     }
@@ -82,11 +92,27 @@ public struct Declaration: Codable, Sendable, Equatable {
                             healthPath: service.healthPath,
                             restart: service.container?.restart,
                             databases: service.databases.map { $0.map(Database.init) },
+                            schedule: service.job?.schedule.map(Declaration.words(for:)),
+                            keepAlive: service.job?.keepAlive,
+                            log: service.job?.log,
+                            platform: service.job.map { _ in stack.platform.rawValue },
                             findings: findings["\(stack.name)/\(service.name)"] ?? []
                         )
                     }
                 )
             }
+        }
+    }
+
+    /// A schedule as one short phrase, for the coop's column and for a person reading the document.
+    ///
+    /// The manifest is what a machine reads. This is the same fact said once, in the form a calendar expression
+    /// already has and a bare second count does not.
+    public static func words(for schedule: Schedule) -> String {
+        switch schedule {
+        case .interval(let seconds): return "every \(seconds)s"
+        case .calendar: return HostProvider.onCalendar(schedule)
+        case .at(let expression): return expression
         }
     }
 

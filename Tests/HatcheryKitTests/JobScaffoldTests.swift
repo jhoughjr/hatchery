@@ -36,7 +36,7 @@ final class JobScaffoldTests: XCTestCase {
         let files = try HostProvider.jobFiles(for: nodeReport(), platform: .darwin)
         XCTAssertEqual(files.count, 1)
         XCTAssertEqual(
-            files[0].path, "Library/LaunchAgents/net.jimmyhoughjr.roost-node-report.plist")
+            files[0].path, "net.jimmyhoughjr.roost-node-report.plist")
         XCTAssertEqual(
             files[0].contents,
             """
@@ -66,10 +66,8 @@ final class JobScaffoldTests: XCTestCase {
 
     func testTheUnitAndTimerForAScheduledJobAreWrittenWhole() throws {
         let files = try HostProvider.jobFiles(for: dokkuReconcile(), platform: .linux)
-        XCTAssertEqual(files.map(\.path), [
-            ".config/systemd/user/dokku-reconcile.service",
-            ".config/systemd/user/dokku-reconcile.timer",
-        ])
+        XCTAssertEqual(
+            files.map(\.path), ["dokku-reconcile.service", "dokku-reconcile.timer"])
         XCTAssertEqual(
             files[0].contents,
             """
@@ -116,7 +114,7 @@ final class JobScaffoldTests: XCTestCase {
                 log: "/var/log/hatchery-serve.log", runAtLoad: true))
 
         let unit = try HostProvider.jobFiles(for: serve, platform: .linux)
-        XCTAssertEqual(unit.map(\.path), [".config/systemd/user/hatchery-serve.service"])
+        XCTAssertEqual(unit.map(\.path), ["hatchery-serve.service"])
         XCTAssertTrue(unit[0].contents.contains("Type=simple"), unit[0].contents)
         XCTAssertTrue(unit[0].contents.contains("Restart=always"), unit[0].contents)
         XCTAssertTrue(unit[0].contents.contains("WantedBy=default.target"), unit[0].contents)

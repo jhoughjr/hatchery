@@ -1,0 +1,17 @@
+[Unit]
+Description=Reconcile dokku apps and the proxy every ten minutes
+
+[Timer]
+# Absolute schedule, and deliberately not OnBootSec+OnUnitActiveSec: those
+# anchor off boot and last activation, so a timer enabled long after boot that
+# has never fired computes no next elapse and silently never runs. A watchdog
+# that never runs is the failure it exists to catch. Learned here already, by
+# the phoenix runner watchdog.
+OnCalendar=*:0/10
+# Replay a window missed while the box was down, which is exactly the case this
+# exists for.
+Persistent=true
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

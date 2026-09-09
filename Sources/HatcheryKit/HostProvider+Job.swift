@@ -19,7 +19,8 @@ extension HostProvider {
     ///
     /// A scheduled job on Linux is two files: systemd separates what to run from when to run it, and only the timer
     /// is enabled. launchd holds both in the one agent.
-    public static func jobFileNames(for service: ServiceSpec, platform: HostPlatform) -> [String] {
+    /// ``jobFiles(for:platform:environment:secretKeys:)`` answers in this same order, so the two zip together.
+    public static func jobDestinations(for service: ServiceSpec, platform: HostPlatform) -> [String] {
         guard let job = service.job else { return [] }
         switch platform {
         case .darwin:
@@ -50,7 +51,10 @@ extension HostProvider {
             throw ProviderError.missingDetail("a job spec on service '\(service.name)'")
         }
         let declared = environment.filter { !secretKeys.contains($0.key) }.sorted { $0.key < $1.key }
-        let names = Self.jobFileNames(for: service, platform: platform)
+        // The artifact is committed beside the stack under its bare name, and the installer is what knows where on
+        // the box it goes. A path relative to the box's home would make no sense in the repository.
+        let names = Self.jobDestinations(for: service, platform: platform)
+            .map { ($0 as NSString).lastPathComponent }
         switch platform {
         case .darwin:
             let contents = try Self.launchAgent(

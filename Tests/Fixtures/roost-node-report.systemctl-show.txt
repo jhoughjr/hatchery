@@ -1,0 +1,5 @@
+Result=success
+ExecMainExitTimestamp=Wed 2026-09-09 07:21:08 CDT
+ExecMainStatus=0
+ActiveState=inactive
+SubState=dead

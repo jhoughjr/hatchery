@@ -56,12 +56,18 @@ public struct Inventory: Sendable, Equatable {
     /// target cannot answer: a dokku box without the postgres plugin keeps its databases
     /// as plain containers, which the dokku user cannot list.
     public let databases: [String]?
+    /// The jobs the account's own supervisor holds, for a box. Empty for a platform, which runs none.
+    public let jobs: [FoundJob]
 
-    public init(provider: Backend, target: String, apps: [FoundApp], databases: [String]?) {
+    public init(
+        provider: Backend, target: String, apps: [FoundApp], databases: [String]?,
+        jobs: [FoundJob] = []
+    ) {
         self.provider = provider
         self.target = target
         self.apps = apps
         self.databases = databases
+        self.jobs = jobs
     }
 }
 
@@ -240,6 +246,7 @@ public struct Scanner: Sendable {
     /// builder are dropped before the inspect: dokku's provider declares the first, and the second is
     /// scratch space for a build.
     private func scanHost(box: String) async throws -> Inventory {
+        let jobs = await self.jobs(on: box)
         let listed = await self.run("docker ps --format '{{.Names}}'", on: box)
         guard listed.status == 0 else { throw ScanError.providerRefused(listed.combined) }
         let names = listed.standardOutput
@@ -248,13 +255,32 @@ public struct Scanner: Sendable {
             .filter { !$0.isEmpty && ContainerNames.isDeclarable($0) }
 
         guard !names.isEmpty else {
-            return Inventory(provider: .host, target: box, apps: [], databases: nil)
+            return Inventory(provider: .host, target: box, apps: [], databases: nil, jobs: jobs)
         }
 
         let inspected = await self.run(
             "docker inspect \(names.joined(separator: " "))", on: box)
         guard inspected.status == 0 else { throw ScanError.providerRefused(inspected.combined) }
-        return try Self.hostInventory(from: Data(inspected.standardOutput.utf8), box: box)
+        let inventory = try Self.hostInventory(from: Data(inspected.standardOutput.utf8), box: box)
+        return Inventory(
+            provider: .host, target: box, apps: inventory.apps, databases: inventory.databases,
+            jobs: jobs)
+    }
+
+    /// Every job the account's own supervisor holds on this box.
+    ///
+    /// The platform is asked for first, because launchd and systemd are read by different commands and the target
+    /// says nothing about which one answers. A box that will not name itself has no jobs to list rather than a
+    /// failed scan: the containers are the scan's first answer, and a supervisor that does not answer is a gap the
+    /// listing shows by being empty.
+    public func jobs(on box: String) async -> [FoundJob] {
+        let uname = await self.run("uname -s", on: box)
+        guard uname.status == 0, let platform = HostPlatform.named(uname.standardOutput) else {
+            return []
+        }
+        let read = await self.run(Self.jobCommand(platform: platform), on: box)
+        guard read.status == 0 else { return [] }
+        return Self.jobInventory(from: read.standardOutput, platform: platform)
     }
 
     /// The inventory a `docker inspect` answer describes. Split out so a test can hand it recorded bytes.

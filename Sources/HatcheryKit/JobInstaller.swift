@@ -22,11 +22,13 @@ public struct JobInstaller: Sendable {
     public static func steps(
         for service: ServiceSpec, platform: HostPlatform, files: [GeneratedFile]
     ) -> [String] {
-        var lines = files.map { file -> String in
+        // The scaffold answers bare names and the destinations answer paths under the box's home, in the same order.
+        let destinations = HostProvider.jobDestinations(for: service, platform: platform)
+        var lines = zip(files, destinations).map { file, destination -> String in
             let encoded = Data(file.contents.utf8).base64EncodedString()
-            let path = "$HOME/\(file.path)"
-            let directory = (file.path as NSString).deletingLastPathComponent
-            return "mkdir -p \"$HOME/\(directory)\" && printf %s '\(encoded)' | base64 --decode > \"\(path)\""
+            let directory = (destination as NSString).deletingLastPathComponent
+            return "mkdir -p \"$HOME/\(directory)\" && printf %s '\(encoded)' | base64 --decode "
+                + "> \"$HOME/\(destination)\""
         }
         let label = HostProvider.jobLabel(for: service, platform: platform)
         switch platform {

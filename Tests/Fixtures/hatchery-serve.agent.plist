@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.jimmyhoughjr.hatchery-serve</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jimmyhoughjr/.local/bin/hatchery</string>
+        <string>serve</string>
+        <string>--manifest</string>
+        <string>/Users/jimmyhoughjr/infra-state/mwserver-tf/hatchery.json</string>
+        <string>--bind</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>7878</string>
+        <string>--token</string>
+        <string>REDACTED</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/jimmyhoughjr/Library/Logs/hatchery-serve.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jimmyhoughjr/Library/Logs/hatchery-serve.log</string>
+</dict>
+</plist>

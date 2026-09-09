@@ -114,6 +114,9 @@ public struct StatusReporter: Sendable {
     }
 
     public func status(of service: ServiceSpec, in stack: StackSpec? = nil) async -> ServiceHealth {
+        if let stack, stack.backend == .host, let job = service.job {
+            return await self.jobStatus(of: service, job: job, in: stack)
+        }
         if let stack, stack.backend == .host, let container = service.container {
             return await self.containerStatus(of: service, container: container, in: stack)
         }
@@ -139,6 +142,99 @@ public struct StatusReporter: Sendable {
                 latencyMs: latencyMs
             )
         }
+    }
+
+    /// Grades a job from what the supervisor says about it, and then from the freshness of its log.
+    ///
+    /// A job answers no health path, so the supervisor is the only witness that it exists. The log is the second
+    /// witness and the one that separates responding from ready: a job whose supervisor is happy and whose log has
+    /// not been written since yesterday is a job that is being started and is doing nothing.
+    private func jobStatus(
+        of service: ServiceSpec, job: JobSpec, in stack: StackSpec
+    ) async -> ServiceHealth {
+        guard let box = stack.host, !box.isEmpty else {
+            return HealthInterpreter.unreachable(
+                service: service.name, reason: "the stack declares no box")
+        }
+        let platform = stack.platform
+        let label = HostProvider.jobLabel(for: service, platform: platform)
+        // The supervisor and the log are asked for in one round trip, with a line between the two answers.
+        let command = JobObservation.query(label: label, platform: platform)
+            + "; echo '\(Self.logMarker)'; " + Self.logProbe(job.log, platform: platform)
+
+        let output: CommandOutput
+        do {
+            output = try await self.execute(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", box, command], nil)
+        } catch {
+            return HealthInterpreter.unreachable(service: service.name, reason: "cannot reach \(box)")
+        }
+        let halves = output.combined.components(separatedBy: Self.logMarker)
+        guard let read = JobObservation.read(halves[0], label: label, platform: platform) else {
+            return HealthInterpreter.unreachable(
+                service: service.name,
+                reason: "the supervisor on \(box) does not hold '\(label)'")
+        }
+
+        if job.keepAlive, !read.running {
+            return ServiceHealth(
+                service: service.name, state: .degraded,
+                reasons: ["the job is kept alive and the supervisor is not holding it"])
+        }
+        if let exit = read.lastExit, exit != 0 {
+            return ServiceHealth(
+                service: service.name, state: .degraded, reasons: ["the last run exited \(exit)"])
+        }
+
+        guard let path = job.log, !path.isEmpty else {
+            return ServiceHealth(
+                service: service.name, state: .responding,
+                reasons: ["the supervisor is happy, and the job declares no log to read"])
+        }
+        guard halves.count > 1, let written = Self.modified(halves[1]) else {
+            return ServiceHealth(
+                service: service.name, state: .responding,
+                reasons: ["the supervisor is happy, and there is no \(path) to read"])
+        }
+        let age = Date().timeIntervalSince(written)
+        guard age <= Self.freshness(of: job) else {
+            return ServiceHealth(
+                service: service.name, state: .responding,
+                reasons: [
+                    "the supervisor is happy, and \(path) has not been written for "
+                        + "\(Int(age / 60)) minute(s)"
+                ])
+        }
+        return ServiceHealth(service: service.name, state: .ready, reasons: [])
+    }
+
+    /// The line that separates the supervisor's answer from the log's, in the one command both are asked for.
+    static let logMarker = "--- hatchery job log ---"
+
+    /// The modification time of the log, asked for in the flag each platform's `stat` takes.
+    ///
+    /// A job that declares no log is still sent a probe, so the answer has the same two halves either way and the
+    /// parse does not have to know which command went out.
+    static func logProbe(_ path: String?, platform: HostPlatform) -> String {
+        guard let path, !path.isEmpty else { return "true" }
+        let flag = platform == .darwin ? "-f %m" : "-c %Y"
+        return "stat \(flag) '\(path)' 2>/dev/null || true"
+    }
+
+    /// How stale a log may be before a job stops reading as ready.
+    ///
+    /// Twice the interval, because a run that lands one tick late is late and not broken. A kept-alive job has no
+    /// interval, so an hour stands in: a server that has written nothing for an hour is worth a look.
+    static func freshness(of job: JobSpec) -> TimeInterval {
+        guard case .interval(let seconds) = job.schedule else { return 3600 }
+        return TimeInterval(seconds * 2)
+    }
+
+    /// The epoch seconds `stat` printed, or `nil` when the file was not there.
+    static func modified(_ text: String) -> Date? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let seconds = TimeInterval(trimmed) else { return nil }
+        return Date(timeIntervalSince1970: seconds)
     }
 
     /// Grades a container from what the box says about it, and then from its health path when it has one.
