@@ -24,6 +24,8 @@ public enum FindingCode {
     public static let resolverSilent = "resolver-silent"
     /// A resolver answers, and answers a name with something the declaration does not name.
     public static let resolverWrongAnswer = "resolver-wrong-answer"
+    /// The conf the box mounts is not the conf the declaration renders, so somebody edited it by hand.
+    public static let resolverConfDrift = "resolver-conf-drift"
 }
 
 /// Fills the declaration's findings by comparing what each service declares against what it runs with.
@@ -74,6 +76,7 @@ public struct DeclarationAudit: Sendable {
             findings += Self.rotationFindings(in: kind)
             findings += await self.portMapFindings(for: service, in: stack, kind: kind)
             findings += await self.resolverFindings(for: service, in: stack, kind: kind)
+            findings += await self.resolverConfFindings(for: service, in: stack, kind: kind)
         }
         // A job's findings are its own, plus its sidecar's. Its environment lives in no container, so the live read
         // below would ask the daemon about a name it has never heard of, once per job, and learn nothing.
@@ -134,6 +137,35 @@ public struct DeclarationAudit: Sendable {
             findings.append(stale)
         }
         return findings
+    }
+
+    /// Whether the conf the box mounts is the one the declaration renders.
+    ///
+    /// The names a resolver answers used to live in the declaration and in a file a person edited on the box, which is two
+    /// copies of one fact with nothing holding them equal. The declaration is the record now and the file is rendered from
+    /// it, so a difference is an edit somebody made by hand.
+    ///
+    /// Comments and order are thrown away before comparing. A reworded comment is not a fault, and reporting it as one
+    /// teaches a reader to skip the finding.
+    func resolverConfFindings(
+        for service: ServiceSpec, in stack: StackSpec, kind: KindFile
+    ) async -> [Declaration.Finding] {
+        guard kind.resolves != nil || kind.forwards != nil else { return [] }
+        guard let host = stack.host, !host.isEmpty else { return [] }
+        // The conf the container actually mounts, rather than a path typed here that could name a file nothing reads.
+        guard let mount = service.container?.mounts.first(where: { $0.target == "/etc/dnsmasq.conf" }) else { return [] }
+        guard let conf = try? await self.reader.file(at: mount.source, on: host) else { return [] }
+
+        let (extra, missing) = DnsConf.drift(declared: kind, onBox: conf)
+        guard !extra.isEmpty || !missing.isEmpty else { return [] }
+        var parts: [String] = []
+        if !missing.isEmpty { parts.append("the conf is missing \(missing.joined(separator: " "))") }
+        if !extra.isEmpty { parts.append("it carries \(extra.joined(separator: " ")) that the declaration does not") }
+        return [
+            Declaration.Finding(
+                code: FindingCode.resolverConfDrift,
+                text: "\(mount.source) is not what the declaration renders: " + parts.joined(separator: ", "))
+        ]
     }
 
     /// Whether the box's resolver still answers the names its kind declares.

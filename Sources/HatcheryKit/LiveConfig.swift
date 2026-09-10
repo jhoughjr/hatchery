@@ -181,6 +181,12 @@ public struct LiveConfigReader: Sendable {
         }
     }
 
+    /// One file off the box, for a declaration that renders a file the box is supposed to hold.
+    public func file(at path: String, on host: String) async throws -> String {
+        let data = try await run(Self.catCommand(host: host, path: path))
+        return String(decoding: data, as: UTF8.self)
+    }
+
     /// What the box's own resolver answers for `name`, asked at `address` rather than at loopback.
     ///
     /// The address matters more than the question. dnsmasq binds the interfaces it finds at startup, so a resolver that
@@ -229,6 +235,10 @@ public struct LiveConfigReader: Sendable {
     static func imageInspectCommand(host: String, image: String) -> [String] {
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
          "docker image inspect \(image) --format '{{json .Config.Env}}'"]
+    }
+
+    static func catCommand(host: String, path: String) -> [String] {
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "cat \(path)"]
     }
 
     /// One `dig` over ssh. Short timeout and one try, because a resolver that has to be waited for has already answered the question.

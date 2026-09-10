@@ -19,6 +19,11 @@ public struct KindFile: Codable, Sendable, Equatable {
     /// A `healthcheck` is an HTTP path, and a service that answers DNS cannot say anything about itself in that form.
     /// This is the same promise in the words its own protocol uses, and the audit asks the box's LAN address rather than its loopback: dnsmasq answering on loopback while binding nothing else is the exact fault this exists to catch.
     public var resolves: [Resolution]?
+    /// Where a resolver sends everything it does not answer itself.
+    ///
+    /// Declared here rather than left in the conf, because the conf is rendered from this and a forwarder that lives only in
+    /// the rendered file is a fact nothing can check.
+    public var forwards: [String]?
     public var notes: [String]?
     public var storage: [Mount]?
     public var environment: [String: EnvEntry]
@@ -90,6 +95,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         portMap: [String]? = nil,
         healthcheck: String? = nil,
         resolves: [Resolution]? = nil,
+        forwards: [String]? = nil,
         notes: [String]? = nil,
         storage: [Mount]? = nil,
         environment: [String: EnvEntry] = [:],
@@ -104,6 +110,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         self.portMap = portMap
         self.healthcheck = healthcheck
         self.resolves = resolves
+        self.forwards = forwards
         self.notes = notes
         self.storage = storage
         self.environment = environment
@@ -114,7 +121,7 @@ public struct KindFile: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case kind, summary, image, port, healthcheck, notes, storage, environment, runner, bootstrap
-        case capabilities, portMap, resolves
+        case capabilities, portMap, resolves, forwards
     }
 
     /// `notes` decodes a single string or a list, so a one-line declaration needs no array wrapper.
@@ -127,6 +134,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         self.portMap = try container.decodeIfPresent([String].self, forKey: .portMap)
         self.healthcheck = try container.decodeIfPresent(String.self, forKey: .healthcheck)
         self.resolves = try container.decodeIfPresent([Resolution].self, forKey: .resolves)
+        self.forwards = try container.decodeIfPresent([String].self, forKey: .forwards)
         self.storage = try container.decodeIfPresent([Mount].self, forKey: .storage)
         self.environment =
             try container.decodeIfPresent([String: EnvEntry].self, forKey: .environment) ?? [:]
@@ -150,6 +158,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         try container.encodeIfPresent(portMap, forKey: .portMap)
         try container.encodeIfPresent(healthcheck, forKey: .healthcheck)
         try container.encodeIfPresent(resolves, forKey: .resolves)
+        try container.encodeIfPresent(forwards, forKey: .forwards)
         try container.encodeIfPresent(notes, forKey: .notes)
         try container.encodeIfPresent(storage, forKey: .storage)
         try container.encode(environment, forKey: .environment)
