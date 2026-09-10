@@ -20,6 +20,10 @@ public enum FindingCode {
     public static let rotationCoverage = "rotation-coverage"
     /// The box holds a different proxy map than the kind file declares, so the app answers somewhere else.
     public static let portMapDrift = "port-map-drift"
+    /// A resolver answers nothing at the box's LAN address, so every host that points at it is blind.
+    public static let resolverSilent = "resolver-silent"
+    /// A resolver answers, and answers a name with something the declaration does not name.
+    public static let resolverWrongAnswer = "resolver-wrong-answer"
 }
 
 /// Fills the declaration's findings by comparing what each service declares against what it runs with.
@@ -69,6 +73,7 @@ public struct DeclarationAudit: Sendable {
         if let kind = try? registry.kindFile(for: service.kind) {
             findings += Self.rotationFindings(in: kind)
             findings += await self.portMapFindings(for: service, in: stack, kind: kind)
+            findings += await self.resolverFindings(for: service, in: stack, kind: kind)
         }
         // A job's findings are its own, plus its sidecar's. Its environment lives in no container, so the live read
         // below would ask the daemon about a name it has never heard of, once per job, and learn nothing.
@@ -127,6 +132,42 @@ public struct DeclarationAudit: Sendable {
 
         if let live, let stale = Self.staleSidecar(live: live, declared: declared) {
             findings.append(stale)
+        }
+        return findings
+    }
+
+    /// Whether the box's resolver still answers the names its kind declares.
+    ///
+    /// A container that runs is not a resolver that resolves. On 2026-09-10 dnsmasq read `Up` for two hours while answering
+    /// nobody, because it bound loopback alone, and the one machine that pointed at it could resolve nothing at all.
+    /// The question is therefore asked at the LAN address of the box the service runs on. A loopback answer proves only that
+    /// the process is alive, which was never the thing in doubt.
+    ///
+    /// The first silent name ends the pass. A resolver that answers nothing answers nothing for every name, and four findings
+    /// saying so is four ways of reading the same fault.
+    func resolverFindings(
+        for service: ServiceSpec, in stack: StackSpec, kind: KindFile
+    ) async -> [Declaration.Finding] {
+        guard let declared = kind.resolves, !declared.isEmpty else { return [] }
+        guard let host = stack.host, !host.isEmpty else { return [] }
+        let address = host.split(separator: "@").last.map(String.init) ?? host
+
+        var findings: [Declaration.Finding] = []
+        for resolution in declared {
+            guard let answers = try? await self.reader.resolve(resolution.name, at: address, on: host) else { return findings }
+            guard !answers.isEmpty else {
+                findings.append(
+                    Declaration.Finding(
+                        code: FindingCode.resolverSilent,
+                        text: "\(resolution.name) gets no answer at \(address); every host that points here resolves nothing"))
+                return findings
+            }
+            if let expected = resolution.answer, !answers.contains(expected) {
+                findings.append(
+                    Declaration.Finding(
+                        code: FindingCode.resolverWrongAnswer,
+                        text: "\(resolution.name) answers \(answers.joined(separator: " ")) and the declaration says \(expected)"))
+            }
         }
         return findings
     }
