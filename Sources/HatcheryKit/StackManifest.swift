@@ -295,6 +295,11 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     public var baseURL: String?
     /// The readiness path, which defaults to the path for this service kind.
     public var healthPath: String?
+    /// The code the proxy gives for this service's root on port 80, when a person has ruled which code is correct.
+    ///
+    /// Absent means any 2xx or 3xx reads as healthy. It is here rather than in each host's `ROOST_EXPECTED_HTTP`, because
+    /// that was the only copy, every host kept its own, and the laptop and the mini disagreed about four apps.
+    public var expectedStatus: String?
     /// The registry's identifier for this deployment, once one exists.
     ///
     /// hatchery never mints this. The administration tier is the identity mint, and its
@@ -333,6 +338,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         secretsFile: String? = nil,
         baseURL: String? = nil,
         healthPath: String? = nil,
+        expectedStatus: String? = nil,
         deploymentID: String? = nil,
         imageVariable: String? = nil,
         container: ContainerSpec? = nil,
@@ -347,6 +353,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         self.secretsFile = secretsFile
         self.baseURL = baseURL
         self.healthPath = healthPath
+        self.expectedStatus = expectedStatus
 
         self.deploymentID = deploymentID
         self.imageVariable = imageVariable
