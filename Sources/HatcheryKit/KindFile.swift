@@ -14,6 +14,11 @@ public struct KindFile: Codable, Sendable, Equatable {
     /// Declaring it here is what lets the audit say the box has moved off the map. Absent means the service makes no claim, and nothing is compared.
     public var portMap: [String]?
     public var healthcheck: String?
+    /// The names a resolver must answer, and the address each answer must carry.
+    ///
+    /// A `healthcheck` is an HTTP path, and a service that answers DNS cannot say anything about itself in that form.
+    /// This is the same promise in the words its own protocol uses, and the audit asks the box's LAN address rather than its loopback: dnsmasq answering on loopback while binding nothing else is the exact fault this exists to catch.
+    public var resolves: [Resolution]?
     public var notes: [String]?
     public var storage: [Mount]?
     public var environment: [String: EnvEntry]
@@ -22,6 +27,20 @@ public struct KindFile: Codable, Sendable, Equatable {
     /// The house services this kind asks hatchery to wire it into, `vault` being the one that exists.
     /// Absent on every kind file written before it, which is why nothing here is required to carry it.
     public var capabilities: [String]?
+
+    /// One name a resolver must answer, and what it must answer with.
+    ///
+    /// - `name`: the name to ask for.
+    /// - `answer`: the address the reply must carry. Absent asks only that a reply comes back, which is the weaker question of whether the resolver is alive at all.
+    public struct Resolution: Codable, Sendable, Equatable {
+        public var name: String
+        public var answer: String?
+
+        public init(name: String, answer: String? = nil) {
+            self.name = name
+            self.answer = answer
+        }
+    }
 
     /// A path the service persists across a redeploy, and the reason it must.
     public struct Mount: Codable, Sendable, Equatable {
@@ -70,6 +89,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         port: Int? = nil,
         portMap: [String]? = nil,
         healthcheck: String? = nil,
+        resolves: [Resolution]? = nil,
         notes: [String]? = nil,
         storage: [Mount]? = nil,
         environment: [String: EnvEntry] = [:],
@@ -83,6 +103,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         self.port = port
         self.portMap = portMap
         self.healthcheck = healthcheck
+        self.resolves = resolves
         self.notes = notes
         self.storage = storage
         self.environment = environment
@@ -93,7 +114,7 @@ public struct KindFile: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case kind, summary, image, port, healthcheck, notes, storage, environment, runner, bootstrap
-        case capabilities, portMap
+        case capabilities, portMap, resolves
     }
 
     /// `notes` decodes a single string or a list, so a one-line declaration needs no array wrapper.
@@ -105,6 +126,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         self.port = try container.decodeIfPresent(Int.self, forKey: .port)
         self.portMap = try container.decodeIfPresent([String].self, forKey: .portMap)
         self.healthcheck = try container.decodeIfPresent(String.self, forKey: .healthcheck)
+        self.resolves = try container.decodeIfPresent([Resolution].self, forKey: .resolves)
         self.storage = try container.decodeIfPresent([Mount].self, forKey: .storage)
         self.environment =
             try container.decodeIfPresent([String: EnvEntry].self, forKey: .environment) ?? [:]
@@ -127,6 +149,7 @@ public struct KindFile: Codable, Sendable, Equatable {
         try container.encodeIfPresent(port, forKey: .port)
         try container.encodeIfPresent(portMap, forKey: .portMap)
         try container.encodeIfPresent(healthcheck, forKey: .healthcheck)
+        try container.encodeIfPresent(resolves, forKey: .resolves)
         try container.encodeIfPresent(notes, forKey: .notes)
         try container.encodeIfPresent(storage, forKey: .storage)
         try container.encode(environment, forKey: .environment)

@@ -181,6 +181,19 @@ public struct LiveConfigReader: Sendable {
         }
     }
 
+    /// What the box's own resolver answers for `name`, asked at `address` rather than at loopback.
+    ///
+    /// The address matters more than the question. dnsmasq binds the interfaces it finds at startup, so a resolver that
+    /// started before the LAN interface had an address answers on loopback and refuses everything else, while looking healthy
+    /// to anything that asks it locally. Asking the LAN address is the only form of this question that catches that.
+    public func resolve(_ name: String, at address: String, on host: String) async throws -> [String] {
+        let data = try await run(Self.digCommand(host: host, name: name, address: address))
+        return String(decoding: data, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
     /// The proxy map dokku holds for a dokku app, one entry per line of `ports:report --ports-map`.
     ///
     /// Only the dokku backend answers this. Every other backend owns its own routing, so there is no map to read.
@@ -216,6 +229,12 @@ public struct LiveConfigReader: Sendable {
     static func imageInspectCommand(host: String, image: String) -> [String] {
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
          "docker image inspect \(image) --format '{{json .Config.Env}}'"]
+    }
+
+    /// One `dig` over ssh. Short timeout and one try, because a resolver that has to be waited for has already answered the question.
+    static func digCommand(host: String, name: String, address: String) -> [String] {
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
+         "dig +short +time=3 +tries=1 @\(address) \(name)"]
     }
 
     static func portMapCommand(host: String, app: String) -> [String] {
