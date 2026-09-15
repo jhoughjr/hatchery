@@ -102,3 +102,16 @@ struct ForgeSecretsTests {
         #expect(estate.seeded)
     }
 }
+
+@Suite("Pruning forge packages")
+struct ForgePackagesTests {
+    @Test("the newest versions, latest, digests and protected commits stay, and the rest go")
+    func plan() {
+        let day: TimeInterval = 86_400
+        let versions = (0..<8).map { ForgePackages.Version(name: "rookery", version: "c\($0)", created: Date(timeIntervalSince1970: Double($0) * day)) }
+            + [ForgePackages.Version(name: "rookery", version: "latest", created: .distantPast),
+               ForgePackages.Version(name: "rookery", version: "sha256:abc", created: .distantPast)]
+        let doomed = ForgePackages.plan(versions, keep: 3, protect: ["c1"]).map(\.version)
+        #expect(Set(doomed) == ["c0", "c2", "c3", "c4"])
+    }
+}
