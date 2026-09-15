@@ -305,6 +305,12 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// Absent for most services. Rookery and forgejo name vault, because both fail their boot while vault's proxy is stale.
     /// `hatchery box order` asserts the order at boot. See ``BootOrder``.
     public var after: [String]?
+    /// What vault requires of a person who uses this app, for example a GitHub sign-in in a named org.
+    ///
+    /// Absent for most services. An app that acts through a person's GitHub permissions names GitHub here, and vault then
+    /// lists only people with a GitHub sign-in and tells anyone without one where to link it.
+    /// `hatchery vault requires` and the vault step of `service new` and `box adopt` set it on the app's record.
+    public var vaultRequires: [VaultRequirement]?
     /// The registry's identifier for this deployment, once one exists.
     ///
     /// hatchery never mints this. The administration tier is the identity mint, and its
@@ -345,6 +351,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         healthPath: String? = nil,
         expectedStatus: String? = nil,
         after: [String]? = nil,
+        vaultRequires: [VaultRequirement]? = nil,
         deploymentID: String? = nil,
         imageVariable: String? = nil,
         container: ContainerSpec? = nil,
@@ -361,6 +368,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         self.healthPath = healthPath
         self.expectedStatus = expectedStatus
         self.after = after
+        self.vaultRequires = vaultRequires
         self.deploymentID = deploymentID
         self.imageVariable = imageVariable
         self.container = container

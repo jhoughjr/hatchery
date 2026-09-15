@@ -12,6 +12,8 @@ public struct VaultRegistration: Sendable, Equatable {
     public var mintedKey: Bool
     /// The names the app's document holds after the run, in the order vault answered them.
     public var secretNames: [String]
+    /// What vault now requires of a person, or nothing when the declaration names no requirement.
+    public var requires: [VaultRequirement]?
     /// `VAULT_URL` and `VAULT_APP` always, and `VAULT_APP_KEY` when a key was minted.
     public var keys: [String: String]
 
@@ -20,13 +22,22 @@ public struct VaultRegistration: Sendable, Equatable {
         registered: Bool,
         mintedKey: Bool,
         secretNames: [String] = [],
+        requires: [VaultRequirement]? = nil,
         keys: [String: String] = [:]
     ) {
         self.app = app
         self.registered = registered
         self.mintedKey = mintedKey
         self.secretNames = secretNames
+        self.requires = requires
         self.keys = keys
+    }
+
+    /// The line that says what vault requires of a person.
+    public static func requiresLine(_ requires: [VaultRequirement]) -> String {
+        requires.isEmpty
+            ? "    vault    requires nothing of a person"
+            : "    vault    requires a person with \(requires.map(\.phrase).joined(separator: " and "))"
     }
 
     /// What to print. No line carries a value.
@@ -45,6 +56,9 @@ public struct VaultRegistration: Sendable, Equatable {
             lines.append("    vault    no secret-marked key to set")
         } else {
             lines.append("    vault    set \(self.secretNames.joined(separator: " + "))")
+        }
+        if let requires = self.requires {
+            lines.append(Self.requiresLine(requires))
         }
         return lines
     }
@@ -80,6 +94,7 @@ public struct VaultRegistrar: Sendable {
         app: String,
         name: String? = nil,
         secrets: [String: String] = [:],
+        requires: [VaultRequirement]? = nil,
         holding appKey: String? = nil
     ) async throws -> VaultRegistration {
         let minted = try await self.vault.registerApp(slug: app, name: name)
@@ -104,8 +119,12 @@ public struct VaultRegistrar: Sendable {
         if !secrets.isEmpty {
             names = try await self.vault.setSecrets(app: app, values: secrets)
         }
+        var stored: [VaultRequirement]? = nil
+        if let requires {
+            stored = try await self.vault.setRequirements(app: app, requires: requires)
+        }
         return VaultRegistration(
-            app: app, registered: minted != nil, mintedKey: mintedKey, secretNames: names, keys: keys)
+            app: app, registered: minted != nil, mintedKey: mintedKey, secretNames: names, requires: stored, keys: keys)
     }
 
     /// The keys of a config that belong in the app's vault document.

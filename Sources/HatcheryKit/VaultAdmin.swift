@@ -50,6 +50,26 @@ public struct VaultIdentity: Sendable, Equatable {
     }
 }
 
+/// One thing vault requires of a person who uses an app.
+///
+/// `provider` is a sign-in vault offers: `github`, `google` or `apple`.
+/// `orgs`, when present, names the GitHub orgs that sign-in must be in one of.
+public struct VaultRequirement: Codable, Sendable, Equatable {
+    public var provider: String
+    public var orgs: [String]?
+
+    public init(provider: String, orgs: [String]? = nil) {
+        self.provider = provider
+        self.orgs = orgs
+    }
+
+    /// The requirement as one phrase, for example `github in acme`.
+    public var phrase: String {
+        guard let orgs = self.orgs, !orgs.isEmpty else { return self.provider }
+        return "\(self.provider) in \(orgs.joined(separator: " or "))"
+    }
+}
+
 /// Vault's admin routes, which mint the values a rotation issues.
 ///
 /// Every route here answers its value once. Vault stores only the sealed form, so a value not written down in
@@ -140,6 +160,22 @@ public struct VaultAdmin: Sendable {
             throw VaultAdminError.unreadable(route: route, field: "secret_access_key")
         }
         return (identifier, secret)
+    }
+
+    /// Replaces what vault requires of a person who uses an app, and answers the list vault stored.
+    /// An empty list is a real answer: the app then requires nothing of a person.
+    @discardableResult
+    public func setRequirements(app: String, requires: [VaultRequirement]) async throws -> [VaultRequirement] {
+        let route = "/api/admin/apps/\(app)/requires"
+        let body = try JSONEncoder().encode(["requires": requires])
+        let answer = try await self.call(route, method: "PUT", body: body)
+        guard let stored = answer["requires"],
+              let data = try? JSONSerialization.data(withJSONObject: stored),
+              let decoded = try? JSONDecoder().decode([VaultRequirement].self, from: data)
+        else {
+            throw VaultAdminError.unreadable(route: route, field: "requires")
+        }
+        return decoded
     }
 
     /// Stores a named secret on an app, which the app reads back with its app key at boot.

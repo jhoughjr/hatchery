@@ -20,7 +20,7 @@ struct Vault: AsyncParsableCommand {
             the environment, then the token file for the vault's host, then VAULT_SESSION in the \
             environment.
             """,
-        subcommands: [Login.self, Status.self, Logout.self]
+        subcommands: [Login.self, Status.self, Logout.self, Requires.self]
     )
 
     /// The address of the vault a subcommand acts on, which every one of them takes.
@@ -78,6 +78,47 @@ struct Vault: AsyncParsableCommand {
             }
             let identity = try await VaultAdmin(baseURL: vault, credential: credential).whoami()
             print("  \(vault): signed in as \(identity.email) (\(Vault.label(credential, identity)))")
+        }
+    }
+
+    /// Sets on vault what a declared app requires of a person, from the service's `vaultRequires`.
+    struct Requires: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "requires",
+            abstract: "Set on vault what a declared app requires of a person.",
+            discussion: """
+                The requirement comes from the service's vaultRequires in the manifest, for example \
+                [{"provider": "github", "orgs": ["acme"]}]. A service that declares none requires nothing, and \
+                this clears any requirement vault held. The call replaces the whole list, so a second run changes nothing.
+                """
+        )
+
+        @OptionGroup var address: Address
+
+        @Argument(help: "The service, as <stack>/<service>.")
+        var target: String
+
+        @Option(name: .shortAndLong, help: "Path to a stack manifest. Repeat it to read several.")
+        var manifest: [String] = []
+
+        @Flag(name: .long, help: "Print what would be set and call no route.")
+        var dryRun = false
+
+        func run() async throws {
+            let resolved = try Secrets.resolve(self.target, manifest: self.manifest)
+            let requires = resolved.service.vaultRequires ?? []
+            print("  \(resolved.service.name)")
+            guard !self.dryRun else {
+                print(VaultRegistration.requiresLine(requires))
+                return
+            }
+            guard let credential = VaultAdminCredential.resolve(vault: self.address.vault) else {
+                print("  not signed in; \(VaultAdminCredential.recipe)")
+                throw ExitCode.failure
+            }
+            let stored = try await VaultAdmin(baseURL: self.address.vault, credential: credential)
+                .setRequirements(app: resolved.service.name, requires: requires)
+            print(VaultRegistration.requiresLine(stored))
         }
     }
 

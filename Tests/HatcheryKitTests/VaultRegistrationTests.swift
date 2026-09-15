@@ -49,6 +49,9 @@ private final class Console: @unchecked Sendable {
         case ("POST", "/api/admin/apps/rookery/key"):
             return try Self.answer(["ok": true, "app_key": "sk_live_replaced"], to: request)
 
+        case ("PUT", "/api/admin/apps/rookery/requires"):
+            return try Self.answer(["ok": true, "app": "rookery", "requires": sent["requires"] ?? []], to: request)
+
         case ("PUT", "/api/admin/apps/rookery/secrets"):
             let names = (sent as? [String: String]).map { Array($0.keys).sorted() } ?? []
             return try Self.answer(["ok": true, "app": "rookery", "names": names], to: request)
@@ -125,6 +128,37 @@ struct VaultRegistrationTests {
         #expect(printed.contains("DATABASE_URL + FORGE_TOKEN"))
         #expect(!printed.contains("tok"))
         #expect(!printed.contains("sk_live_new"))
+    }
+
+    @Test("a declared requirement is set on vault, and the report says it in words")
+    func setsRequirements() async throws {
+        let console = Console(known: ["rookery"])
+        let registration = try await registrar(console).register(
+            app: "rookery", requires: [VaultRequirement(provider: "github", orgs: ["acme"])], holding: "sk_live_held")
+
+        #expect(registration.requires == [VaultRequirement(provider: "github", orgs: ["acme"])])
+        #expect(console.happened.contains("PUT /api/admin/apps/rookery/requires requires"))
+        #expect(registration.lines().contains("    vault    requires a person with github in acme"))
+    }
+
+    @Test("a service that declares no requirement sends none")
+    func noRequirementSendsNothing() async throws {
+        let console = Console(known: ["rookery"])
+        let registration = try await registrar(console).register(app: "rookery", holding: "sk_live_held")
+
+        #expect(registration.requires == nil)
+        #expect(!console.happened.contains { $0.contains("/requires") })
+    }
+
+    @Test("a manifest written before vaultRequires still reads, and one with it keeps it")
+    func manifestCarriesRequirements() throws {
+        let decoded = try JSONDecoder().decode(
+            ServiceSpec.self,
+            from: Data(#"{"name":"rookery","kind":"rookery","image":"x","domains":[],"configFile":"c","vaultRequires":[{"provider":"github"}]}"#.utf8))
+        #expect(decoded.vaultRequires == [VaultRequirement(provider: "github")])
+        let bare = try JSONDecoder().decode(
+            ServiceSpec.self, from: Data(#"{"name":"a","kind":"a","image":"x","domains":[],"configFile":"c"}"#.utf8))
+        #expect(bare.vaultRequires == nil)
     }
 
     @Test("a refused session refuses the run and names the route")

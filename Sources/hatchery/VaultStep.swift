@@ -45,6 +45,9 @@ enum VaultStep {
                     : "    vault    the config holds an app key, so mint none")
             let names = document.keys.sorted().joined(separator: " + ")
             print("    vault    set \(names.isEmpty ? "no secret-marked key" : names)")
+            if let requires = service.vaultRequires {
+                print(VaultRegistration.requiresLine(requires))
+            }
             return
         }
 
@@ -54,7 +57,7 @@ enum VaultStep {
         let registrar = VaultRegistrar(
             vault: VaultAdmin(baseURL: baseURL, credential: credential), baseURL: baseURL)
         let registration = try await registrar.register(
-            app: service.name, secrets: document, holding: held)
+            app: service.name, secrets: document, requires: service.vaultRequires, holding: held)
         registration.lines().forEach { print($0) }
 
         // The app key is a secret and goes to the secrets file. The other two are how the app finds vault
