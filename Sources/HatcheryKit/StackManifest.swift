@@ -300,6 +300,11 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// Absent means any 2xx or 3xx reads as healthy. It is here rather than in each host's `ROOST_EXPECTED_HTTP`, because
     /// that was the only copy, every host kept its own, and the laptop and the mini disagreed about four apps.
     public var expectedStatus: String?
+    /// The apps that must be serving before this one is started, by service name.
+    ///
+    /// Absent for most services. Rookery and forgejo name vault, because both fail their boot while vault's proxy is stale.
+    /// `hatchery box order` asserts the order at boot. See ``BootOrder``.
+    public var after: [String]?
     /// The registry's identifier for this deployment, once one exists.
     ///
     /// hatchery never mints this. The administration tier is the identity mint, and its
@@ -339,6 +344,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         baseURL: String? = nil,
         healthPath: String? = nil,
         expectedStatus: String? = nil,
+        after: [String]? = nil,
         deploymentID: String? = nil,
         imageVariable: String? = nil,
         container: ContainerSpec? = nil,
@@ -354,7 +360,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         self.baseURL = baseURL
         self.healthPath = healthPath
         self.expectedStatus = expectedStatus
-
+        self.after = after
         self.deploymentID = deploymentID
         self.imageVariable = imageVariable
         self.container = container

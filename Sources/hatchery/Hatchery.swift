@@ -37,7 +37,7 @@ struct Hatchery: AsyncParsableCommand {
 struct Box: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Prepare machines to host stacks.",
-        subcommands: [Init.self, Scan.self, Adopt.self]
+        subcommands: [Init.self, Order.self, Scan.self, Adopt.self]
     )
 
     /// The onboarding guide, executed: point it at an empty Debian/Ubuntu box and it
@@ -156,6 +156,80 @@ struct Box: AsyncParsableCommand {
 
         private func bare(_ host: String) -> String {
             host.split(separator: "@").last.map(String.init) ?? host
+        }
+    }
+
+    /// The boot order, declared by each service's `after` list and asserted onto the box at boot.
+    struct Order: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Assert the order a box brings its dokku apps up in, at every boot.",
+            discussion: """
+                Each dokku service may name the apps it comes up after, in its `after` list. \
+                Rookery and forgejo name vault, because both fail their boot while vault's proxy is stale. \
+                A reset then left the box down until a person ran the fixes by hand, in order.
+
+                This command renders those fixes as assertions: an app is serving, or it is started, \
+                its proxy is rebuilt, and it gets time to settle. It writes them to the box as a script \
+                and a user unit that runs at boot, and again a minute after a failure, for half an hour.
+
+                Without --yes, only the checks run, here and now, over ssh. Nothing is written or fixed. \
+                With --yes, the script and the unit are installed. A second run changes nothing.
+                """
+        )
+
+        @Argument(help: "The box, as the user@host whose account runs the unit, for example jimmy@192.168.0.103.")
+        var host: String
+
+        @Option(name: .long, help: "A manifest to read. Repeat it to read several, because an app and the app it names may be declared apart.")
+        var manifest: [String] = []
+
+        @Flag(name: .long, help: "Install the script and the unit. Without it, only the checks run.")
+        var yes: Bool = false
+
+        func run() async throws {
+            let manifests = try (self.manifest.isEmpty ? [ManifestLocator.defaultName] : self.manifest).map {
+                try ManifestLocator.load($0).manifest
+            }
+            let ordered: [BootOrder.App]
+            do {
+                ordered = try BootOrder.ordered(BootOrder.apps(from: manifests))
+            } catch let failure as BootOrder.Failure {
+                throw ValidationError(failure.description)
+            }
+            guard !ordered.isEmpty else {
+                throw ValidationError("no dokku service declares an after list, so there is no order to assert")
+            }
+            print("\(self.host)  boot order: \(ordered.map(\.name).joined(separator: " -> "))")
+
+            let order = BootOrder.assertions(for: ordered)
+            let initializer = BoxInitializer()
+            let locus = BoxLocus.ssh(host: self.host)
+            // The order is checked and never fixed from here, because a fix restarts a live app.
+            let checks = order.map { BoxAssertion(name: $0.name, check: $0.check, remedy: "not serving now") }
+            let now = await initializer.run(at: locus, assertions: checks) { print("  \($0)") }
+
+            let install = BootOrder.installAssertions(script: BootOrder.script(order))
+            let installed: [BoxStep]
+            if self.yes {
+                installed = await initializer.run(at: locus, assertions: install) { print("  \($0)") }
+            } else {
+                let withheld = install.map {
+                    BoxAssertion(name: $0.name, check: $0.check, remedy: $0.fix.isEmpty ? $0.remedy : "would fix with --yes")
+                }
+                installed = await initializer.run(at: locus, assertions: withheld) { print("  \($0)") }
+            }
+
+            print("")
+            let serving = now.count == checks.count && now.allSatisfy { $0.outcome != .failed }
+            let current = installed.count == install.count && installed.allSatisfy { $0.outcome != .failed }
+            if current {
+                print("  the boot order is installed\(serving ? ", and every app in it serves now" : ", and an app in it does not serve now")")
+            } else if !self.yes {
+                print("  re-run with --yes to install it")
+            }
+            if !current && self.yes {
+                throw ExitCode(1)
+            }
         }
     }
     /// The inverse of the manifest: read what a target runs, and say whose it is.
