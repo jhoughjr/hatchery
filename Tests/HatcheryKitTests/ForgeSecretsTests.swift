@@ -14,6 +14,7 @@ struct ForgeSecretsTests {
         var repoNames: Set<String>
         var document: [String: String]
         var puts: [(route: String, body: String)] = []
+        var seeded = false
 
         init(repoNames: Set<String>, document: [String: String]) {
             self.repoNames = repoNames
@@ -33,6 +34,11 @@ struct ForgeSecretsTests {
             case ("POST", "/api/admin/apps/forge/key"): return answer(200, ["app_key": "fresh-key"])
             case ("GET", "/api/apps/forge/secrets"):
                 return request.value(forHTTPHeaderField: "Authorization") == "Bearer fresh-key" ? answer(200, self.document) : answer(401, [:])
+            case ("GET", "/api/v1/user"):
+                return request.value(forHTTPHeaderField: "Authorization") == "token good-token" ? answer(403, [:]) : answer(401, [:])
+            case ("PUT", "/api/admin/apps/forge/secrets"):
+                self.seeded = true
+                return answer(200, ["names": ["FORGE_PACKAGE_TOKEN"]])
             case ("GET", "/api/v1/repos/jimmy/vault-hb/actions/secrets"):
                 return answer(200, self.repoNames.map { ["name": $0] })
             case ("PUT", "/api/v1/repos/jimmy/vault-hb/actions/secrets/FORGE_PACKAGE_TOKEN"):
@@ -81,5 +87,18 @@ struct ForgeSecretsTests {
         }
         #expect(estate.puts.isEmpty)
         #expect(ForgeSecrets.Failure.notSeeded("FORGE_PACKAGE_TOKEN").description.contains("hatchery forge seed FORGE_PACKAGE_TOKEN"))
+    }
+
+    @Test("A value the forge does not take as a token is refused, and a scoped token is stored")
+    func seedChecksTheToken() async throws {
+        let estate = Estate(repoNames: [], document: [:])
+
+        await #expect(throws: ForgeSecrets.Failure.notAToken("FORGE_PACKAGE_TOKEN")) {
+            try await self.secrets(estate).seed(name: "FORGE_PACKAGE_TOKEN", value: "not a token\nfrom the clipboard")
+        }
+        #expect(estate.seeded == false)
+
+        try await self.secrets(estate).seed(name: "FORGE_PACKAGE_TOKEN", value: "good-token")
+        #expect(estate.seeded)
     }
 }

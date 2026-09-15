@@ -25,9 +25,11 @@ public struct ForgeSecrets: Sendable {
     ///
     /// - `notSeeded`: vault's `forge` app holds no value for the name yet
     /// - `refused`: the forge refused a call, with the status it gave
+    /// - `notAToken`: a `FORGE_` value the forge does not take as a token, so it is not stored
     public enum Failure: Error, Equatable, CustomStringConvertible {
         case notSeeded(String)
         case refused(route: String, status: Int)
+        case notAToken(String)
 
         public var description: String {
             switch self {
@@ -35,6 +37,8 @@ public struct ForgeSecrets: Sendable {
                 return "vault's forge app holds no \(name). Store it once, with the value on standard input: pbpaste | hatchery forge seed \(name)"
             case .refused(let route, let status):
                 return "the forge refused \(route) with \(status)"
+            case .notAToken(let name):
+                return "the value for \(name) is not a token the forge accepts, so it was not stored. Check what is on the clipboard and seed again"
             }
         }
     }
@@ -59,7 +63,20 @@ public struct ForgeSecrets: Sendable {
     }
 
     /// Stores a value in vault's `forge` app, registering the app the first time.
+    ///
+    /// A `FORGE_` value is shown to the forge first, and one the forge does not take as a token is refused.
+    /// On 2026-09-15 a clipboard held something else, and a 51-character value with a line break in it was stored as the package token.
+    /// The forge answers 401 for a value that is no token, and 403 for a real token scoped away from the account, so only 401 refuses.
     public func seed(name: String, value: String) async throws {
+        if name.hasPrefix("FORGE_") {
+            var request = URLRequest(url: URL(string: self.forgeBaseURL + "/api/v1/user")!)
+            request.setValue("token " + value, forHTTPHeaderField: "Authorization")
+            request.setValue("hatchery-forge-secrets/1", forHTTPHeaderField: "User-Agent")
+            let (_, response) = try await self.exchange(request)
+            guard value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil, response.statusCode != 401 else {
+                throw Failure.notAToken(name)
+            }
+        }
         _ = try await self.vault.registerApp(slug: Self.vaultApp, name: "Forge CI")
         try await self.vault.setSecret(app: Self.vaultApp, name: name, value: value)
     }
