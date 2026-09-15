@@ -60,6 +60,38 @@ public struct ForgePackages: Sendable {
         }
     }
 
+    /// The image tag a dokku app runs, read from `git:report` over ssh, for a target written `dokku@host:app`.
+    public static func deployedTag(_ target: String) -> String? {
+        guard let colon = target.lastIndex(of: ":") else { return nil }
+        let host = String(target[..<colon])
+        let app = String(target[target.index(after: colon)...])
+        guard !host.isEmpty, !app.isEmpty else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, "git:report", app]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return Self.sourceImageTag(inReport: text)
+    }
+
+    /// The tag in a `git:report` line such as `Git source image: forgejo.example/jimmy/rookery:4c8397f`.
+    static func sourceImageTag(inReport report: String) -> String? {
+        guard let line = report.split(separator: "\n").first(where: { $0.contains("source image:") }) else { return nil }
+        let image = line.split(separator: " ").last.map(String.init) ?? ""
+        guard let colon = image.lastIndex(of: ":"), !image[image.index(after: colon)...].contains("/") else { return nil }
+        let tag = String(image[image.index(after: colon)...])
+        return tag.isEmpty ? nil : tag
+    }
+
     /// Every version of one container package the owner holds.
     public func versions(owner: String, package: String, token: String) async throws -> [Version] {
         var found: [Version] = []

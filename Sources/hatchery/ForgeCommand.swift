@@ -54,6 +54,9 @@ struct Forge: AsyncParsableCommand {
         @Option(name: .long, help: "A version prefix to keep, such as the commit a deployment runs. Repeat it for several.")
         var protect: [String] = []
 
+        @Option(name: .long, help: "A dokku app whose deployed image stays, as dokku@host:app. Repeat it for several.")
+        var protectDeployed: [String] = []
+
         @Flag(name: .long, help: "Delete. Without it, only list.")
         var yes = false
 
@@ -61,12 +64,22 @@ struct Forge: AsyncParsableCommand {
             guard let credential = VaultAdminCredential.resolve() else {
                 throw ValidationError("no vault operator token: hatchery vault login")
             }
+            // The deployed tags are read before anything is deleted, and a deployment that cannot be read stops the run.
+            var protect = self.protect
+            for target in self.protectDeployed {
+                guard let tag = ForgePackages.deployedTag(target) else {
+                    print("  FAILED: could not read the image \(target) runs, so nothing was deleted")
+                    throw ExitCode.failure
+                }
+                print("  \(target) runs \(tag), which stays")
+                protect.append(tag)
+            }
             let packages = ForgePackages(secrets: ForgeSecrets(vault: VaultAdmin(credential: credential)))
             do {
                 let token = try await packages.packageToken()
                 for name in self.packages {
                     let versions = try await packages.versions(owner: self.owner, package: name, token: token)
-                    let doomed = ForgePackages.plan(versions, keep: self.keep, protect: self.protect)
+                    let doomed = ForgePackages.plan(versions, keep: self.keep, protect: protect)
                     print("  \(name): \(versions.count) versions, \(doomed.count) to delete, \(versions.count - doomed.count) kept")
                     guard self.yes else {
                         for version in doomed.prefix(10) { print("    would delete \(version.version)") }

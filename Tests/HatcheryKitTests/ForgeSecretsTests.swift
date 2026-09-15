@@ -114,4 +114,16 @@ struct ForgePackagesTests {
         let doomed = ForgePackages.plan(versions, keep: 3, protect: ["c1"]).map(\.version)
         #expect(Set(doomed) == ["c0", "c2", "c3", "c4"])
     }
+
+    @Test("the deployed tag is read from dokku's git report, and a report without an image names none")
+    func deployedTag() {
+        let report = """
+            =====> rookery git information
+                   Git deploy branch:             master
+                   Git source image:              forgejo.jimmyhoughjr.net/jimmy/rookery:4c8397fe5b26
+            """
+        #expect(ForgePackages.sourceImageTag(inReport: report) == "4c8397fe5b26")
+        #expect(ForgePackages.sourceImageTag(inReport: "Git source image:              ") == nil)
+        #expect(ForgePackages.sourceImageTag(inReport: "Git source image: localhost:5000/rookery") == nil)
+    }
 }
