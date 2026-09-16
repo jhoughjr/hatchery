@@ -167,6 +167,25 @@ public struct DokkuProvider: ServiceProvider {
                 """
         }
 
+        if !request.storage.isEmpty {
+            let mounts = request.storage.map { mount in
+                """
+                    "\(mount.name)" = {
+                      mount_path = "\(mount.mountPath)"
+                    }
+                """
+            }.joined(separator: "\n")
+            body += """
+
+                  # The mounts the app runs with. The provider unmounts any mount a declaration leaves out,
+                  # and restarts the app, so every mount on the box is named here.
+                  storage = {
+                \(mounts)
+                  }
+
+                """
+        }
+
         let configExpr: String
         if let secretsName = service.secretsFile ?? service.conventionalSecretsFile {
             configExpr = """

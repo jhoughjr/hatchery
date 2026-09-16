@@ -26,6 +26,8 @@ struct AdoptTests {
         case "config:export --format json mwlab":
             return CommandOutput(
                 status: 0, standardOutput: #"{"APP_ID": "mwlab", "DATABASE_URL": "postgres://x"}"#)
+        case "storage:report mwlab --storage-run-mounts":
+            return CommandOutput(status: 0, standardOutput: "\n")
         default:
             return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
         }
@@ -218,6 +220,8 @@ struct AdoptTests {
                 return CommandOutput(status: 0, standardOutput: #"{"APP_ID": "mwlab"}"#)
             case "checks:report mwlab --checks-disabled-list":
                 return CommandOutput(status: 0, standardOutput: "web\n")
+            case "storage:report mwlab --storage-run-mounts":
+                return CommandOutput(status: 0, standardOutput: "\n")
             default:
                 return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
             }
@@ -257,6 +261,8 @@ struct AdoptTests {
             case "config:export --format json web":
                 return CommandOutput(status: 0, standardOutput: "{}")
             case "checks:report web --checks-disabled-list":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "storage:report web --storage-run-mounts":
                 return CommandOutput(status: 0, standardOutput: "\n")
             default:
                 return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
@@ -327,6 +333,9 @@ struct AdoptTests {
                 return CommandOutput(status: 0, standardOutput: "{}")
             case "checks:report ci-live --checks-disabled-list":
                 return CommandOutput(status: 0, standardOutput: "\n")
+            case "storage:report ci-live --storage-run-mounts":
+                return CommandOutput(
+                    status: 0, standardOutput: "-v /var/lib/dokku/data/storage/ci-live:/app/data\n")
             default:
                 return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
             }
@@ -341,6 +350,140 @@ struct AdoptTests {
             facts, kind: .mwserver, into: "lab", box: "dokku@192.168.0.103", manifest: manifest)
 
         #expect(result.importCommand == "tofu import dokku_app.ci_live ci-live")
+    }
+}
+
+@Suite("Adopt declares the storage an app runs with")
+struct AdoptStorageTests {
+    private static let box = "dokku@192.168.0.103"
+
+    /// A box holding one app, `pulse`, with a named mount and a bind to a host path, as the opi does.
+    private static func pulseBox(mounts: String?) -> CommandExecutor {
+        return { argv, _ in
+            let command = argv.dropFirst(6).joined(separator: " ")
+            switch command {
+            case "domains:report pulse --domains-app-vhosts":
+                return CommandOutput(status: 0, standardOutput: "pulse.jimmyhoughjr.net\n")
+            case "ports:report pulse --ports-map":
+                return CommandOutput(status: 0, standardOutput: "http:80:8080\n")
+            case "network:report pulse --network-attach-post-create":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "ps:inspect pulse":
+                return CommandOutput(
+                    status: 0, standardOutput: #"[{"Config": {"Image": "dokku/pulse:latest", "Labels": {}}}]"#)
+            case "config:export --format json pulse":
+                return CommandOutput(status: 0, standardOutput: #"{"PULSE_DATA": "/data"}"#)
+            case "checks:report pulse --checks-disabled-list":
+                return CommandOutput(status: 0, standardOutput: "web\n")
+            case "storage:report pulse --storage-run-mounts":
+                guard let mounts else {
+                    return CommandOutput(status: 1, standardOutput: "", standardError: "timed out")
+                }
+                return CommandOutput(status: 0, standardOutput: mounts)
+            default:
+                return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
+            }
+        }
+    }
+
+    private static func manifest(declaring: Bool, stack: String = "estate") -> StackManifest {
+        StackManifest(stacks: [
+            StackSpec(
+                name: stack, backend: .dokku, host: box, tofu: TofuBinding(directory: "/tmp/estate"),
+                services: declaring
+                    ? [ServiceSpec(
+                        name: "pulse", kind: .mwserver, image: "dokku/pulse:latest",
+                        configFile: "pulse.config.json", imageVariable: "pulse_image")]
+                    : [])
+        ])
+    }
+
+    @Test("the run mounts parse into the names the provider keys its state with")
+    func parsesRunMounts() {
+        let mounts = DokkuStorage.parse(
+            runMounts: "-v /var/lib/dokku/data/storage/pulse:/data -v /mnt/nvme:/host/nvme")
+        #expect(mounts == [
+            DokkuStorage(name: "pulse", mountPath: "/data"),
+            DokkuStorage(name: "/mnt/nvme", mountPath: "/host/nvme"),
+        ])
+        #expect(DokkuStorage.parse(runMounts: "") == [])
+        #expect(DokkuStorage.parse(runMounts: "\n") == [])
+    }
+
+    @Test("an app's mounts reach the declaration, one block per mount")
+    func declarationNamesEveryMount() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(
+            mounts: "-v /var/lib/dokku/data/storage/pulse:/data -v /mnt/nvme:/host/nvme\n"))
+        let facts = try await adopter.facts(for: "pulse", on: Self.box)
+        #expect(facts.storage.count == 2)
+
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(declaration.contents.contains("""
+              storage = {
+                "pulse" = {
+                  mount_path = "/data"
+                }
+                "/mnt/nvme" = {
+                  mount_path = "/host/nvme"
+                }
+              }
+            """))
+    }
+
+    @Test("an app with no mounts gets no storage block")
+    func noMountsNoBlock() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(mounts: "\n"))
+        let facts = try await adopter.facts(for: "pulse", on: Self.box)
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(!declaration.contents.contains("storage = {"))
+    }
+
+    @Test("a storage read the box does not answer stops the adopt, rather than declaring no mounts")
+    func unansweredStorageReadRefuses() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(mounts: nil))
+        await #expect(throws: AdoptError.unreadable("storage:report pulse --storage-run-mounts")) {
+            try await adopter.facts(for: "pulse", on: Self.box)
+        }
+    }
+
+    @Test("a replace regenerates the declaration in place, with no second image variable and the sidecar kept")
+    func replaceRegeneratesInPlace() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(mounts: "-v /var/lib/dokku/data/storage/pulse:/data\n"))
+        let facts = try await adopter.facts(for: "pulse", on: Self.box)
+
+        await #expect(throws: AdoptError.alreadyDeclared(app: "pulse", stack: "estate")) {
+            try await adopter.plan(
+                facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: true))
+        }
+
+        let replaced = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: true),
+            replacing: true)
+        #expect(replaced.files.map(\.role) == [.declaration])
+        #expect(replaced.files.first?.contents.contains(#""pulse" = {"#) == true)
+        #expect(replaced.manifest.stack(named: "estate")?.services.map(\.name) == ["pulse"])
+
+        let refreshed = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: true),
+            replacing: true, refreshConfig: true)
+        #expect(refreshed.files.contains { $0.role == .config })
+        #expect(!refreshed.files.contains { $0.role == .variableAppend })
+    }
+
+    @Test("a replace does not move an app another stack declares")
+    func replaceStaysInItsStack() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(mounts: "\n"))
+        let facts = try await adopter.facts(for: "pulse", on: Self.box)
+        var manifest = Self.manifest(declaring: true, stack: "sites")
+        manifest.stacks.append(StackSpec(name: "estate", backend: .dokku, host: Self.box, tofu: TofuBinding(directory: "/tmp/e")))
+        await #expect(throws: AdoptError.alreadyDeclared(app: "pulse", stack: "sites")) {
+            try await adopter.plan(
+                facts, kind: .mwserver, into: "estate", box: Self.box, manifest: manifest, replacing: true)
+        }
     }
 }
 
