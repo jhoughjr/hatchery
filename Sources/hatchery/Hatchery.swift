@@ -387,7 +387,7 @@ struct Box: AsyncParsableCommand {
 
         @Flag(
             name: .long,
-            help: "Regenerate an app or a container the stack already declares, rewriting its tofu file and its manifest entry.")
+            help: "Regenerate an app or a container the stack already declares. A container's tofu file and manifest entry are rewritten; an app's tofu file is rewritten and its manifest entry is kept.")
         var replace: Bool = false
 
         @Flag(
@@ -488,8 +488,11 @@ struct Box: AsyncParsableCommand {
             let overwriting = replace ? Set(result.files.map(\.path)) : []
             let written = try Scaffolder().write(scaffolded, in: spec, overwriting: overwriting)
             print("  wrote \(written.count) file(s)")
-            try result.manifest.write(to: manifestPath)
-            print("  manifest updated")
+            // A replace keeps the manifest entry, so there is nothing to write to the manifest.
+            if !replace {
+                try result.manifest.write(to: manifestPath)
+                print("  manifest updated")
+            }
 
             // A replace regenerates an app vault already knows, so the registration is not asked for twice.
             let contract = resolved.kindFile?.contract(backend: spec.backend)
