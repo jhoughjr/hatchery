@@ -33,11 +33,54 @@ struct Hatchery: AsyncParsableCommand {
     )
 }
 
+/// What a box has left, and the room a deploy can give back.
+struct Space: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "space",
+        abstract: "Say what a box has left, and with --free give back what nothing needs.",
+        discussion: """
+            A deploy pulls an image and leaves it, and a build leaves its cache. Twice on 2026-09-16 the opi filled: \
+            once failing an image build, once making the forge reject a push. --free takes the build cache and the \
+            images no container references, neither of which a running service uses. Call it after a deploy.
+            """
+    )
+
+    @Argument(help: "The box, as an ssh target such as jimmy@192.168.0.103.")
+    var box: String
+
+    @Flag(name: .long, help: "Give back the build cache and the images nothing references.")
+    var free = false
+
+    func run() async throws {
+        let before = BoxSpace.report(box: self.box)
+        guard let before else {
+            print("  \(self.box) did not answer, so nothing is known and nothing was freed")
+            throw ExitCode.failure
+        }
+        print("  \(self.box): \(before.free) free of \(before.size), \(before.percent)% used")
+        for row in before.repositories.prefix(5) {
+            print("    \(row.images) image\(row.images == 1 ? "" : "s")  \(row.name)")
+        }
+        guard self.free else {
+            if before.low { print("  the box is low. Run it again with --free, and prune the registry with hatchery forge prune") }
+            return
+        }
+        guard let after = BoxSpace.free(box: self.box) else {
+            print("  the box stopped answering while it was freeing space")
+            throw ExitCode.failure
+        }
+        print("  \(self.box): \(after.free) free of \(after.size), \(after.percent)% used")
+        if after.low {
+            print("  still low. The images a deploy leaves are the usual cause: hatchery forge prune <package> --box \(self.box) --yes")
+        }
+    }
+}
+
 /// Preparing machines to host stacks.
 struct Box: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Prepare machines to host stacks.",
-        subcommands: [Init.self, Order.self, Scan.self, Adopt.self]
+        subcommands: [Init.self, Order.self, Scan.self, Adopt.self, Space.self]
     )
 
     /// The onboarding guide, executed: point it at an empty Debian/Ubuntu box and it
