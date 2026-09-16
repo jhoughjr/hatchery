@@ -20,12 +20,16 @@ public struct AppFacts: Sendable, Equatable {
     public let checksDisabled: Bool
     /// The storage mounts the app runs with, as `storage:report` names them.
     public let storage: [DokkuStorage]
+    /// The docker network the app joins after each deploy, when it uses that phase.
+    public let networkPostDeploy: String?
 
     public init(
         name: String, image: String, domains: [String], containerPort: Int, hostPort: String = "80",
         network: String?, config: [String: String], checksDisabled: Bool = false,
-        storage: [DokkuStorage] = []
+        storage: [DokkuStorage] = [],
+        networkPostDeploy: String? = nil
     ) {
+        self.networkPostDeploy = networkPostDeploy
         self.storage = storage
         self.name = name
         self.image = image
@@ -102,9 +106,20 @@ public struct Adopter: Sendable {
     /// Everything the box will say about one app, as the dokku user.
     public func facts(for app: String, on box: String) async throws -> AppFacts {
         let domains = try await self.answer("domains:report \(app) --domains-app-vhosts", on: box)
-        let ports = try await self.answer("ports:report \(app) --ports-map", on: box)
+        let setPorts = try await self.answer("ports:report \(app) --ports-map", on: box)
+        // An app nobody pinned has no set map, and dokku serves it on the map it detects. Adopt declares what
+        // runs, so it reads the detected map then. It never assumes a port: a wrong one pinned by an apply
+        // leaves a healthy app unreachable.
+        let ports = Self.hasHTTPMapping(setPorts)
+            ? setPorts
+            : try await self.answer("ports:report \(app) --ports-map-detected", on: box)
+        guard Self.hasHTTPMapping(ports) else {
+            throw AdoptError.unreadable("an http port map for \(app)")
+        }
         let network = try await self.answer(
             "network:report \(app) --network-attach-post-create", on: box)
+        let networkPostDeploy = try await self.answer(
+            "network:report \(app) --network-attach-post-deploy", on: box)
         let inspect = try await self.answer("ps:inspect \(app)", on: box)
         let exported = try await self.answer("config:export --format json \(app)", on: box)
         // Best-effort: an older dokku without the checks plugin's report flag answers nothing
@@ -126,7 +141,8 @@ public struct Adopter: Sendable {
             network: network.isEmpty ? nil : network,
             config: config,
             checksDisabled: !checksDisabled.isEmpty,
-            storage: DokkuStorage.parse(runMounts: mounts))
+            storage: DokkuStorage.parse(runMounts: mounts),
+            networkPostDeploy: networkPostDeploy.isEmpty ? nil : networkPostDeploy)
     }
 
     /// The kind an image name implies. The kinds hatchery knows carry their name in their
@@ -204,7 +220,7 @@ public struct Adopter: Sendable {
             service: service, into: stackName, manifest: manifest,
             containerPort: kindFile?.port ?? facts.containerPort, network: facts.network,
             hostPort: facts.hostPort, checksDisabled: facts.checksDisabled, replacing: replacing,
-            storage: facts.storage)
+            storage: facts.storage, networkPostDeploy: facts.networkPostDeploy)
 
         // The scaffolder minted a config. The box's config replaces it wholesale: keys the
         // contract does not know are kept too, because the running app reads them.
@@ -670,6 +686,14 @@ public struct Adopter: Sendable {
     }
 
     /// `http:80:8080` → 8080. The last field of the first http mapping.
+    /// Whether a port map holds an http mapping of the `scheme:host:container` shape.
+    static func hasHTTPMapping(_ map: String) -> Bool {
+        map.split(separator: " ").contains { entry in
+            let parts = entry.split(separator: ":")
+            return parts.count == 3 && parts[0] == "http" && Int(parts[2]) != nil
+        }
+    }
+
     static func containerPort(fromPortMap map: String) -> Int {
         for entry in map.split(separator: " ") {
             let parts = entry.split(separator: ":")

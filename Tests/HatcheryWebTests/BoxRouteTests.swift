@@ -21,6 +21,9 @@ struct BoxRouteTests {
         case "network:report mwlab --network-attach-post-create",
             "network:report docs --network-attach-post-create":
             return CommandOutput(status: 0, standardOutput: "infra_default\n")
+        case "network:report mwlab --network-attach-post-deploy",
+            "network:report docs --network-attach-post-deploy":
+            return CommandOutput(status: 0, standardOutput: "\n")
         case "domains:report docs --domains-app-vhosts":
             return CommandOutput(status: 0, standardOutput: "docs.jimmyhoughjr.net\n")
         case "ports:report docs --ports-map": return CommandOutput(status: 0, standardOutput: "http:80:8080\n")
