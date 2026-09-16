@@ -127,3 +127,46 @@ struct ForgePackagesTests {
         #expect(ForgePackages.sourceImageTag(inReport: "Git source image: localhost:5000/rookery") == nil)
     }
 }
+
+@Suite("Images on a box")
+struct BoxImagesTests {
+    static let listing = """
+    aaa 2026-09-16 10:00:00 -0500 CDT
+    bbb 2026-09-16 09:00:00 -0500 CDT
+    ccc 2026-09-15 22:00:00 -0500 CDT
+    latest 2026-09-16 10:00:00 -0500 CDT
+    <none> 2026-09-10 08:00:00 -0500 CDT
+    """
+
+    @Test("the newest, latest, and whatever the box runs are kept, and the rest go")
+    func whatStays() {
+        let kept = BoxImages.keeping(Self.listing, keep: 2, running: ["ccc"])
+        #expect(kept.contains("aaa"))
+        #expect(kept.contains("latest"))
+        // The deployed one is kept even when it is not among the newest.
+        #expect(kept.contains("ccc"))
+        #expect(!kept.contains("<none>"))
+    }
+
+    @Test("a box that answers nothing removes nothing, rather than guessing")
+    func aSilentBox() {
+        let outcome = BoxImages.prune(box: "nowhere", repository: "r", keep: 2, running: []) { _, _ in (1, "") }
+        #expect(outcome == nil)
+    }
+
+    @Test("only the images the box does not need are removed, and only of that one repository")
+    func removesTheRest() {
+        var asked: [String] = []
+        let outcome = BoxImages.prune(box: "box", repository: "forge/x", keep: 1, running: []) { _, arguments in
+            let command = arguments.last ?? ""
+            asked.append(command)
+            if command.hasPrefix("docker images") { return (0, Self.listing) }
+            if command.hasPrefix("df") { return (0, "/dev/root 230G 100G 130G 44% /") }
+            return (0, "done")
+        }
+        #expect(outcome?.removed.sorted() == ["bbb", "ccc"])
+        #expect(asked.contains { $0.contains("docker rmi -f forge/x:") })
+        #expect(!asked.contains { $0.contains("mwserver") })
+        #expect(outcome?.freeAfter.contains("44%") == true)
+    }
+}

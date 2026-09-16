@@ -57,6 +57,9 @@ struct Forge: AsyncParsableCommand {
         @Option(name: .long, help: "A dokku app whose deployed image stays, as dokku@host:app. Repeat it for several.")
         var protectDeployed: [String] = []
 
+        @Option(name: .long, help: "A box to take the pulled images off as well, as an ssh target such as jimmy@192.168.0.103.")
+        var box: String?
+
         @Flag(name: .long, help: "Delete. Without it, only list.")
         var yes = false
 
@@ -90,6 +93,19 @@ struct Forge: AsyncParsableCommand {
                         try await packages.delete(owner: self.owner, version, token: token)
                     }
                     print("  \(name): deleted \(doomed.count)")
+                    // The registry is only half of it. A deploy pulls the image onto the box and leaves it there,
+                    // and on 2026-09-16 that filled the opi to zero bytes while the registry was tidy.
+                    if let box = self.box {
+                        let repository = "forgejo.jimmyhoughjr.net/\(self.owner)/\(name)"
+                        guard let outcome = BoxImages.prune(
+                            box: box, repository: repository, keep: self.keep, running: protect)
+                        else {
+                            print("  \(name): could not read the images on \(box), so none were removed")
+                            continue
+                        }
+                        print("  \(name): removed \(outcome.removed.count) image\(outcome.removed.count == 1 ? "" : "s") from \(box)")
+                        if !outcome.freeAfter.isEmpty { print("  \(box): \(outcome.freeAfter)") }
+                    }
                 }
             } catch let failure as ForgePackages.Failure {
                 print("  FAILED: \(failure)")
