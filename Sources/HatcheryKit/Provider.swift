@@ -57,6 +57,9 @@ public struct ScaffoldRequest: Sendable, Equatable {
     /// Set only by adopt. A declaration written with one carries an `import` block, because tofu otherwise
     /// plans to create a container the box is already holding the name of.
     public var containerID: String?
+    /// The storage mounts the service runs with. Adopt carries what it measures.
+    /// A dokku declaration names every one, because the provider unmounts a mount it is not told about.
+    public var storage: [DokkuStorage]
 
     public init(
         stack: StackSpec,
@@ -66,8 +69,10 @@ public struct ScaffoldRequest: Sendable, Equatable {
         gated: Bool = false,
         hostPort: String = "80",
         checksDisabled: Bool = true,
-        containerID: String? = nil
+        containerID: String? = nil,
+        storage: [DokkuStorage] = []
     ) {
+        self.storage = storage
         self.stack = stack
         self.service = service
         self.containerPort = containerPort

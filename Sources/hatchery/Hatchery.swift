@@ -387,7 +387,7 @@ struct Box: AsyncParsableCommand {
 
         @Flag(
             name: .long,
-            help: "Regenerate a container the stack already declares, rewriting its tofu file and its manifest entry.")
+            help: "Regenerate an app or a container the stack already declares, rewriting its tofu file and its manifest entry.")
         var replace: Bool = false
 
         @Flag(
@@ -434,9 +434,6 @@ struct Box: AsyncParsableCommand {
             guard provider == .dokku else {
                 throw ValidationError("adopt reads a box or a container; \(box) is \(provider.rawValue)")
             }
-            guard !replace else {
-                throw ValidationError("--replace is a container door; a dokku app is adopted once")
-            }
             let inventory = try await scanner.scan(target)
             guard inventory.apps.contains(where: { $0.name == app }) else {
                 throw ValidationError(AdoptError.notOnBox(app: app, box: box).description)
@@ -465,12 +462,13 @@ struct Box: AsyncParsableCommand {
             print("  port     \(resolved.kindFile?.port ?? facts.containerPort)")
             if let network = facts.network { print("  network  \(network)") }
             print("  config   \(facts.config.count) key(s)")
+            print("  storage  \(facts.storage.isEmpty ? "none" : facts.storage.map { "\($0.name) -> \($0.mountPath)" }.joined(separator: ", "))")
 
             let result: AdoptResult
             do {
                 result = try await adopter.plan(
                     facts, kind: resolved.kind, into: stack, box: box, manifest: parsed,
-                    kindFile: resolved.kindFile)
+                    kindFile: resolved.kindFile, replacing: replace, refreshConfig: refreshConfig)
             } catch let error as AdoptError {
                 throw ValidationError(error.description)
             }
@@ -486,13 +484,16 @@ struct Box: AsyncParsableCommand {
             guard let spec = parsed.stack(named: stack) else { return }
             let scaffolded = ScaffoldResult(
                 service: result.service, files: result.files, secrets: [], manifest: result.manifest)
-            let written = try Scaffolder().write(scaffolded, in: spec)
+            // The door opens for the files this plan carries, and for no other file in the directory.
+            let overwriting = replace ? Set(result.files.map(\.path)) : []
+            let written = try Scaffolder().write(scaffolded, in: spec, overwriting: overwriting)
             print("  wrote \(written.count) file(s)")
             try result.manifest.write(to: manifestPath)
             print("  manifest updated")
 
+            // A replace regenerates an app vault already knows, so the registration is not asked for twice.
             let contract = resolved.kindFile?.contract(backend: spec.backend)
-            if !noVault, VaultStep.wanted(contract: contract), let contract {
+            if !replace, !noVault, VaultStep.wanted(contract: contract), let contract {
                 try await VaultStep.run(
                     service: result.service, in: spec, manifestPath: manifestPath,
                     contract: contract, dryRun: false)
@@ -500,7 +501,12 @@ struct Box: AsyncParsableCommand {
 
             if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
             print("")
-            print("  next, in \(spec.tofu?.directory ?? "the stack directory"): \(result.importCommand)")
+            if replace {
+                // The app is already in state, so a replace needs a plan, not an import.
+                print("  next, in \(spec.tofu?.directory ?? "the stack directory"): tofu plan")
+            } else {
+                print("  next, in \(spec.tofu?.directory ?? "the stack directory"): \(result.importCommand)")
+            }
         }
 
         /// The container path: one inspect, the kind the registry knows under that name, and the same

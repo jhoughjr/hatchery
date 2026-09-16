@@ -18,11 +18,15 @@ public struct AppFacts: Sendable, Equatable {
     public let config: [String: String]
     /// Whether the box currently disables this app's zero-downtime checks.
     public let checksDisabled: Bool
+    /// The storage mounts the app runs with, as `storage:report` names them.
+    public let storage: [DokkuStorage]
 
     public init(
         name: String, image: String, domains: [String], containerPort: Int, hostPort: String = "80",
-        network: String?, config: [String: String], checksDisabled: Bool = false
+        network: String?, config: [String: String], checksDisabled: Bool = false,
+        storage: [DokkuStorage] = []
     ) {
+        self.storage = storage
         self.name = name
         self.image = image
         self.domains = domains
@@ -107,6 +111,9 @@ public struct Adopter: Sendable {
         // useful here, and that is not a reason to fail the whole read.
         let checksDisabled = (try? await self.answer(
             "checks:report \(app) --checks-disabled-list", on: box)) ?? ""
+        // Not best-effort, unlike the checks read above. A mount that adopt fails to see is left out of the
+        // declaration, and the provider unmounts what a declaration leaves out. An unanswered read stops here.
+        let mounts = try await self.answer("storage:report \(app) --storage-run-mounts", on: box)
 
         let config = (try? JSONDecoder().decode([String: String].self, from: Data(exported.utf8)))
             ?? [:]
@@ -118,7 +125,8 @@ public struct Adopter: Sendable {
             hostPort: Self.hostPort(fromPortMap: ports),
             network: network.isEmpty ? nil : network,
             config: config,
-            checksDisabled: !checksDisabled.isEmpty)
+            checksDisabled: !checksDisabled.isEmpty,
+            storage: DokkuStorage.parse(runMounts: mounts))
     }
 
     /// The kind an image name implies. The kinds hatchery knows carry their name in their
@@ -165,9 +173,13 @@ public struct Adopter: Sendable {
     /// `kindFile`, when present, wins for `healthcheck` and `port` (when it has one): the
     /// service's own word about its own contact surface. The config sidecar still carries the
     /// box's measured keys either way.
+    ///
+    /// `replacing` regenerates an app the named stack already declares, from what the box says now.
+    /// Without `refreshConfig` the config sidecar and the secrets file it already has are left alone.
     public func plan(
         _ facts: AppFacts, kind: ServiceKind, into stackName: String, box: String,
-        manifest: StackManifest, kindFile: KindFile? = nil
+        manifest: StackManifest, kindFile: KindFile? = nil, replacing: Bool = false,
+        refreshConfig: Bool = false
     ) async throws -> AdoptResult {
         guard let stack = manifest.stack(named: stackName), stack.backend == .dokku,
             let host = stack.hostAddress, box.hasSuffix(host)
@@ -176,7 +188,11 @@ public struct Adopter: Sendable {
         }
         for declared in manifest.stacks
         where declared.services.contains(where: { $0.name == facts.name }) {
-            throw AdoptError.alreadyDeclared(app: facts.name, stack: declared.name)
+            // A replace regenerates the app where it already stands. An app declared in another stack is
+            // still a refusal, because moving it is not what this door does.
+            guard replacing, declared.name == stackName else {
+                throw AdoptError.alreadyDeclared(app: facts.name, stack: declared.name)
+            }
         }
 
         let service = ServiceSpec(
@@ -186,16 +202,28 @@ public struct Adopter: Sendable {
         let scaffolded = try await Scaffolder().plan(
             service: service, into: stackName, manifest: manifest,
             containerPort: kindFile?.port ?? facts.containerPort, network: facts.network,
-            hostPort: facts.hostPort, checksDisabled: facts.checksDisabled)
+            hostPort: facts.hostPort, checksDisabled: facts.checksDisabled, replacing: replacing,
+            storage: facts.storage)
 
         // The scaffolder minted a config. The box's config replaces it wholesale: keys the
         // contract does not know are kept too, because the running app reads them.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let configJSON = String(decoding: try encoder.encode(facts.config), as: UTF8.self)
-        let files = scaffolded.files.map { file -> GeneratedFile in
+        var files = scaffolded.files.map { file -> GeneratedFile in
             guard file.role == .config else { return file }
             return GeneratedFile(path: file.path, contents: configJSON + "\n", role: .config)
+        }
+
+        if replacing {
+            // The image variable was appended when the app was first declared, and a second append
+            // declares it twice, which stops tofu from planning at all.
+            files.removeAll { $0.role == .variableAppend }
+            // The sidecar and the secrets file hold what the app runs with, so they stay until
+            // --refresh-config asks for them.
+            if !refreshConfig {
+                files.removeAll { $0.role == .config }
+            }
         }
 
         return AdoptResult(

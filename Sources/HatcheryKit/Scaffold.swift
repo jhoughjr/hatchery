@@ -87,7 +87,8 @@ public struct Scaffolder: Sendable {
         siblings: [String: [String: String]] = [:],
         mintKeypair: Bool = false,
         manifestPath: String? = nil,
-        replacing: Bool = false
+        replacing: Bool = false,
+        storage: [DokkuStorage] = []
     ) async throws -> ScaffoldResult {
         guard var stack = manifest.stack(named: stackName) else {
             throw ManifestError.invalidStackName(stackName)
@@ -108,13 +109,13 @@ public struct Scaffolder: Sendable {
         let request = ScaffoldRequest(
             stack: stack, service: service, containerPort: containerPort,
             network: network, gated: gated, hostPort: hostPort, checksDisabled: checksDisabled,
-            containerID: containerID)
+            containerID: containerID, storage: storage)
         resolved.imageVariable = provider.imageVariableName(for: request)
 
         let finalRequest = ScaffoldRequest(
             stack: stack, service: resolved, containerPort: containerPort,
             network: network, gated: gated, hostPort: hostPort, checksDisabled: checksDisabled,
-            containerID: containerID)
+            containerID: containerID, storage: storage)
 
         var files = try provider.declaration(for: finalRequest)
         if let variable = provider.imageVariable(for: finalRequest) {
