@@ -177,10 +177,10 @@ A rookery team can build phases 1 to 3 without access to anything live except re
 ### Gates
 
 The gates below are the rules that a person or a check must pass before an action.
-Rookery reads this block when it opens the assignment, after its gates feature lands.
+Rookery reads this block when it opens the assignment, after its gates feature lands. The format is `docs/spec-gates.md` in `jimmy/rookery`.
 Until then, a seat reads the block as rules and a person enforces it.
 
-- `before` names what the gate stops: a command pattern, or a milestone such as a merge to main.
+- `before` names what the gate stops: command patterns, `write <path>`, or `milestone <name>`.
 - `refuse` stops the action with no approval possible, and gives the reason.
 - `check` is a command that must exit with status 0. Rookery runs it before it asks anyone.
 - `requires` lists what the approver confirms. The approver reads each line and rules on it.
@@ -190,10 +190,10 @@ Until then, a seat reads the block as rules and a person enforces it.
 - before: tofu apply | tofu import | ports:set | ports:clear | git:from-image | config:set
   refuse: "These change the box. The 2026-09-16 vault outage came from one ports:set."
 
-- before: write to ~/infra-state
+- before: write ~/infra-state
   refuse: "Tests copy the files to a temporary directory."
 
-- before: merge to main
+- before: milestone ready-to-merge
   phase: 1, 2, 3
   approver: review
   check: swift test
@@ -201,7 +201,7 @@ Until then, a seat reads the block as rules and a person enforces it.
     - "No test opens an SSH connection."
     - "The report gives the branch, the test count before and after, and each acceptance output."
 
-- before: merge to main
+- before: milestone ready-to-merge
   phase: 4
   approver: jimmy
   check: swift test
