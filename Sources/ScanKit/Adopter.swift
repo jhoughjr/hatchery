@@ -22,13 +22,17 @@ public struct AppFacts: Sendable, Equatable {
     public let storage: [DokkuStorage]
     /// The docker network the app joins after each deploy, when it uses that phase.
     public let networkPostDeploy: String?
+    /// Every mapping of the port map beside the primary http one, such as `https:443:80`.
+    public let extraPorts: [DokkuPortMapping]
 
     public init(
         name: String, image: String, domains: [String], containerPort: Int, hostPort: String = "80",
         network: String?, config: [String: String], checksDisabled: Bool = false,
         storage: [DokkuStorage] = [],
-        networkPostDeploy: String? = nil
+        networkPostDeploy: String? = nil,
+        extraPorts: [DokkuPortMapping] = []
     ) {
+        self.extraPorts = extraPorts
         self.networkPostDeploy = networkPostDeploy
         self.storage = storage
         self.name = name
@@ -130,6 +134,17 @@ public struct Adopter: Sendable {
         // declaration, and the provider unmounts what a declaration leaves out. An unanswered read stops here.
         let mounts = try await self.answer("storage:report \(app) --storage-run-mounts", on: box)
 
+        // An https mapping is declared only for an app that holds a certificate. Without one, an https mapping
+        // fails the nginx test for every app on the box; with one, leaving it out sends every request to a port
+        // nothing serves. Both are outages, so a certificate read that fails stops the adopt.
+        var extraPorts = Self.extraPorts(fromPortMap: ports)
+        if extraPorts.contains(where: { $0.scheme == "https" }) {
+            let sslEnabled = try await self.answer("certs:report \(app) --ssl-enabled", on: box)
+            if sslEnabled != "true" {
+                extraPorts.removeAll { $0.scheme == "https" }
+            }
+        }
+
         let config = (try? JSONDecoder().decode([String: String].self, from: Data(exported.utf8)))
             ?? [:]
         return AppFacts(
@@ -142,7 +157,8 @@ public struct Adopter: Sendable {
             config: config,
             checksDisabled: !checksDisabled.isEmpty,
             storage: DokkuStorage.parse(runMounts: mounts),
-            networkPostDeploy: networkPostDeploy.isEmpty ? nil : networkPostDeploy)
+            networkPostDeploy: networkPostDeploy.isEmpty ? nil : networkPostDeploy,
+            extraPorts: extraPorts)
     }
 
     /// The kind an image name implies. The kinds hatchery knows carry their name in their
@@ -220,7 +236,7 @@ public struct Adopter: Sendable {
             service: service, into: stackName, manifest: manifest,
             containerPort: kindFile?.port ?? facts.containerPort, network: facts.network,
             hostPort: facts.hostPort, checksDisabled: facts.checksDisabled, replacing: replacing,
-            storage: facts.storage, networkPostDeploy: facts.networkPostDeploy)
+            storage: facts.storage, networkPostDeploy: facts.networkPostDeploy, extraPorts: facts.extraPorts)
 
         // The scaffolder minted a config. The box's config replaces it wholesale: keys the
         // contract does not know are kept too, because the running app reads them.
@@ -686,6 +702,13 @@ public struct Adopter: Sendable {
     }
 
     /// `http:80:8080` → 8080. The last field of the first http mapping.
+    /// Every mapping but the first http one, which the declaration carries as its primary mapping.
+    static func extraPorts(fromPortMap map: String) -> [DokkuPortMapping] {
+        let all = DokkuPortMapping.parse(portMap: map)
+        guard let primary = all.firstIndex(where: { $0.scheme == "http" }) else { return all }
+        return all.enumerated().filter { $0.offset != primary }.map(\.element)
+    }
+
     /// Whether a port map holds an http mapping of the `scheme:host:container` shape.
     static func hasHTTPMapping(_ map: String) -> Bool {
         map.split(separator: " ").contains { entry in
