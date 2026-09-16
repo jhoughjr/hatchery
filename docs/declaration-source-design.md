@@ -4,7 +4,7 @@ This design makes the hatchery manifest and the kind files the one description o
 Tofu files become generated output, and nobody edits them by hand.
 An audit compares the declaration, the tofu files and the box, and it stops an apply when they disagree.
 
-Status: proposed on 2026-09-16. Not started.
+Status: proposed on 2026-09-16, with Jimmy's decisions on the same day. Not started.
 
 ## Why now
 
@@ -67,7 +67,8 @@ The rules:
 - The rendering reads only the declaration. It never reads the box.
 - `box adopt` writes measurement into the declaration once, when a service joins a stack.
   After that, a difference between the box and the declaration is a finding, not a silent update.
-- An https mapping is legal in a declaration only when the kind or the service says the app holds a certificate.
+- An https mapping is legal in a declaration only when the service entry says the deployment holds a certificate.
+- A kind with `tls: required` is legal in a stack only when the service entry holds a certificate.
 
 ## The work
 
@@ -96,18 +97,27 @@ Acceptance:
 - Remove the `storage` block from a copy of `estate/vault.tf` in a temporary directory. The audit reports `storage-drift` for vault.
 - `hatchery config audit` exits with a non-zero status when any finding exists.
 
-### Phase 2: the kind file declares storage, networks, ports and certificates
+### Phase 2: the declaration carries storage, networks, ports and TLS
 
 The kind file gains fields that the renderer uses, so it stops being documentation only.
 
 - `storage` stays in its present shape. The renderer reads it.
 - `networks`: `postCreate` and `postDeploy`, each optional.
-- `ports`: a list of `scheme`, `host` and `container`. The present `port` field stays as a short form for one http mapping.
-- `certificate`: true when the app holds a certificate.
+- `ports`: a list of `scheme`, `host` and `container`.
+  The present `port` field stays as a short form for one http mapping.
+- `tls`: `required`, `optional` or `none`. This is a fact about the software.
+  A server that refuses plain HTTP is `required`. vault serves plain HTTP behind nginx, so vault is `optional`.
+
+The service entry in the manifest gains one field, because a certificate belongs to one deployment.
+
+- `certificate`: the hostnames the deployment's certificate covers, or absent.
+  vault on the opi holds one for `vault`, `s3` and `forgejo`, because the LAN resolver sends Macs on the LAN to the box directly.
+  A vault behind Cloudflare only needs none.
 
 Acceptance:
 
-- A kind file with an https port and no `certificate: true` fails `hatchery kind add` with a message that names the risk.
+- A service with an https port and no `certificate` fails validation with a message that names the risk.
+- A service whose kind says `tls: required` and that has no `certificate` fails validation.
 - Every kind file in `~/infra-state/estate/kinds` and `~/infra-state/sites/kinds` loads, and each one round-trips through the loader unchanged.
 - `box adopt` fills the new fields from measurement for a new service.
 
@@ -116,6 +126,8 @@ Acceptance:
 Add `hatchery render <stack>` and `hatchery render <stack> --check`.
 
 - `render` writes every dokku `.tf` file of the stack from the declaration, with the generated header.
+- The scope is the `estate` and `sites` stacks.
+  The lab stacks `mwserver-tf` and `mwlab-2` are out of scope, because they may be taken down and rebuilt.
 - `--check` writes nothing. It exits with a non-zero status and names each file that differs.
 - `box adopt --replace` and `service new` call the same renderer, so there is one code path that writes HCL.
 
@@ -125,6 +137,9 @@ Acceptance:
   Where the only difference is the new header, the phase commits the regenerated files once and `--check` then passes.
 - A test renders each backend's declaration from a fixture manifest and compares the text byte for byte.
 - A forge CI job in `infra-state` runs `render --check` on every push.
+  The job runs only `render --check`. It holds no SSH key and never reads the box.
+- The box audit from phase 1 runs in two places, and CI is not one of them:
+  hatchery publishes its findings to pulse on its present schedule, and the phase 4 guard runs it before an apply.
 
 ### Phase 4: an apply refuses a drifted stack
 
@@ -144,27 +159,64 @@ Acceptance:
 - It does not replace tofu or the dokku provider.
 - It does not move jobs, the `forge` stack or bare containers into tofu.
 - It does not change MWServer or its lab stacks `mwserver-tf` and `mwlab-2`.
-  They were authored with `service new` and they are clean.
-  Phase 3 renders them only after Jimmy approves.
+  They were authored with `service new` and they are clean, and they may be taken down and rebuilt.
 - It does not apply anything to the estate.
 
 ## Rules for a team that builds this
 
 A rookery team can build phases 1 to 3 without access to anything live except read-only box queries.
 
-- Work on a branch of `jimmy/hatchery` on the forge. One branch per phase. Merge only after review.
+- Work on a branch of `jimmy/hatchery` on the forge. One branch per phase.
 - Invoke the `house-style` skill before you write code or prose, and give this instruction to every sub-agent.
 - Tests use the fake command executor that `AdoptTests` uses. A test never opens an SSH connection.
 - Read-only commands against `dokku@192.168.0.103` are allowed for acceptance:
   `ports:report`, `network:report`, `storage:report`, `certs:report`, `domains:report`, `apps:list`.
-- Never run `tofu apply`, `tofu import`, `ports:set`, `ports:clear`, `git:from-image`, `config:set`, or any command that changes the box.
-  The 2026-09-16 outage came from one `ports:set`.
 - Never write to `~/infra-state`. Copy files to a temporary directory for tests.
-- Phase 4 changes the path that applies to the estate. Jimmy reviews it before it merges.
 - Each phase returns the branch name, the test count before and after, and the output of each acceptance check.
 
-## Open questions for Jimmy
+### Gates
 
-1. Should `certificate` in phase 2 be a kind fact or a service fact? A kind describes an image, and a certificate belongs to one deployment of it.
-2. Should phase 3 render the lab stacks `mwserver-tf` and `mwlab-2`, or leave them as `service new` wrote them?
-3. Should the forge CI job in phase 3 also run the phase 1 audit against the box, or only `render --check`, which needs no box access?
+The gates below are the rules that a person or a check must pass before an action.
+Rookery reads this block when it opens the assignment, after its gates feature lands.
+Until then, a seat reads the block as rules and a person enforces it.
+
+- `before` names what the gate stops: a command pattern, or a milestone such as a merge to main.
+- `refuse` stops the action with no approval possible, and gives the reason.
+- `check` is a command that must exit with status 0. Rookery runs it before it asks anyone.
+- `requires` lists what the approver confirms. The approver reads each line and rules on it.
+- `approver` is a person, or `review` for a review seat.
+
+```gates
+- before: tofu apply | tofu import | ports:set | ports:clear | git:from-image | config:set
+  refuse: "These change the box. The 2026-09-16 vault outage came from one ports:set."
+
+- before: write to ~/infra-state
+  refuse: "Tests copy the files to a temporary directory."
+
+- before: merge to main
+  phase: 1, 2, 3
+  approver: review
+  check: swift test
+  requires:
+    - "No test opens an SSH connection."
+    - "The report gives the branch, the test count before and after, and each acceptance output."
+
+- before: merge to main
+  phase: 4
+  approver: jimmy
+  check: swift test
+  requires:
+    - "The guard refuses the storage, network and port plans in the acceptance tests."
+    - "The guard allows a plan that only fills in imported attributes."
+    - "The report gives the branch, the test count before and after, and each acceptance output."
+```
+
+## Decisions
+
+Jimmy ruled on these on 2026-09-16.
+
+1. **TLS is both a kind fact and a deployment fact.**
+   The kind says whether the software needs TLS, and the service entry says whether the deployment holds a certificate.
+2. **Render covers `estate` and `sites` only.** The lab stacks stay as they are, because they may be taken down and rebuilt.
+3. **CI runs only `render --check`.** The box audit publishes to pulse and runs in the apply guard.
+4. **`requires` lines are free text for now.** A person or a review seat reads them. A criterion that a named role judges is a later step.
