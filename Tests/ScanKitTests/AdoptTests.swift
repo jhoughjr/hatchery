@@ -509,7 +509,7 @@ struct AdoptStorageTests {
     }
 
     /// A box with one app that nobody pinned: no set port map, a detected one, and a post-deploy network.
-    private static func unpinnedBox(detected: String) -> CommandExecutor {
+    private static func unpinnedBox(detected: String, sslEnabled: String? = "false") -> CommandExecutor {
         return { argv, _ in
             let command = argv.dropFirst(6).joined(separator: " ")
             switch command {
@@ -530,6 +530,11 @@ struct AdoptStorageTests {
                 return CommandOutput(status: 0, standardOutput: "{}")
             case "storage:report vault --storage-run-mounts":
                 return CommandOutput(status: 0, standardOutput: "-v /var/lib/dokku/data/storage/vault:/data\n")
+            case "certs:report vault --ssl-enabled":
+                guard let sslEnabled else {
+                    return CommandOutput(status: 1, standardOutput: "", standardError: "timed out")
+                }
+                return CommandOutput(status: 0, standardOutput: sslEnabled + "\n")
             default:
                 return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
             }
@@ -548,8 +553,57 @@ struct AdoptStorageTests {
         let declaration = try #require(result.files.first { $0.role == .declaration })
         #expect(declaration.contents.contains(#"container_port = "80""#))
         #expect(!declaration.contents.contains("8080"))
-        // The https mapping dokku detects is never declared: without a certificate it fails nginx for every app.
+        // Without a certificate the https mapping dokku detects is not declared: it would fail nginx for every app.
         #expect(!declaration.contents.contains("443"))
+    }
+
+    @Test("an app that holds a certificate keeps its https mapping beside the http one")
+    func certificateAppKeepsHTTPS() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "http:80:80 https:443:80\n", sslEnabled: "true"))
+        let facts = try await adopter.facts(for: "vault", on: Self.box)
+        #expect(facts.extraPorts == [DokkuPortMapping(scheme: "https", hostPort: "443", containerPort: 80)])
+
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(declaration.contents.contains("""
+              ports = {
+                "80" = {
+                  scheme         = "http"
+                  container_port = "80"
+                }
+                "443" = {
+                  scheme         = "https"
+                  container_port = "80"
+                }
+              }
+            """))
+    }
+
+    @Test("a certificate read the box does not answer stops the adopt when the map carries https")
+    func unansweredCertificateReadRefuses() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "http:80:80 https:443:80\n", sslEnabled: nil))
+        await #expect(throws: AdoptError.unreadable("certs:report vault --ssl-enabled")) {
+            try await adopter.facts(for: "vault", on: Self.box)
+        }
+    }
+
+    @Test("an app with only an http mapping renders the ports block as it always did")
+    func plainAppPortsUnchanged() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "http:80:80\n"))
+        let facts = try await adopter.facts(for: "vault", on: Self.box)
+        #expect(facts.extraPorts.isEmpty)
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(declaration.contents.contains("""
+              ports = {
+                "80" = {
+                  scheme         = "http"
+                  container_port = "80"
+                }
+              }
+            """))
     }
 
     @Test("an app with no http port map at all stops the adopt")

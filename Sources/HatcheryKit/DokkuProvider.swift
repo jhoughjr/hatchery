@@ -141,7 +141,15 @@ public struct DokkuProvider: ServiceProvider {
                   scheme         = "http"
                   container_port = "\(request.containerPort)"
                 }
-              }
+            \(request.extraPorts.map { mapping in
+                """
+                    "\(mapping.hostPort)" = {
+                      scheme         = "\(mapping.scheme)"
+                      container_port = "\(mapping.containerPort)"
+                    }
+
+                """
+            }.joined())  }
 
             """
 

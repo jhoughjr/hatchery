@@ -57,6 +57,10 @@ public struct ScaffoldRequest: Sendable, Equatable {
     /// Set only by adopt. A declaration written with one carries an `import` block, because tofu otherwise
     /// plans to create a container the box is already holding the name of.
     public var containerID: String?
+    /// The port mappings the app runs beside the primary http one, such as `https:443:80` for an app that holds
+    /// a certificate. The provider removes a mapping a declaration leaves out, and a certificate app without its
+    /// https mapping answers every request with a redirect to a port nothing serves.
+    public var extraPorts: [DokkuPortMapping]
     /// A docker network the app joins after each deploy rather than at create.
     ///
     /// dokku keeps the two phases as separate settings, and an app set up by hand often uses this one.
@@ -76,8 +80,10 @@ public struct ScaffoldRequest: Sendable, Equatable {
         checksDisabled: Bool = true,
         containerID: String? = nil,
         storage: [DokkuStorage] = [],
-        networkPostDeploy: String? = nil
+        networkPostDeploy: String? = nil,
+        extraPorts: [DokkuPortMapping] = []
     ) {
+        self.extraPorts = extraPorts
         self.networkPostDeploy = networkPostDeploy
         self.storage = storage
         self.stack = stack
