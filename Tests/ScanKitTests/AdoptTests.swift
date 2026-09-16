@@ -21,6 +21,8 @@ struct AdoptTests {
             return CommandOutput(status: 0, standardOutput: "http:80:8080\n")
         case "network:report mwlab --network-attach-post-create":
             return CommandOutput(status: 0, standardOutput: "macworkstack-infra_default\n")
+        case "network:report mwlab --network-attach-post-deploy":
+            return CommandOutput(status: 0, standardOutput: "\n")
         case "ps:inspect mwlab":
             return CommandOutput(status: 0, standardOutput: inspect)
         case "config:export --format json mwlab":
@@ -213,6 +215,8 @@ struct AdoptTests {
                 return CommandOutput(status: 0, standardOutput: "http:8080:8080\n")
             case "network:report mwlab --network-attach-post-create":
                 return CommandOutput(status: 0, standardOutput: "\n")
+            case "network:report mwlab --network-attach-post-deploy":
+                return CommandOutput(status: 0, standardOutput: "\n")
             case "ps:inspect mwlab":
                 return CommandOutput(
                     status: 0, standardOutput: #"[{"Config": {"Image": "dokku/mwlab:latest", "Labels": {}}}]"#)
@@ -254,6 +258,8 @@ struct AdoptTests {
             case "ports:report web --ports-map":
                 return CommandOutput(status: 0, standardOutput: "http:80:8080\n")
             case "network:report web --network-attach-post-create":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "network:report web --network-attach-post-deploy":
                 return CommandOutput(status: 0, standardOutput: "\n")
             case "ps:inspect web":
                 return CommandOutput(
@@ -326,6 +332,8 @@ struct AdoptTests {
                 return CommandOutput(status: 0, standardOutput: "http:80:8080\n")
             case "network:report ci-live --network-attach-post-create":
                 return CommandOutput(status: 0, standardOutput: "\n")
+            case "network:report ci-live --network-attach-post-deploy":
+                return CommandOutput(status: 0, standardOutput: "\n")
             case "ps:inspect ci-live":
                 return CommandOutput(
                     status: 0, standardOutput: #"[{"Config": {"Image": "dokku/ci-live:latest", "Labels": {}}}]"#)
@@ -367,6 +375,8 @@ struct AdoptStorageTests {
             case "ports:report pulse --ports-map":
                 return CommandOutput(status: 0, standardOutput: "http:80:8080\n")
             case "network:report pulse --network-attach-post-create":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "network:report pulse --network-attach-post-deploy":
                 return CommandOutput(status: 0, standardOutput: "\n")
             case "ps:inspect pulse":
                 return CommandOutput(
@@ -496,6 +506,70 @@ struct AdoptStorageTests {
         #expect(replaced.service.image == "dokku/pulse:latest")
         // The declaration still comes from the box.
         #expect(replaced.files.first?.contents.contains("pulse.jimmyhoughjr.net") == true)
+    }
+
+    /// A box with one app that nobody pinned: no set port map, a detected one, and a post-deploy network.
+    private static func unpinnedBox(detected: String) -> CommandExecutor {
+        return { argv, _ in
+            let command = argv.dropFirst(6).joined(separator: " ")
+            switch command {
+            case "domains:report vault --domains-app-vhosts":
+                return CommandOutput(status: 0, standardOutput: "vault.jimmyhoughjr.net\n")
+            case "ports:report vault --ports-map":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "ports:report vault --ports-map-detected":
+                return CommandOutput(status: 0, standardOutput: detected)
+            case "network:report vault --network-attach-post-create":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "network:report vault --network-attach-post-deploy":
+                return CommandOutput(status: 0, standardOutput: "vault_default\n")
+            case "ps:inspect vault":
+                return CommandOutput(
+                    status: 0, standardOutput: #"[{"Config": {"Image": "dokku/vault:latest", "Labels": {}}}]"#)
+            case "config:export --format json vault":
+                return CommandOutput(status: 0, standardOutput: "{}")
+            case "storage:report vault --storage-run-mounts":
+                return CommandOutput(status: 0, standardOutput: "-v /var/lib/dokku/data/storage/vault:/data\n")
+            default:
+                return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
+            }
+        }
+    }
+
+    @Test("an app with no set port map is declared on the port dokku detects, not an assumed 8080")
+    func unpinnedAppTakesTheDetectedPort() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "http:80:80 https:443:80\n"))
+        let facts = try await adopter.facts(for: "vault", on: Self.box)
+        #expect(facts.containerPort == 80)
+        #expect(facts.hostPort == "80")
+
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(declaration.contents.contains(#"container_port = "80""#))
+        #expect(!declaration.contents.contains("8080"))
+        // The https mapping dokku detects is never declared: without a certificate it fails nginx for every app.
+        #expect(!declaration.contents.contains("443"))
+    }
+
+    @Test("an app with no http port map at all stops the adopt")
+    func noPortMapRefuses() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "\n"))
+        await #expect(throws: AdoptError.unreadable("an http port map for vault")) {
+            try await adopter.facts(for: "vault", on: Self.box)
+        }
+    }
+
+    @Test("a post-deploy network is declared, so an apply does not detach the app from its database")
+    func postDeployNetworkIsDeclared() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "http:80:80\n"))
+        let facts = try await adopter.facts(for: "vault", on: Self.box)
+        #expect(facts.networkPostDeploy == "vault_default")
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(declaration.contents.contains(#"attach_post_deploy = "vault_default""#))
+        #expect(!declaration.contents.contains("attach_post_create"))
     }
 
     @Test("a replace does not move an app another stack declares")

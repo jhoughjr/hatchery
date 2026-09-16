@@ -57,6 +57,11 @@ public struct ScaffoldRequest: Sendable, Equatable {
     /// Set only by adopt. A declaration written with one carries an `import` block, because tofu otherwise
     /// plans to create a container the box is already holding the name of.
     public var containerID: String?
+    /// A docker network the app joins after each deploy rather than at create.
+    ///
+    /// dokku keeps the two phases as separate settings, and an app set up by hand often uses this one.
+    /// The provider sets a phase a declaration leaves out to nothing, which detaches the app from the network.
+    public var networkPostDeploy: String?
     /// The storage mounts the service runs with. Adopt carries what it measures.
     /// A dokku declaration names every one, because the provider unmounts a mount it is not told about.
     public var storage: [DokkuStorage]
@@ -70,8 +75,10 @@ public struct ScaffoldRequest: Sendable, Equatable {
         hostPort: String = "80",
         checksDisabled: Bool = true,
         containerID: String? = nil,
-        storage: [DokkuStorage] = []
+        storage: [DokkuStorage] = [],
+        networkPostDeploy: String? = nil
     ) {
+        self.networkPostDeploy = networkPostDeploy
         self.storage = storage
         self.stack = stack
         self.service = service
