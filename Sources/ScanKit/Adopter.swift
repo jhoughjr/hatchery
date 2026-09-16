@@ -174,8 +174,9 @@ public struct Adopter: Sendable {
     /// service's own word about its own contact surface. The config sidecar still carries the
     /// box's measured keys either way.
     ///
-    /// `replacing` regenerates an app the named stack already declares, from what the box says now.
-    /// Without `refreshConfig` the config sidecar and the secrets file it already has are left alone.
+    /// `replacing` regenerates the declaration of an app the named stack already declares, from what the box
+    /// says now. The manifest entry is kept as it is. Without `refreshConfig` the config sidecar and the
+    /// secrets file it already has are left alone.
     public func plan(
         _ facts: AppFacts, kind: ServiceKind, into stackName: String, box: String,
         manifest: StackManifest, kindFile: KindFile? = nil, replacing: Bool = false,
@@ -223,6 +224,14 @@ public struct Adopter: Sendable {
             // --refresh-config asks for them.
             if !refreshConfig {
                 files.removeAll { $0.role == .config }
+            }
+            // The manifest entry is kept whole. It carries what a person ruled and the box cannot say:
+            // the boot order in `after`, the `expectedStatus` a probe checks, and the image a deploy moves.
+            // A replace regenerates the declaration and nothing else.
+            if let existing = stack.service(named: facts.name) {
+                return AdoptResult(
+                    service: existing, files: files, manifest: manifest,
+                    importCommand: "tofu import dokku_app.\(tofuIdentifier(for: facts.name)) \(facts.name)")
             }
         }
 

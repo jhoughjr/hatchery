@@ -474,6 +474,30 @@ struct AdoptStorageTests {
         #expect(!refreshed.files.contains { $0.role == .variableAppend })
     }
 
+    @Test("a replace keeps the manifest entry whole: boot order, expected status and image")
+    func replaceKeepsTheEntry() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(mounts: "-v /var/lib/dokku/data/storage/pulse:/data\n"))
+        let facts = try await adopter.facts(for: "pulse", on: Self.box)
+        var entry = ServiceSpec(
+            name: "pulse", kind: .mwserver, image: "dokku/pulse:latest", domains: ["pulse.old"],
+            configFile: "pulse.config.json", imageVariable: "pulse_image")
+        entry.after = ["vault"]
+        entry.expectedStatus = "302"
+        let manifest = StackManifest(stacks: [
+            StackSpec(name: "estate", backend: .dokku, host: Self.box, tofu: TofuBinding(directory: "/tmp/estate"),
+                      services: [entry])
+        ])
+
+        let replaced = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: manifest, replacing: true)
+        #expect(replaced.manifest == manifest)
+        #expect(replaced.service.after == ["vault"])
+        #expect(replaced.service.expectedStatus == "302")
+        #expect(replaced.service.image == "dokku/pulse:latest")
+        // The declaration still comes from the box.
+        #expect(replaced.files.first?.contents.contains("pulse.jimmyhoughjr.net") == true)
+    }
+
     @Test("a replace does not move an app another stack declares")
     func replaceStaysInItsStack() async throws {
         let adopter = Adopter(execute: Self.pulseBox(mounts: "\n"))
