@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Keeps a forge container package to its newest versions and the ones a deployment runs.
 ///
