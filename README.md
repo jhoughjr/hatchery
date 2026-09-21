@@ -673,8 +673,8 @@ hatchery handles the application plane: the stack definition, the environment co
 images, database wiring, lifecycle, application-level health.
 
 When hatchery needs a URL to exist it asks roost (`roost route <sub>`) rather than
-reimplementing route publishing. hatchery can be installed as `roost-hatch` so roost's
-plugin dispatch picks it up.
+reimplementing route publishing. roost runs any `roost-<cmd>` on PATH as a plugin, so a
+`roost-hatch` link to hatchery makes `roost hatch` work. `bin/install` does not make that link.
 
 #### Where they actually overlap today
 
