@@ -249,7 +249,7 @@ public enum Onboarding {
                     described by one.
                     """,
                 on: "here",
-                commands: ["brew install opentofu"],
+                commands: InstallHint.commands(for: "opentofu"),
                 verify: "tofu version"),
         ]
     }

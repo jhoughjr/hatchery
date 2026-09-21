@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// This fetches a named secret from vault at boot through the app key.
 /// A bearer of the app key retrieves the secret map and returns the named value or nil when absent.

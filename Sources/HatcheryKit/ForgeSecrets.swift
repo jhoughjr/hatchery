@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// The forge's CI secrets, kept once in vault and set on any repository that needs them.
 ///
