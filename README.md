@@ -1,30 +1,106 @@
 # hatchery
 
-Configure, deploy and monitor MWServer stacks — self-hosted or cloud.
+Declare, deploy and monitor the house estate: dokku apps, bare containers, databases, jobs, secrets and DNS.
 
-MWServer is the first target, but nothing in the model is MWServer-specific: service
-kinds and their environment contracts are data, so other services drop in without
-changing the core.
+Hatchery keeps one declaration for each stack: a manifest, the kind files beside it, and the tofu files it writes. The estate runs on three boxes: the laptop, the mini and the opi. A stack holds dokku apps, docker containers that dokku does not own, postgres clusters and their databases, and jobs that launchd or systemd runs. Secret keys move out of the config sidecars into secrets files and vault documents, and the forge's CI secrets come from vault too. MWServer was the first target, but nothing in the model is MWServer-specific. Service kinds and their environment contracts are data, so a new service needs no change to the core.
 
-## Status
+## Commands
 
-Early, but the loop closes: configure, deploy, monitor, all against the live lab.
+Every command that reads a manifest takes `-m, --manifest <path>`. See [Finding the manifest](#finding-the-manifest) for the search order when you do not give one. A command that takes an SSH target also accepts a saved host name with a leading `@`, for example `@opi`. A command that writes usually needs `--yes`, and shows its plan without it.
 
-Working today:
+### Stacks and services
 
-```sh
-hatchery config validate <config.json> --service mwserver --backend dokku
-hatchery stack list --manifest hatchery.json
-hatchery stack clone <source> <target> [--create --tofu-dir <dir> --yes]
-hatchery status --manifest hatchery.json
-hatchery events [--stack <name>]
-hatchery config audit --manifest hatchery.json
-hatchery config sync <stack> --manifest hatchery.json
-hatchery service new <stack> <name> --kind <kind> --domain <d> --image <ref>
-hatchery deploy <stack> <service> --image <ref>
-hatchery up|down|restart <stack>
-hatchery serve
-```
+| Command | What it does |
+| --- | --- |
+| `stack new <name> --tofu-dir <dir> [--backend <b>] [--host <target>] [--environment prod\|staging\|dev] [--set key=value]` | Create a stack in an empty directory: write the tofu files, run `tofu init`, and record the stack in a manifest. |
+| `stack list` | List the stacks a manifest declares. |
+| `stack clone <source> <target> [--environment <env>] [--create --tofu-dir <dir> --yes] [--apply] [--db full\|schema\|none]` | Plan what a clone of a stack carries, and create the clone with `--create`. Also takes `--backend`, `--cluster`, `--host`, `--port`, `--network`, `--gated` and `--show-secrets`. |
+| `stack rm <stack> [--yes --confirm <stack>] [--purge]` | Show what `tofu destroy` removes, and destroy the stack with `--yes` and the name repeated. `--purge` also deletes the tofu directory. |
+| `service new <stack> <name> --kind <kind> --image <ref> [--domain <d>] [--port <n>] [--network <net>]` | Write a new service into a stack: its tofu declaration, image variable, config and manifest entry. Also takes `--gated`, `--mint-keypair`, `--no-vault`, `--dry-run` and `--yes`. |
+| `deploy <stack> <service> [--image <ref>] [--apply] [--yes] [--dry-run]` | Write a new image into the stack's tofu variables and manifest, and show the `tofu plan`. Without `--image`, it brings tofu back to the image the manifest declares. |
+| `up <stack> [--service <s>] [--yes]` | Start the services a stack declares. Dokku stacks only. |
+| `down <stack> [--service <s>] [--yes]` | Stop the services a stack declares. Dokku stacks only. |
+| `restart <stack> [--service <s>] [--yes]` | Restart the services a stack declares. Dokku stacks only. |
+
+### Watching
+
+| Command | What it does |
+| --- | --- |
+| `status [--stack <s>] [--timeout <seconds>]` | Report the live health of each declared service. The exit code fails on `unreachable` or `degraded`. |
+| `events [--stack <s>] [--limit <n>] [--history <file>]` | Show the health changes that `serve` recorded in the history file. |
+| `serve [--bind <addr>] [--port <n>] [--token <t>] [--watch-interval <seconds>]` | Serve the dashboard on this machine and poll health on its own clock. Also takes `--history`, `--alert-webhook`, `--pulse` and `--pulse-key-file`. |
+| `serve --install` / `serve --uninstall` | Install `serve` with the given options as a launchd agent, or remove that agent. |
+| `declared [--manifest <m>]... [--answers] [--publish] [--publish-to <url>]` | Print what the manifests declare as JSON, with no config values. `--publish` sends it to pulse with the roost node key. `--answers` prints one `name kind backend` line per service. |
+
+### Configuration
+
+| Command | What it does |
+| --- | --- |
+| `config validate <config.json> --service <kind> --backend <b>` | Check a config map against the environment contract of a service kind. |
+| `config audit [--stack <s>]` | Read the live config of each declared service and check it against its contract. |
+| `config sync <stack> [--service <s>] [--dry-run]` | Copy the live config into the declared sidecar, so the two agree. |
+| `config set <stack> <service> KEY=VALUE...` | Merge values into a service's config. `KEY=` with no value removes the key. |
+| `config split <stack> [<service>] [--dry-run]` | Move a service's secret keys out of its sidecar into a secrets file of their own. |
+
+### Boxes
+
+| Command | What it does |
+| --- | --- |
+| `box init [<host>] [--backend dokku\|appPlatform\|cloudRun] [--yes]` | Check the prerequisites of a backend, and with `--yes` fix what is missing on a dokku box. Also takes `--cluster`, `--project`, `--key` and `--network`. |
+| `box order <host> [--manifest <m>]... [--yes]` | Check the boot order that the `after` lists declare, and with `--yes` install it on the box as a script and a user unit. |
+| `box scan [<target>]` | Read the apps, containers and jobs that run on a box or a platform, and sort each one as declared, hatchery-shaped or foreign. |
+| `box adopt <target> <app> --stack <s> [--kind <k>] [--kind-file <path>] [--dry-run]` | Declare an app or a container that already runs on a box into a stack. Also takes `--replace`, `--refresh-config`, `--name` and `--no-vault`. |
+| `box space <box> [--free]` | Show the free disk on a box, and with `--free` remove the build cache and the images that no container uses. |
+| `host add <name> <target>` | Save an SSH target under a name. |
+| `host list` | Show the saved targets, the targets stacks use, and the targets `~/.roostrc` names. |
+| `host rm <name>` | Remove a saved target. |
+| `doctor [--backend <b>] [--host <target>] [--stack <s>]` | Check the prerequisites to manage a stack on a backend. |
+| `setup [--backend <b>]` | Print the steps that get a box or a platform ready for hatchery. |
+
+### Kinds and DNS
+
+| Command | What it does |
+| --- | --- |
+| `kind add <path>` | Add a `hatchery-kind.json` file to the registry beside the manifest. |
+| `kind list` | List the kinds the registry declares. |
+| `dns render <kind>` | Print the dnsmasq configuration that a resolver's kind declares. |
+
+### Databases
+
+| Command | What it does |
+| --- | --- |
+| `db provision --server <container> --database <name> --admin <user@host\|local> [--owner <role>] [--app-user <role>]` | Create a database, its roles and its grants on a postgres server. With `--network`, it also creates an absent server. Also takes `--host`, `--port` and `--publish`. |
+| `db provision --declared <stack>/<service>` | Make sure that every database the manifest declares on that cluster exists, with its roles and grants. |
+| `db adopt <target> <container> --stack <s> [--dry-run]` | Declare the databases inside a postgres cluster that already runs on a box. |
+
+### Secrets and vault
+
+| Command | What it does |
+| --- | --- |
+| `secrets holders <stack>/<service>` | Print who holds each of a service's rotatable secrets. |
+| `secrets rotate <stack>/<service> [<key>...] [--dry-run] [--yes]` | Replace declared secrets in order: the issuer, then each holder, then each restart. |
+| `secrets sync <stack>/<service> [--dry-run]` | Set a service's secret keys into its vault document. |
+| `vault login [--name <label>]` | Sign this machine in to vault through the browser, and store the operator token. |
+| `vault status` | Show who this machine is signed in to vault as. |
+| `vault logout` | Remove this machine's vault token file. |
+| `vault requires <stack>/<service> [--dry-run]` | Set on vault what a declared app requires of a person, from the service's `vaultRequires`. |
+| `forge seed <name>` | Store a CI secret in vault's forge app. The value comes on standard input. |
+| `forge secrets <owner/repo>... [--name <secret>]... [--replace]` | Set the forge's CI secrets from vault on repositories that do not have them. |
+| `forge prune <package>... [--keep <n>] [--protect <prefix>]... [--protect-deployed <dokku@host:app>]... [--box <target>] [--yes]` | Delete old versions of forge container packages, and keep the newest and the protected ones. |
+| `state init --directory <dir> [--remote <owner/name>] [--push] [--dry-run]` | Set up a state directory that encrypts its secrets and backs them up. |
+| `state status` | Report the secrets that are not in the encrypted backup. |
+| `state seal` | Encrypt the backup again, so it agrees with the disk. |
+| `state verify` | Decrypt the backup and check it against the manifest. |
+
+The `secrets` and `vault` commands take `--manifest` more than one time, to read several manifests. The `vault` commands take `--vault <url>` to act on a vault other than the default.
+
+## Design notes
+
+- [declaration-source-design.md](docs/declaration-source-design.md): the manifest and kind files become the one source, and hatchery writes every tofu file. Proposed on 2026-09-16, not started.
+- [exposure-design.md](docs/exposure-design.md): exposure providers that make a cloned stack reachable. The `none`, `platform` and `cloudflare-local` providers are in the code.
+- [app-platform-pass.md](docs/app-platform-pass.md): the full provider pass for DigitalOcean App Platform, and after it Cloud Run. The listed slices are shipped, and `cloudflare-api` custom domains wait.
+
+## Details
 
 ### Cloning a stack
 
@@ -154,9 +230,7 @@ There is no Dockerfile here on purpose.
 creating the shared docker network, provisioning the database role hatchery refuses to invent.
 The dashboard shows the same list behind **No box yet?**.
 
-It is a checklist rather than a script on purpose. These steps touch a machine's package
-manager, its firewall and its SSH configuration, and running that blind from a dashboard is not
-something hatchery should do on your behalf.
+`setup` only prints the steps. `hatchery box init` runs them as assertions: each step is checked first, fixed only when it is missing, and checked again after. Without `--yes` it runs only the checks, so nothing changes on the box until you ask for it. The dashboard does not run these steps, because they touch a machine's package manager, its firewall and its SSH configuration.
 
 ### Prerequisites, checked before anything is written
 
@@ -497,6 +571,7 @@ config lives, never what it contains.
 | `appPlatform` | DigitalOcean App Platform — the production tenant plane | yes | no |
 | `aws` | AWS App Runner — a container, a URL, a health check | yes | no |
 | `cloudRun` | Google Cloud Run — App Runner's closest sibling | yes | no |
+| `host` | The docker daemon on a box over SSH, for containers and jobs that dokku does not own | yes | yes |
 
 hatchery once reported that App Platform could not be created, on the grounds that a spec is
 YAML applied through `doctl`. That was wrong: `digitalocean_app` is a first-class resource whose
@@ -536,10 +611,11 @@ and the wizard:
 
 | Backend | Settings |
 | --- | --- |
-| `dokku` | `host`, `ssh_key` |
+| `dokku` | `host`, `ssh_key`, `db_admin`, `exposure`, `exposure_admin` |
 | `appPlatform` | `region`, `token`* |
 | `aws` | `region`, `access_role_arn` |
 | `cloudRun` | `project`, `region` |
+| `host` | `host`, `ssh_key`, `platform` |
 
 \* secret: read from the environment at apply time, never written to the manifest.
 
@@ -581,9 +657,7 @@ connection-string cutover; the lab still runs pre-cutover images, so the same ke
 legal there. `EnvContract` encodes that difference rather than pretending one contract
 fits both.
 
-Neither AWS nor App Platform is implemented as an *action* backend yet — `EnvContract` knows
-App Platform's config contract, but reading live config, lifecycle, and deploy are all dokku-only
-today. AWS is wanted ahead of DigitalOcean; both are wanted eventually.
+`deploy` writes tofu and does not talk to the box, so it works on every backend. Live config reads work on `dokku` and `host` only. `up`, `down` and `restart` work on `dokku` only, and they refuse the other backends by name.
 
 They arrive as implementations behind a protocol rather than as branches inside each verb, so a
 new provider is a new file rather than an edit to seven of them.
