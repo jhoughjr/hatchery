@@ -89,6 +89,11 @@ public enum InstallHint {
                    "# Linux: see docs.digitalocean.com/reference/doctl/how-to/install"]
                 : ["# see docs.digitalocean.com/reference/doctl/how-to/install",
                    "# macOS: brew install doctl"]
+        case "opentofu":
+            return platform == .macOS
+                ? ["brew install opentofu", "# Linux: see opentofu.org/docs/intro/install"]
+                : ["# see opentofu.org/docs/intro/install for your distribution",
+                   "# macOS: brew install opentofu"]
         default:
             return [forTool(tool, platform: platform)]
         }
