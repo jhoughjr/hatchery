@@ -50,12 +50,16 @@ class VaultBootSecretsStubProtocol: URLProtocol {
         let url = self.request.url ?? URL(fileURLWithPath: "/")
 
         if let (statusCode, body) = Self.response {
-            let response = HTTPURLResponse(
+            // A response that cannot be made fails the load. Linux has no bare initializer to fall back on.
+            guard let response = HTTPURLResponse(
                 url: url,
                 statusCode: statusCode,
                 httpVersion: nil,
                 headerFields: nil
-            ) ?? HTTPURLResponse()
+            ) else {
+                client.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                return
+            }
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client.urlProtocol(self, didLoad: body)
             client.urlProtocolDidFinishLoading(self)
