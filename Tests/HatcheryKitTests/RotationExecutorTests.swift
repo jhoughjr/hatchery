@@ -235,6 +235,24 @@ struct RotationExecutorTests {
         #expect(lastSet < stop)
         #expect(estate.happened.last == "run ssh -o BatchMode=yes dokku@opi ps:start forgejo")
     }
+
+    @Test("a file holder writes the value whole to its path and locks it to mode 600, and restarts nothing")
+    func fileHolderWritesModeSixHundred() async throws {
+        let estate = Estate()
+        let holder = KindFile.Holder.file(host: "local", path: "~/.roost_node_key")
+        let plan = RotationPlan(
+            service: "node", keys: ["NODE_KEY"],
+            rotation: KindFile.Rotation(issuer: .random(bytes: 32), holders: [holder]))
+
+        let report = await makeExecutor(estate).execute(plan)
+
+        #expect(report.succeeded)
+        #expect(
+            estate.happened.contains {
+                $0.contains("chmod 600") && $0.contains("$HOME/.roost_node_key")
+            })
+        #expect(estate.happened.allSatisfy { !$0.contains("restart") })
+    }
 }
 
 @Suite("The pieces a rotation is built from")

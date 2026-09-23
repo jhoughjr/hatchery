@@ -67,15 +67,16 @@ public struct KindFile: Codable, Sendable, Equatable {
         public var required: Bool?
         public var secret: Bool?
         public var why: String?
-        /// What issues a new value for this key, and who holds it.
-        /// Absent on a key that is not a secret, and absent on a secret whose rotation nobody has declared,
-        /// which is the `secret-no-rotation` finding. Optional, so every kind file written before it still reads.
-        public var rotation: Rotation?
+        /// What issues a new value for this key and who holds it, or the service whose own rotation turns it
+        /// over instead. Absent on a key that is not a secret, and absent on a secret whose rotation nobody has
+        /// declared, which is the `secret-no-rotation` finding. Optional, so every kind file written before it
+        /// still reads.
+        public var rotation: RotationDeclaration?
 
         public init(
             default: String? = nil, deployed: String? = nil, example: String? = nil,
             required: Bool? = nil, secret: Bool? = nil, why: String? = nil,
-            rotation: Rotation? = nil
+            rotation: RotationDeclaration? = nil
         ) {
             self.default = `default`
             self.deployed = deployed

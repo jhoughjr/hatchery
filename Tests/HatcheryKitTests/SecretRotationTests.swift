@@ -140,6 +140,55 @@ struct SecretRotationTests {
             try JSONDecoder().decode(KindFile.self, from: Data(json.utf8))
         }
     }
+
+    @Test("a key owned by another service decodes as a pointer, not a plan, and round-trips")
+    func ownedRotationRoundTrips() throws {
+        let json = """
+            {
+              "kind": "coop",
+              "environment": {
+                "SHARED_KEY": {
+                  "secret": true,
+                  "rotation": { "owner": "vault/vault" }
+                }
+              }
+            }
+            """
+        let kind = try JSONDecoder().decode(KindFile.self, from: Data(json.utf8))
+
+        #expect(kind.owner(forKey: "SHARED_KEY") == "vault/vault")
+        #expect(kind.rotation(forKey: "SHARED_KEY") == nil)
+        #expect(kind.rotatableKeys() == ["SHARED_KEY"])
+
+        let encoded = try JSONEncoder().encode(kind)
+        let decoded = try JSONDecoder().decode(KindFile.self, from: encoded)
+        #expect(decoded == kind)
+    }
+
+    @Test("a file holder decodes its host and its path, and round-trips")
+    func fileHolderRoundTrips() throws {
+        let json = """
+            {
+              "kind": "coop",
+              "environment": {
+                "NODE_KEY": {
+                  "secret": true,
+                  "rotation": {
+                    "issuer": { "type": "random", "bytes": 32 },
+                    "holders": [{ "type": "file", "host": "opi", "path": "~/.roost_node_key" }]
+                  }
+                }
+              }
+            }
+            """
+        let kind = try JSONDecoder().decode(KindFile.self, from: Data(json.utf8))
+
+        #expect(kind.rotation(forKey: "NODE_KEY")?.holders == [.file(host: "opi", path: "~/.roost_node_key")])
+
+        let encoded = try JSONEncoder().encode(kind)
+        let decoded = try JSONDecoder().decode(KindFile.self, from: encoded)
+        #expect(decoded == kind)
+    }
 }
 
 @Suite("What the audit says about a secret nothing can replace")

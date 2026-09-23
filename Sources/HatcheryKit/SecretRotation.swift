@@ -54,16 +54,19 @@ extension KindFile.Holder {
 
         case .vaultSecret(let app, let name):
             return "\(name) read from vault at boot by \(app)"
+
+        case .file(let host, let path):
+            return "\(path) on \(host), mode 600"
         }
     }
 
     /// Whether this holder needs a restart before it reads the new value.
     ///
-    /// `roostrc` is the one that does not. A tool reads that file on each run, so the next run has the new
-    /// value and there is nothing to stop.
+    /// `roostrc` and `file` are the two that do not. Both are read fresh on each use, so the next read already
+    /// carries the new value and there is nothing to stop.
     public var restarts: Bool {
         switch self {
-        case .roostrc: return false
+        case .roostrc, .file: return false
         case .dokkuConfig, .launchdEnvironment, .systemdEnvironment, .vaultSecret: return true
         }
     }
@@ -74,7 +77,7 @@ extension KindFile.Holder {
         case .dokkuConfig(let app, _, let restart):
             return "\(app), \(restart.label)"
 
-        case .roostrc:
+        case .roostrc, .file:
             return ""
 
         case .launchdEnvironment(let host, let label, _):
@@ -96,6 +99,7 @@ extension KindFile.Holder {
         case .launchdEnvironment(let host, _, _): return .host(host)
         case .systemdEnvironment(let host, _, _): return .host(host)
         case .vaultSecret(let app, _): return .vaultApp(app)
+        case .file(let host, _): return .host(host)
         }
     }
 
@@ -239,26 +243,43 @@ public enum RotationPlanner {
         let groups = kind.rotationGroups()
         guard !groups.isEmpty else { throw RotationRefusal.nothingRotatable(service: service) }
 
-        let wanted: [(keys: [String], rotation: KindFile.Rotation)]
+        let wanted: [(keys: [String], rotation: KindFile.RotationDeclaration)]
         if keys.isEmpty {
             wanted = groups
         } else {
-            for key in keys where kind.rotation(forKey: key) == nil {
-                throw RotationRefusal.notRotatable(
-                    key: key, service: service, rotatable: kind.rotatableKeys())
+            let rotatable = kind.rotatableKeys()
+            for key in keys where !rotatable.contains(key) {
+                throw RotationRefusal.notRotatable(key: key, service: service, rotatable: rotatable)
             }
             // A named half of the forge's pair brings its other half with it, because one issuer answers for
             // both and replacing one alone would leave the app with half a key.
             wanted = groups.filter { group in group.keys.contains { keys.contains($0) } }
         }
 
-        let plans = wanted.map {
-            RotationPlan(service: service, keys: $0.keys, rotation: $0.rotation)
+        // A key another service owns names no issuer of its own here, so it builds no plan; ``owned(keys:in:)``
+        // is where a caller reads it instead.
+        let plans = wanted.compactMap { group -> RotationPlan? in
+            guard case .declared(let rotation) = group.rotation else { return nil }
+            return RotationPlan(service: service, keys: group.keys, rotation: rotation)
         }
         for plan in plans {
             try Self.check(plan, apps: apps, hosts: hosts)
         }
         return plans
+    }
+
+    /// The named keys, or every rotatable key when none are named, that this service does not run itself
+    /// because another service's rotation turns them over.
+    ///
+    /// `rotate` reads this to print where a key is held instead of planning it, and `rotate --all` reads it to
+    /// leave the key for its owner's own run rather than counting it here too.
+    public static func owned(keys: [String], in kind: KindFile) -> [(keys: [String], owner: String)] {
+        let groups = kind.rotationGroups()
+        let matching = keys.isEmpty ? groups : groups.filter { group in group.keys.contains { keys.contains($0) } }
+        return matching.compactMap { group in
+            guard case .owned(let owner) = group.rotation else { return nil }
+            return (keys: group.keys, owner: owner)
+        }
     }
 
     /// Refuses a plan hatchery must not run: a manual issuer, or a holder nothing can reach.
@@ -310,6 +331,129 @@ public enum RotationPlanner {
             known.insert(entry.target)
         }
         return known
+    }
+}
+
+// MARK: - Rotating every service at once
+
+/// One service's kind file, with the wiring `rotate --all` needs to run it: the same box map and secrets file
+/// a single `rotate` resolves per service, named up front so the runner itself never touches a manifest.
+public struct RotationTarget: Sendable {
+    public var stack: String
+    public var service: String
+    public var kind: KindFile
+    public var dokkuTargets: [String: String]
+    public var adminTargets: [String: String]
+    public var secretsURL: URL
+
+    public init(
+        stack: String, service: String, kind: KindFile,
+        dokkuTargets: [String: String], adminTargets: [String: String], secretsURL: URL
+    ) {
+        self.stack = stack
+        self.service = service
+        self.kind = kind
+        self.dokkuTargets = dokkuTargets
+        self.adminTargets = adminTargets
+        self.secretsURL = secretsURL
+    }
+}
+
+/// What `rotate --all` did with one service's one rotation, for the table the run ends on.
+///
+/// - `run`: the executor finished every step.
+/// - `refused`: a manual issuer or an unreachable holder stopped this key before it started, and the run
+///   moved on to the next one.
+/// - `failed`: the executor stopped partway; the printed report says where.
+/// - `dry`: `--dry-run`, or `--yes` was not given, so the plan printed and nothing ran.
+/// - `skipped`: another service owns this key's rotation, so it did not run here.
+public struct RotationOutcome: Sendable, Equatable {
+    public enum State: String, Sendable, Equatable {
+        case run, refused, failed, dry, skipped
+    }
+
+    public var stack: String
+    public var service: String
+    public var keys: [String]
+    public var state: State
+
+    public init(stack: String, service: String, keys: [String], state: State) {
+        self.stack = stack
+        self.service = service
+        self.keys = keys
+        self.state = state
+    }
+
+    /// The one line this outcome contributes to the table `rotate --all` ends on: the service, the key, and
+    /// the state, never the value.
+    var line: String {
+        "  \(self.stack)/\(self.service) \(self.keys.joined(separator: " + "))  \(self.state.rawValue)"
+    }
+}
+
+/// Plans and runs every declared rotation of every target, issuer then holders then restarts, exactly as one
+/// rotation runs today.
+public enum RotationRun {
+    /// A manual issuer or an unreachable holder refuses that one key and the run goes on to the next; a key
+    /// another service owns is skipped, because its rotation runs once, under that service, and never here.
+    /// The lines a person reads print as each key finishes, and the outcomes are handed back for the table
+    /// that ends the run.
+    public static func all(
+        targets: [RotationTarget],
+        apps: Set<String>,
+        hosts: Set<String>,
+        dryRun: Bool,
+        yes: Bool,
+        makeExecutor: @Sendable (RotationTarget) -> RotationExecutor
+    ) async -> (lines: [String], outcomes: [RotationOutcome]) {
+        var lines: [String] = []
+        var outcomes: [RotationOutcome] = []
+
+        for target in targets {
+            for group in target.kind.rotationGroups() {
+                let heading = "  \(target.stack)/\(target.service) \(group.keys.joined(separator: " + "))"
+
+                switch group.rotation {
+                case .owned(let owner):
+                    lines.append(heading)
+                    lines.append("    held from \(owner)")
+                    outcomes.append(
+                        RotationOutcome(
+                            stack: target.stack, service: target.service, keys: group.keys, state: .skipped))
+
+                case .declared(let rotation):
+                    let plan = RotationPlan(service: target.service, keys: group.keys, rotation: rotation)
+                    do {
+                        try RotationPlanner.check(plan, apps: apps, hosts: hosts)
+                    } catch {
+                        lines.append(heading)
+                        lines.append("    refused  \(error)")
+                        outcomes.append(
+                            RotationOutcome(
+                                stack: target.stack, service: target.service, keys: group.keys, state: .refused))
+                        continue
+                    }
+
+                    guard yes, !dryRun else {
+                        lines.append(contentsOf: plan.lines())
+                        outcomes.append(
+                            RotationOutcome(
+                                stack: target.stack, service: target.service, keys: group.keys, state: .dry))
+                        continue
+                    }
+
+                    let report = await makeExecutor(target).execute(plan)
+                    lines.append(contentsOf: report.lines())
+                    outcomes.append(
+                        RotationOutcome(
+                            stack: target.stack, service: target.service, keys: group.keys,
+                            state: report.succeeded ? .run : .failed))
+                }
+            }
+        }
+
+        lines.append(contentsOf: outcomes.map(\.line))
+        return (lines, outcomes)
     }
 }
 

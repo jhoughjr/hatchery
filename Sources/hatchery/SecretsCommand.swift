@@ -89,12 +89,18 @@ struct Secrets: AsyncParsableCommand {
 
             for group in groups {
                 print("  \(group.keys.joined(separator: " + "))")
-                print("    issues   \(group.rotation.issuer.label(service: resolved.service.name))")
-                for holder in group.rotation.holders {
-                    print("    holds    \(holder.label)\(Self.gap(holder, in: resolved))")
-                }
-                if group.rotation.holders.isEmpty {
-                    print("    holds    nobody hatchery can reach")
+                switch group.rotation {
+                case .declared(let rotation):
+                    print("    issues   \(rotation.issuer.label(service: resolved.service.name))")
+                    for holder in rotation.holders {
+                        print("    holds    \(holder.label)\(Self.gap(holder, in: resolved))")
+                    }
+                    if rotation.holders.isEmpty {
+                        print("    holds    nobody hatchery can reach")
+                    }
+
+                case .owned(let owner):
+                    print("    held from \(owner)")
                 }
             }
             let missing = resolved.kind.secretRotations().filter { $0.rotation == nil }
@@ -122,7 +128,8 @@ struct Secrets: AsyncParsableCommand {
     /// Replaces a declared secret, in the order the declaration rules.
     ///
     /// The plan prints first, always. Without `--yes` that is the whole run, so the default is a dry run and
-    /// executing is the thing a person has to ask for.
+    /// executing is the thing a person has to ask for. `--all` widens this from one service to every service
+    /// the named manifests declare.
     struct Rotate: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "rotate",
@@ -131,12 +138,17 @@ struct Secrets: AsyncParsableCommand {
                 Name the keys to rotate, or name none and every rotatable key of the service is planned. \
                 A key issued by a person refuses the run and prints the recipe instead, and a holder the \
                 manifest does not know refuses it too, because a bearer nothing can reach keeps the old \
-                value after the new one is issued.
+                value after the new one is issued. A key another service owns is skipped, not run; that \
+                service's own rotation is what turns it over.
+
+                --all reads every named manifest and runs every declared rotation of every service it finds, \
+                in the same order, instead of the one service named on the command line. A refused key does \
+                not stop the others, and the run ends with one line per service and key naming what happened.
                 """
         )
 
-        @Argument(help: "The service, as <stack>/<service>.")
-        var target: String
+        @Argument(help: "The service, as <stack>/<service>. Omit it with --all.")
+        var target: String?
 
         @Argument(help: "The keys to rotate. Every rotatable key of the service when none are named.")
         var keys: [String] = []
@@ -144,23 +156,57 @@ struct Secrets: AsyncParsableCommand {
         @Option(name: .shortAndLong, help: "Path to a stack manifest. Repeat it to read several.")
         var manifest: [String] = []
 
+        @Flag(name: .long, help: "Every declared rotation of every service the manifests name, instead of one service.")
+        var all = false
+
         @Flag(name: .long, help: "Print the plan and stop, whatever else is given.")
         var dryRun = false
 
         @Flag(name: .long, help: "Execute the plan. Without it the plan prints and nothing changes.")
         var yes = false
 
+        func validate() throws {
+            if self.all {
+                guard self.target == nil else {
+                    throw ValidationError("--all reads every service the manifests declare; name none")
+                }
+                guard self.keys.isEmpty else {
+                    throw ValidationError("--all rotates every key of every service; name none")
+                }
+            } else {
+                guard self.target != nil else {
+                    throw ValidationError("name the service, as <stack>/<service>, or pass --all")
+                }
+            }
+        }
+
         func run() async throws {
-            let resolved = try Secrets.resolve(self.target, manifest: self.manifest)
+            if self.all {
+                try await self.runAll()
+                return
+            }
+            guard let target = self.target else {
+                throw ValidationError("name the service, as <stack>/<service>, or pass --all")
+            }
+            try await self.runOne(target)
+        }
+
+        private func runOne(_ target: String) async throws {
+            let resolved = try Secrets.resolve(target, manifest: self.manifest)
             let plans = try RotationPlanner.plans(
                 service: resolved.service.name,
                 keys: self.keys,
                 in: resolved.kind,
                 apps: resolved.apps,
                 hosts: resolved.hosts)
+            let owned = RotationPlanner.owned(keys: self.keys, in: resolved.kind)
 
             print("  \(resolved.stack.name)/\(resolved.service.name), \(plans.count) rotation(s):")
             plans.flatMap { $0.lines() }.forEach { print($0) }
+            for entry in owned {
+                print("  \(entry.keys.joined(separator: " + "))")
+                print("    held from \(entry.owner)")
+            }
 
             guard self.yes, !self.dryRun else {
                 print("  nothing changed. Run it again with --yes to execute this plan.")
@@ -191,6 +237,65 @@ struct Secrets: AsyncParsableCommand {
                 guard report.succeeded else { throw ExitCode.failure }
             }
             print("  run hatchery state seal so the new values reach the encrypted backup.")
+        }
+
+        private func runAll() async throws {
+            let requested = self.manifest.isEmpty ? [ManifestLocator.defaultName] : self.manifest
+            let loaded = try requested.map { try ManifestLocator.load($0) }
+            let manifests = loaded.map(\.manifest)
+            let apps = RotationPlanner.apps(in: manifests)
+            let hosts = RotationPlanner.hosts(in: manifests)
+            let dokkuTargets = Secrets.dokkuTargets(in: manifests)
+            let adminTargets = Secrets.adminTargets(in: manifests)
+
+            var targets: [RotationTarget] = []
+            for entry in loaded {
+                let registry = KindRegistry(manifestPath: entry.path)
+                for stack in entry.manifest.stacks {
+                    for service in stack.services {
+                        guard let kind = try registry.kindFile(for: service.kind) else { continue }
+                        targets.append(
+                            RotationTarget(
+                                stack: stack.name,
+                                service: service.name,
+                                kind: kind,
+                                dokkuTargets: dokkuTargets,
+                                adminTargets: adminTargets,
+                                secretsURL: Secrets.secretsURL(
+                                    service: service, stack: stack, manifestPath: entry.path)))
+                    }
+                }
+            }
+
+            var vault = VaultAdmin(credential: .session(""))
+            if self.yes, !self.dryRun, targets.contains(where: { Self.needsVaultSession(in: $0.kind) }) {
+                guard let credential = VaultAdminCredential.resolve() else {
+                    throw RotationRefusal.noVaultSession
+                }
+                vault = VaultAdmin(credential: credential)
+            }
+
+            let (lines, outcomes) = await RotationRun.all(
+                targets: targets, apps: apps, hosts: hosts, dryRun: self.dryRun, yes: self.yes,
+                makeExecutor: { target in
+                    RotationExecutor(
+                        vault: vault,
+                        secrets: .onDisk(at: target.secretsURL),
+                        dokkuTargets: target.dokkuTargets,
+                        adminTargets: target.adminTargets)
+                })
+
+            lines.forEach { print($0) }
+            guard !outcomes.contains(where: { $0.state == .failed }) else { throw ExitCode.failure }
+        }
+
+        /// Whether any of a kind file's declared, unowned rotations reaches vault, so `--all` knows to resolve
+        /// a credential once before it runs any of them.
+        private static func needsVaultSession(in kind: KindFile) -> Bool {
+            kind.rotationGroups().contains { group in
+                guard case .declared(let rotation) = group.rotation else { return false }
+                return rotation.issuer.needsVaultSession
+            }
         }
     }
 
@@ -252,16 +357,24 @@ struct Secrets: AsyncParsableCommand {
 
     /// The service's own secrets file, which every issued value is written to before any holder is told.
     static func secretsURL(for target: Target) -> URL {
-        ConfigSync.secretsURL(
-            for: target.service, in: target.stack, manifestPath: target.manifestPath)
-            ?? ConfigSync.configURL(
-                for: target.service, in: target.stack, manifestPath: target.manifestPath)
+        Self.secretsURL(service: target.service, stack: target.stack, manifestPath: target.manifestPath)
+    }
+
+    /// The named service's own secrets file, resolved without a full ``Target``, for a caller that already
+    /// has the service and the stack in hand from walking a manifest itself.
+    static func secretsURL(service: ServiceSpec, stack: StackSpec, manifestPath: String) -> URL {
+        ConfigSync.secretsURL(for: service, in: stack, manifestPath: manifestPath)
+            ?? ConfigSync.configURL(for: service, in: stack, manifestPath: manifestPath)
     }
 
     /// Every dokku app in every stack, with the target its commands arrive at.
     static func dokkuTargets(for target: Target) -> [String: String] {
+        Self.dokkuTargets(in: target.manifests)
+    }
+
+    static func dokkuTargets(in manifests: [StackManifest]) -> [String: String] {
         var targets: [String: String] = [:]
-        for manifest in target.manifests {
+        for manifest in manifests {
             for stack in manifest.stacks where stack.backend == .dokku {
                 guard let host = stack.host, !host.isEmpty else { continue }
                 for service in stack.services {
@@ -277,8 +390,12 @@ struct Secrets: AsyncParsableCommand {
     /// `db_admin` is the setting that names it, the same one `db provision` reads. Without one the stack's own
     /// host is used, which is right when that host takes a plain shell.
     static func adminTargets(for target: Target) -> [String: String] {
+        Self.adminTargets(in: target.manifests)
+    }
+
+    static func adminTargets(in manifests: [StackManifest]) -> [String: String] {
         var targets: [String: String] = [:]
-        for manifest in target.manifests {
+        for manifest in manifests {
             for stack in manifest.stacks {
                 let admin = stack.settings?[BackendSetting.dbAdmin.key] ?? stack.host
                 guard let admin, !admin.isEmpty else { continue }

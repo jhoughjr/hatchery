@@ -316,6 +316,10 @@ public struct RotationExecutor: Sendable {
         case .vaultSecret:
             // Vault already holds the value, and this holder reads it at boot. Its restart is the whole step.
             return []
+
+        case .file(let host, let path):
+            let value = try Self.value(for: path, plan: plan, values: values)
+            return [Self.onHost(host, script: Self.fileScript(path: path, value: value))]
         }
     }
 
@@ -349,6 +353,9 @@ public struct RotationExecutor: Sendable {
                 throw RotationExecutorError.unknownRestart(app: app)
             }
             return [["ssh", "-o", "BatchMode=yes", target, "ps:restart", app]]
+
+        case .file:
+            return []
         }
     }
 
@@ -384,6 +391,13 @@ public struct RotationExecutor: Sendable {
             + "printf '\(key)=%s\\n' '\(value)' >> \"$f.rotating\"; mv \"$f.rotating\" \"$f\""
     }
 
+    /// Writes the value whole to a path, `~` expanded against `$HOME`, and locks it to mode 600 so only its
+    /// owner can read it.
+    static func fileScript(path: String, value: String) -> String {
+        let target = path.hasPrefix("~/") ? "$HOME/" + path.dropFirst(2) : path
+        return "umask 077; printf '%s' '\(value)' > \"\(target)\"; chmod 600 \"\(target)\""
+    }
+
     /// Sets a key in a launchd plist's `EnvironmentVariables`, adding it when the plist carries none.
     static func plistScript(label: String, key: String, value: String) -> String {
         let plist = "$HOME/Library/LaunchAgents/\(label).plist"
@@ -416,7 +430,8 @@ public struct RotationExecutor: Sendable {
 /// - `notAConnectionURL`: the key holds something with no password in it to replace.
 /// - `notAPair`: an S3 rotation must name exactly two keys, one of them a secret.
 /// - `notASingleKey`: this issuer answers one value, and the plan holds more than one key.
-/// - `ambiguousValue`: a holder renames the value, and the plan issued more than one.
+/// - `ambiguousValue`: a holder does not know which of the plan's values is its own, whether it renames the
+///   value or, like `file`, names no key of its own at all, and the plan issued more than one.
 public enum RotationExecutorError: Error, CustomStringConvertible, Equatable {
     case noBox(app: String)
     case unknownRestart(app: String)

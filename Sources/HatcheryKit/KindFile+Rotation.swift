@@ -17,6 +17,42 @@ extension KindFile {
         }
     }
 
+    /// What a secret's `rotation` key decodes to: a full declaration, or a note that another service's own
+    /// rotation is the one that turns this key over.
+    ///
+    /// - `declared`: this service issues the value and tells every holder, in ``Rotation``'s ruled order.
+    /// - `owned`: `<stack>/<service>` runs the rotation that replaces this key. `holders` prints where it is
+    ///   held rather than an issuer, `rotate` skips it rather than running it, and `rotate --all` counts it once,
+    ///   under the owner, rather than running it again here.
+    public enum RotationDeclaration: Codable, Sendable, Equatable {
+        case declared(Rotation)
+        case owned(by: String)
+
+        private enum CodingKeys: String, CodingKey {
+            case owner
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let owner = try container.decodeIfPresent(String.self, forKey: .owner) {
+                self = .owned(by: owner)
+                return
+            }
+            self = .declared(try Rotation(from: decoder))
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            switch self {
+            case .declared(let rotation):
+                try rotation.encode(to: encoder)
+
+            case .owned(let owner):
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(owner, forKey: .owner)
+            }
+        }
+    }
+
     /// What produces the new value for a secret.
     ///
     /// - `vaultAppKey`: vault mints a new app key for the service's own vault app, and answers it once.
@@ -111,6 +147,7 @@ extension KindFile {
     /// - `launchdEnvironment`: a key in a launchd plist's `EnvironmentVariables`, with the agent bootstrapped again.
     /// - `systemdEnvironment`: a key in a systemd unit's environment, with the unit started again.
     /// - `vaultSecret`: a holder that reads the value from vault at boot, so it takes no write and only restarts.
+    /// - `file`: the value written whole into a file on a host, at a path the declaration names, mode 600.
     ///
     /// A shared value has several holders, and every one of them is named here. A bearer invalidates every
     /// holder at once, so a holder this list forgets is the outage the declaration promised would not happen.
@@ -120,9 +157,10 @@ extension KindFile {
         case launchdEnvironment(host: String, label: String, key: String)
         case systemdEnvironment(host: String, unit: String, key: String)
         case vaultSecret(app: String, name: String)
+        case file(host: String, path: String)
 
         private enum CodingKeys: String, CodingKey {
-            case type, app, key, restart, host, label, unit, name
+            case type, app, key, restart, host, label, unit, name, path
         }
 
         public init(from decoder: Decoder) throws {
@@ -156,6 +194,11 @@ extension KindFile {
                 self = .vaultSecret(
                     app: try container.decode(String.self, forKey: .app),
                     name: try container.decode(String.self, forKey: .name))
+
+            case "file":
+                self = .file(
+                    host: try container.decode(String.self, forKey: .host),
+                    path: try container.decode(String.self, forKey: .path))
 
             default:
                 throw DecodingError.dataCorruptedError(
@@ -194,6 +237,11 @@ extension KindFile {
                 try container.encode("vaultSecret", forKey: .type)
                 try container.encode(app, forKey: .app)
                 try container.encode(name, forKey: .name)
+
+            case .file(let host, let path):
+                try container.encode("file", forKey: .type)
+                try container.encode(host, forKey: .host)
+                try container.encode(path, forKey: .path)
             }
         }
     }
@@ -218,30 +266,42 @@ extension KindFile {
     ///
     /// A secret with no rotation is listed too, with `nil`. That pair is what the audit reports and what the
     /// published counts count, so leaving it out would hide the gap this exists to show.
-    public func secretRotations() -> [(key: String, rotation: Rotation?)] {
+    public func secretRotations() -> [(key: String, rotation: RotationDeclaration?)] {
         self.environment
             .filter { $0.value.secret == true }
             .sorted { $0.key < $1.key }
             .map { (key: $0.key, rotation: $0.value.rotation) }
     }
 
-    /// The keys `hatchery secrets rotate` can act on, sorted by name.
+    /// The keys a rotation is declared for, sorted by name, whether this service runs that rotation itself or
+    /// another service owns it. `rotate` acts on the first kind and skips the second.
     public func rotatableKeys() -> [String] {
         self.secretRotations().filter { $0.rotation != nil }.map(\.key)
     }
 
-    /// The rotation declared for one key, or `nil` when the key is not a secret or declares none.
+    /// The rotation this service runs for one key: its issuer and its holders.
+    ///
+    /// `nil` when the key is not a secret, declares no rotation, or is owned by another service. Use
+    /// ``owner(forKey:)`` to read that last case.
     public func rotation(forKey key: String) -> Rotation? {
-        self.environment[key]?.rotation
+        guard case .declared(let rotation)? = self.environment[key]?.rotation else { return nil }
+        return rotation
     }
 
-    /// The rotatable keys grouped by the rotation they declare, in key order.
+    /// The service whose own rotation turns one key over, or `nil` when this key declares its own rotation
+    /// or none at all.
+    public func owner(forKey key: String) -> String? {
+        guard case .owned(let owner)? = self.environment[key]?.rotation else { return nil }
+        return owner
+    }
+
+    /// The rotatable keys grouped by the declaration they share, in key order.
     ///
-    /// The forge's S3 pair is why this exists. One issuer answers for both halves, so both keys declare the
-    /// same rotation, and running that rotation once replaces the pair. Running it twice would mint a second
-    /// pair and restart the forge a second time to reach the same place.
-    public func rotationGroups() -> [(keys: [String], rotation: Rotation)] {
-        var groups: [(keys: [String], rotation: Rotation)] = []
+    /// The forge's S3 pair is why this exists for a declared rotation: one issuer answers for both halves, so
+    /// both keys declare the same rotation, and running it once replaces the pair. The same folding applies to
+    /// two keys owned by the same service, which is one pointer read once rather than two.
+    public func rotationGroups() -> [(keys: [String], rotation: RotationDeclaration)] {
+        var groups: [(keys: [String], rotation: RotationDeclaration)] = []
         for entry in self.secretRotations() {
             guard let rotation = entry.rotation else { continue }
             if let index = groups.firstIndex(where: { $0.rotation == rotation }) {
