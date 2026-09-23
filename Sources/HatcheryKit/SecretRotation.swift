@@ -345,10 +345,17 @@ public struct RotationTarget: Sendable {
     public var dokkuTargets: [String: String]
     public var adminTargets: [String: String]
     public var secretsURL: URL
+    /// The keys this service's config and secrets files declare, or `nil` when the caller did not read them.
+    ///
+    /// A kind file serves every service of its kind, and a job kind serves every job in a stack, so a rotation it
+    /// declares is planned for a service only when that service carries the key. With `nil` every declared
+    /// rotation is planned, which is what a test with no sidecar wants.
+    public var carried: Set<String>?
 
     public init(
         stack: String, service: String, kind: KindFile,
-        dokkuTargets: [String: String], adminTargets: [String: String], secretsURL: URL
+        dokkuTargets: [String: String], adminTargets: [String: String], secretsURL: URL,
+        carried: Set<String>? = nil
     ) {
         self.stack = stack
         self.service = service
@@ -356,6 +363,7 @@ public struct RotationTarget: Sendable {
         self.dokkuTargets = dokkuTargets
         self.adminTargets = adminTargets
         self.secretsURL = secretsURL
+        self.carried = carried
     }
 }
 
@@ -411,6 +419,9 @@ public enum RotationRun {
 
         for target in targets {
             for group in target.kind.rotationGroups() {
+                // A kind shared by several services declares the key once, and only the services that carry it
+                // are held to it. On 2026-09-23 the air job kind planned the serve token nine times, once per job.
+                if let carried = target.carried, !group.keys.contains(where: { carried.contains($0) }) { continue }
                 let heading = "  \(target.stack)/\(target.service) \(group.keys.joined(separator: " + "))"
 
                 switch group.rotation {

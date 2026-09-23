@@ -58,6 +58,25 @@ private func stubExecutor(_ target: RotationTarget) -> RotationExecutor {
 
 @Suite("rotate --all, across every service a set of manifests declares")
 struct RotationRunTests {
+    @Test("a kind shared by two services plans its rotation only for the service that carries the key")
+    func sharedKindPlansOnlyWhereTheKeyIs() async throws {
+        let alpha = try allFixtureTargets()[0]
+        let serve = RotationTarget(
+            stack: "air", service: "hatchery-serve", kind: alpha.kind, dokkuTargets: [:], adminTargets: [:],
+            secretsURL: alpha.secretsURL, carried: ["ALPHA_TOKEN"])
+        let report = RotationTarget(
+            stack: "air", service: "node-report", kind: alpha.kind, dokkuTargets: [:], adminTargets: [:],
+            secretsURL: alpha.secretsURL, carried: [])
+
+        let (lines, outcomes) = await RotationRun.all(
+            targets: [serve, report], apps: [], hosts: [], dryRun: true, yes: false, makeExecutor: stubExecutor)
+
+        #expect(outcomes.count == 1)
+        #expect(outcomes.first?.service == "hatchery-serve")
+        #expect(outcomes.first?.state == .dry)
+        #expect(!lines.contains { $0.contains("node-report") })
+    }
+
     @Test("a random key runs, a manual key is refused, and an owned key is skipped, one table line each")
     func allProducesOneLinePerKeyOutcome() async throws {
         let targets = try allFixtureTargets()

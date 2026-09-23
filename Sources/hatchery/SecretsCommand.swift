@@ -254,6 +254,13 @@ struct Secrets: AsyncParsableCommand {
                 for stack in entry.manifest.stacks {
                     for service in stack.services {
                         guard let kind = try registry.kindFile(for: service.kind) else { continue }
+                        // What the service carries, from its config and secrets files, so a kind shared by several
+                        // services plans a rotation only where the key is. A missing file reads as empty.
+                        let carried = Set(
+                            try ConfigSync.readDeclared(
+                                config: ConfigSync.configURL(for: service, in: stack, manifestPath: entry.path),
+                                secrets: ConfigSync.secretsURL(for: service, in: stack, manifestPath: entry.path)
+                            ).keys)
                         targets.append(
                             RotationTarget(
                                 stack: stack.name,
@@ -262,7 +269,8 @@ struct Secrets: AsyncParsableCommand {
                                 dokkuTargets: dokkuTargets,
                                 adminTargets: adminTargets,
                                 secretsURL: Secrets.secretsURL(
-                                    service: service, stack: stack, manifestPath: entry.path)))
+                                    service: service, stack: stack, manifestPath: entry.path),
+                                carried: carried))
                     }
                 }
             }
