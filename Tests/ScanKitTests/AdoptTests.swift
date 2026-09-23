@@ -21,11 +21,15 @@ struct AdoptTests {
             return CommandOutput(status: 0, standardOutput: "http:80:8080\n")
         case "network:report mwlab --network-attach-post-create":
             return CommandOutput(status: 0, standardOutput: "macworkstack-infra_default\n")
+        case "network:report mwlab --network-attach-post-deploy":
+            return CommandOutput(status: 0, standardOutput: "\n")
         case "ps:inspect mwlab":
             return CommandOutput(status: 0, standardOutput: inspect)
         case "config:export --format json mwlab":
             return CommandOutput(
                 status: 0, standardOutput: #"{"APP_ID": "mwlab", "DATABASE_URL": "postgres://x"}"#)
+        case "storage:report mwlab --storage-run-mounts":
+            return CommandOutput(status: 0, standardOutput: "\n")
         default:
             return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
         }
@@ -211,6 +215,8 @@ struct AdoptTests {
                 return CommandOutput(status: 0, standardOutput: "http:8080:8080\n")
             case "network:report mwlab --network-attach-post-create":
                 return CommandOutput(status: 0, standardOutput: "\n")
+            case "network:report mwlab --network-attach-post-deploy":
+                return CommandOutput(status: 0, standardOutput: "\n")
             case "ps:inspect mwlab":
                 return CommandOutput(
                     status: 0, standardOutput: #"[{"Config": {"Image": "dokku/mwlab:latest", "Labels": {}}}]"#)
@@ -218,6 +224,8 @@ struct AdoptTests {
                 return CommandOutput(status: 0, standardOutput: #"{"APP_ID": "mwlab"}"#)
             case "checks:report mwlab --checks-disabled-list":
                 return CommandOutput(status: 0, standardOutput: "web\n")
+            case "storage:report mwlab --storage-run-mounts":
+                return CommandOutput(status: 0, standardOutput: "\n")
             default:
                 return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
             }
@@ -251,12 +259,16 @@ struct AdoptTests {
                 return CommandOutput(status: 0, standardOutput: "http:80:8080\n")
             case "network:report web --network-attach-post-create":
                 return CommandOutput(status: 0, standardOutput: "\n")
+            case "network:report web --network-attach-post-deploy":
+                return CommandOutput(status: 0, standardOutput: "\n")
             case "ps:inspect web":
                 return CommandOutput(
                     status: 0, standardOutput: #"[{"Config": {"Image": "dokku/web:latest", "Labels": {}}}]"#)
             case "config:export --format json web":
                 return CommandOutput(status: 0, standardOutput: "{}")
             case "checks:report web --checks-disabled-list":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "storage:report web --storage-run-mounts":
                 return CommandOutput(status: 0, standardOutput: "\n")
             default:
                 return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
@@ -320,6 +332,8 @@ struct AdoptTests {
                 return CommandOutput(status: 0, standardOutput: "http:80:8080\n")
             case "network:report ci-live --network-attach-post-create":
                 return CommandOutput(status: 0, standardOutput: "\n")
+            case "network:report ci-live --network-attach-post-deploy":
+                return CommandOutput(status: 0, standardOutput: "\n")
             case "ps:inspect ci-live":
                 return CommandOutput(
                     status: 0, standardOutput: #"[{"Config": {"Image": "dokku/ci-live:latest", "Labels": {}}}]"#)
@@ -327,6 +341,9 @@ struct AdoptTests {
                 return CommandOutput(status: 0, standardOutput: "{}")
             case "checks:report ci-live --checks-disabled-list":
                 return CommandOutput(status: 0, standardOutput: "\n")
+            case "storage:report ci-live --storage-run-mounts":
+                return CommandOutput(
+                    status: 0, standardOutput: "-v /var/lib/dokku/data/storage/ci-live:/app/data\n")
             default:
                 return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
             }
@@ -341,6 +358,284 @@ struct AdoptTests {
             facts, kind: .mwserver, into: "lab", box: "dokku@192.168.0.103", manifest: manifest)
 
         #expect(result.importCommand == "tofu import dokku_app.ci_live ci-live")
+    }
+}
+
+@Suite("Adopt declares the storage an app runs with")
+struct AdoptStorageTests {
+    private static let box = "dokku@192.168.0.103"
+
+    /// A box holding one app, `pulse`, with a named mount and a bind to a host path, as the opi does.
+    private static func pulseBox(mounts: String?) -> CommandExecutor {
+        return { argv, _ in
+            let command = argv.dropFirst(6).joined(separator: " ")
+            switch command {
+            case "domains:report pulse --domains-app-vhosts":
+                return CommandOutput(status: 0, standardOutput: "pulse.jimmyhoughjr.net\n")
+            case "ports:report pulse --ports-map":
+                return CommandOutput(status: 0, standardOutput: "http:80:8080\n")
+            case "network:report pulse --network-attach-post-create":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "network:report pulse --network-attach-post-deploy":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "ps:inspect pulse":
+                return CommandOutput(
+                    status: 0, standardOutput: #"[{"Config": {"Image": "dokku/pulse:latest", "Labels": {}}}]"#)
+            case "config:export --format json pulse":
+                return CommandOutput(status: 0, standardOutput: #"{"PULSE_DATA": "/data"}"#)
+            case "checks:report pulse --checks-disabled-list":
+                return CommandOutput(status: 0, standardOutput: "web\n")
+            case "storage:report pulse --storage-run-mounts":
+                guard let mounts else {
+                    return CommandOutput(status: 1, standardOutput: "", standardError: "timed out")
+                }
+                return CommandOutput(status: 0, standardOutput: mounts)
+            default:
+                return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
+            }
+        }
+    }
+
+    private static func manifest(declaring: Bool, stack: String = "estate") -> StackManifest {
+        StackManifest(stacks: [
+            StackSpec(
+                name: stack, backend: .dokku, host: box, tofu: TofuBinding(directory: "/tmp/estate"),
+                services: declaring
+                    ? [ServiceSpec(
+                        name: "pulse", kind: .mwserver, image: "dokku/pulse:latest",
+                        configFile: "pulse.config.json", imageVariable: "pulse_image")]
+                    : [])
+        ])
+    }
+
+    @Test("the run mounts parse into the names the provider keys its state with")
+    func parsesRunMounts() {
+        let mounts = DokkuStorage.parse(
+            runMounts: "-v /var/lib/dokku/data/storage/pulse:/data -v /mnt/nvme:/host/nvme")
+        #expect(mounts == [
+            DokkuStorage(name: "pulse", mountPath: "/data"),
+            DokkuStorage(name: "/mnt/nvme", mountPath: "/host/nvme"),
+        ])
+        #expect(DokkuStorage.parse(runMounts: "") == [])
+        #expect(DokkuStorage.parse(runMounts: "\n") == [])
+    }
+
+    @Test("an app's mounts reach the declaration, one block per mount")
+    func declarationNamesEveryMount() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(
+            mounts: "-v /var/lib/dokku/data/storage/pulse:/data -v /mnt/nvme:/host/nvme\n"))
+        let facts = try await adopter.facts(for: "pulse", on: Self.box)
+        #expect(facts.storage.count == 2)
+
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(declaration.contents.contains("""
+              storage = {
+                "pulse" = {
+                  mount_path = "/data"
+                }
+                "/mnt/nvme" = {
+                  mount_path = "/host/nvme"
+                }
+              }
+            """))
+    }
+
+    @Test("an app with no mounts gets no storage block")
+    func noMountsNoBlock() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(mounts: "\n"))
+        let facts = try await adopter.facts(for: "pulse", on: Self.box)
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(!declaration.contents.contains("storage = {"))
+    }
+
+    @Test("a storage read the box does not answer stops the adopt, rather than declaring no mounts")
+    func unansweredStorageReadRefuses() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(mounts: nil))
+        await #expect(throws: AdoptError.unreadable("storage:report pulse --storage-run-mounts")) {
+            try await adopter.facts(for: "pulse", on: Self.box)
+        }
+    }
+
+    @Test("a replace regenerates the declaration in place, with no second image variable and the sidecar kept")
+    func replaceRegeneratesInPlace() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(mounts: "-v /var/lib/dokku/data/storage/pulse:/data\n"))
+        let facts = try await adopter.facts(for: "pulse", on: Self.box)
+
+        await #expect(throws: AdoptError.alreadyDeclared(app: "pulse", stack: "estate")) {
+            try await adopter.plan(
+                facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: true))
+        }
+
+        let replaced = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: true),
+            replacing: true)
+        #expect(replaced.files.map(\.role) == [.declaration])
+        #expect(replaced.files.first?.contents.contains(#""pulse" = {"#) == true)
+        #expect(replaced.manifest.stack(named: "estate")?.services.map(\.name) == ["pulse"])
+
+        let refreshed = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: true),
+            replacing: true, refreshConfig: true)
+        #expect(refreshed.files.contains { $0.role == .config })
+        #expect(!refreshed.files.contains { $0.role == .variableAppend })
+    }
+
+    @Test("a replace keeps the manifest entry whole: boot order, expected status and image")
+    func replaceKeepsTheEntry() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(mounts: "-v /var/lib/dokku/data/storage/pulse:/data\n"))
+        let facts = try await adopter.facts(for: "pulse", on: Self.box)
+        var entry = ServiceSpec(
+            name: "pulse", kind: .mwserver, image: "dokku/pulse:latest", domains: ["pulse.old"],
+            configFile: "pulse.config.json", imageVariable: "pulse_image")
+        entry.after = ["vault"]
+        entry.expectedStatus = "302"
+        let manifest = StackManifest(stacks: [
+            StackSpec(name: "estate", backend: .dokku, host: Self.box, tofu: TofuBinding(directory: "/tmp/estate"),
+                      services: [entry])
+        ])
+
+        let replaced = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: manifest, replacing: true)
+        #expect(replaced.manifest == manifest)
+        #expect(replaced.service.after == ["vault"])
+        #expect(replaced.service.expectedStatus == "302")
+        #expect(replaced.service.image == "dokku/pulse:latest")
+        // The declaration still comes from the box.
+        #expect(replaced.files.first?.contents.contains("pulse.jimmyhoughjr.net") == true)
+    }
+
+    /// A box with one app that nobody pinned: no set port map, a detected one, and a post-deploy network.
+    private static func unpinnedBox(detected: String, sslEnabled: String? = "false") -> CommandExecutor {
+        return { argv, _ in
+            let command = argv.dropFirst(6).joined(separator: " ")
+            switch command {
+            case "domains:report vault --domains-app-vhosts":
+                return CommandOutput(status: 0, standardOutput: "vault.jimmyhoughjr.net\n")
+            case "ports:report vault --ports-map":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "ports:report vault --ports-map-detected":
+                return CommandOutput(status: 0, standardOutput: detected)
+            case "network:report vault --network-attach-post-create":
+                return CommandOutput(status: 0, standardOutput: "\n")
+            case "network:report vault --network-attach-post-deploy":
+                return CommandOutput(status: 0, standardOutput: "vault_default\n")
+            case "ps:inspect vault":
+                return CommandOutput(
+                    status: 0, standardOutput: #"[{"Config": {"Image": "dokku/vault:latest", "Labels": {}}}]"#)
+            case "config:export --format json vault":
+                return CommandOutput(status: 0, standardOutput: "{}")
+            case "storage:report vault --storage-run-mounts":
+                return CommandOutput(status: 0, standardOutput: "-v /var/lib/dokku/data/storage/vault:/data\n")
+            case "certs:report vault --ssl-enabled":
+                guard let sslEnabled else {
+                    return CommandOutput(status: 1, standardOutput: "", standardError: "timed out")
+                }
+                return CommandOutput(status: 0, standardOutput: sslEnabled + "\n")
+            default:
+                return CommandOutput(status: 1, standardOutput: "", standardError: "unknown \(command)")
+            }
+        }
+    }
+
+    @Test("an app with no set port map is declared on the port dokku detects, not an assumed 8080")
+    func unpinnedAppTakesTheDetectedPort() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "http:80:80 https:443:80\n"))
+        let facts = try await adopter.facts(for: "vault", on: Self.box)
+        #expect(facts.containerPort == 80)
+        #expect(facts.hostPort == "80")
+
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(declaration.contents.contains(#"container_port = "80""#))
+        #expect(!declaration.contents.contains("8080"))
+        // Without a certificate the https mapping dokku detects is not declared: it would fail nginx for every app.
+        #expect(!declaration.contents.contains("443"))
+    }
+
+    @Test("an app that holds a certificate keeps its https mapping beside the http one")
+    func certificateAppKeepsHTTPS() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "http:80:80 https:443:80\n", sslEnabled: "true"))
+        let facts = try await adopter.facts(for: "vault", on: Self.box)
+        #expect(facts.extraPorts == [DokkuPortMapping(scheme: "https", hostPort: "443", containerPort: 80)])
+
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(declaration.contents.contains("""
+              ports = {
+                "80" = {
+                  scheme         = "http"
+                  container_port = "80"
+                }
+                "443" = {
+                  scheme         = "https"
+                  container_port = "80"
+                }
+              }
+            """))
+    }
+
+    @Test("a certificate read the box does not answer stops the adopt when the map carries https")
+    func unansweredCertificateReadRefuses() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "http:80:80 https:443:80\n", sslEnabled: nil))
+        await #expect(throws: AdoptError.unreadable("certs:report vault --ssl-enabled")) {
+            try await adopter.facts(for: "vault", on: Self.box)
+        }
+    }
+
+    @Test("an app with only an http mapping renders the ports block as it always did")
+    func plainAppPortsUnchanged() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "http:80:80\n"))
+        let facts = try await adopter.facts(for: "vault", on: Self.box)
+        #expect(facts.extraPorts.isEmpty)
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(declaration.contents.contains("""
+              ports = {
+                "80" = {
+                  scheme         = "http"
+                  container_port = "80"
+                }
+              }
+            """))
+    }
+
+    @Test("an app with no http port map at all stops the adopt")
+    func noPortMapRefuses() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "\n"))
+        await #expect(throws: AdoptError.unreadable("an http port map for vault")) {
+            try await adopter.facts(for: "vault", on: Self.box)
+        }
+    }
+
+    @Test("a post-deploy network is declared, so an apply does not detach the app from its database")
+    func postDeployNetworkIsDeclared() async throws {
+        let adopter = Adopter(execute: Self.unpinnedBox(detected: "http:80:80\n"))
+        let facts = try await adopter.facts(for: "vault", on: Self.box)
+        #expect(facts.networkPostDeploy == "vault_default")
+        let result = try await adopter.plan(
+            facts, kind: .mwserver, into: "estate", box: Self.box, manifest: Self.manifest(declaring: false))
+        let declaration = try #require(result.files.first { $0.role == .declaration })
+        #expect(declaration.contents.contains(#"attach_post_deploy = "vault_default""#))
+        #expect(!declaration.contents.contains("attach_post_create"))
+    }
+
+    @Test("a replace does not move an app another stack declares")
+    func replaceStaysInItsStack() async throws {
+        let adopter = Adopter(execute: Self.pulseBox(mounts: "\n"))
+        let facts = try await adopter.facts(for: "pulse", on: Self.box)
+        var manifest = Self.manifest(declaring: true, stack: "sites")
+        manifest.stacks.append(StackSpec(name: "estate", backend: .dokku, host: Self.box, tofu: TofuBinding(directory: "/tmp/e")))
+        await #expect(throws: AdoptError.alreadyDeclared(app: "pulse", stack: "sites")) {
+            try await adopter.plan(
+                facts, kind: .mwserver, into: "estate", box: Self.box, manifest: manifest, replacing: true)
+        }
     }
 }
 

@@ -31,6 +31,8 @@ public struct Declaration: Codable, Sendable, Equatable {
         public var healthPath: String?
         /// The code the proxy gives for the root on port 80, when a person has ruled one. Absent for most services.
         public var expectedStatus: String?
+        /// The apps that must be serving before this one starts. Absent for most services.
+        public var after: [String]?
         /// What the box does with this container when it stops, for a service on the `host` backend.
         /// Absent for every other backend, where the platform owns the answer.
         public var restart: String?
@@ -107,6 +109,7 @@ public struct Declaration: Codable, Sendable, Equatable {
                             domains: service.domains,
                             healthPath: service.healthPath ?? declaredHealth[service.kind.rawValue],
                             expectedStatus: service.expectedStatus,
+                            after: service.after,
                             restart: service.container?.restart,
                             databases: service.databases.map { $0.map(Database.init) },
                             schedule: service.job?.schedule.map(Declaration.words(for:)),

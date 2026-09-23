@@ -18,11 +18,23 @@ public struct AppFacts: Sendable, Equatable {
     public let config: [String: String]
     /// Whether the box currently disables this app's zero-downtime checks.
     public let checksDisabled: Bool
+    /// The storage mounts the app runs with, as `storage:report` names them.
+    public let storage: [DokkuStorage]
+    /// The docker network the app joins after each deploy, when it uses that phase.
+    public let networkPostDeploy: String?
+    /// Every mapping of the port map beside the primary http one, such as `https:443:80`.
+    public let extraPorts: [DokkuPortMapping]
 
     public init(
         name: String, image: String, domains: [String], containerPort: Int, hostPort: String = "80",
-        network: String?, config: [String: String], checksDisabled: Bool = false
+        network: String?, config: [String: String], checksDisabled: Bool = false,
+        storage: [DokkuStorage] = [],
+        networkPostDeploy: String? = nil,
+        extraPorts: [DokkuPortMapping] = []
     ) {
+        self.extraPorts = extraPorts
+        self.networkPostDeploy = networkPostDeploy
+        self.storage = storage
         self.name = name
         self.image = image
         self.domains = domains
@@ -98,15 +110,40 @@ public struct Adopter: Sendable {
     /// Everything the box will say about one app, as the dokku user.
     public func facts(for app: String, on box: String) async throws -> AppFacts {
         let domains = try await self.answer("domains:report \(app) --domains-app-vhosts", on: box)
-        let ports = try await self.answer("ports:report \(app) --ports-map", on: box)
+        let setPorts = try await self.answer("ports:report \(app) --ports-map", on: box)
+        // An app nobody pinned has no set map, and dokku serves it on the map it detects. Adopt declares what
+        // runs, so it reads the detected map then. It never assumes a port: a wrong one pinned by an apply
+        // leaves a healthy app unreachable.
+        let ports = Self.hasHTTPMapping(setPorts)
+            ? setPorts
+            : try await self.answer("ports:report \(app) --ports-map-detected", on: box)
+        guard Self.hasHTTPMapping(ports) else {
+            throw AdoptError.unreadable("an http port map for \(app)")
+        }
         let network = try await self.answer(
             "network:report \(app) --network-attach-post-create", on: box)
+        let networkPostDeploy = try await self.answer(
+            "network:report \(app) --network-attach-post-deploy", on: box)
         let inspect = try await self.answer("ps:inspect \(app)", on: box)
         let exported = try await self.answer("config:export --format json \(app)", on: box)
         // Best-effort: an older dokku without the checks plugin's report flag answers nothing
         // useful here, and that is not a reason to fail the whole read.
         let checksDisabled = (try? await self.answer(
             "checks:report \(app) --checks-disabled-list", on: box)) ?? ""
+        // Not best-effort, unlike the checks read above. A mount that adopt fails to see is left out of the
+        // declaration, and the provider unmounts what a declaration leaves out. An unanswered read stops here.
+        let mounts = try await self.answer("storage:report \(app) --storage-run-mounts", on: box)
+
+        // An https mapping is declared only for an app that holds a certificate. Without one, an https mapping
+        // fails the nginx test for every app on the box; with one, leaving it out sends every request to a port
+        // nothing serves. Both are outages, so a certificate read that fails stops the adopt.
+        var extraPorts = Self.extraPorts(fromPortMap: ports)
+        if extraPorts.contains(where: { $0.scheme == "https" }) {
+            let sslEnabled = try await self.answer("certs:report \(app) --ssl-enabled", on: box)
+            if sslEnabled != "true" {
+                extraPorts.removeAll { $0.scheme == "https" }
+            }
+        }
 
         let config = (try? JSONDecoder().decode([String: String].self, from: Data(exported.utf8)))
             ?? [:]
@@ -118,7 +155,10 @@ public struct Adopter: Sendable {
             hostPort: Self.hostPort(fromPortMap: ports),
             network: network.isEmpty ? nil : network,
             config: config,
-            checksDisabled: !checksDisabled.isEmpty)
+            checksDisabled: !checksDisabled.isEmpty,
+            storage: DokkuStorage.parse(runMounts: mounts),
+            networkPostDeploy: networkPostDeploy.isEmpty ? nil : networkPostDeploy,
+            extraPorts: extraPorts)
     }
 
     /// The kind an image name implies. The kinds hatchery knows carry their name in their
@@ -165,9 +205,14 @@ public struct Adopter: Sendable {
     /// `kindFile`, when present, wins for `healthcheck` and `port` (when it has one): the
     /// service's own word about its own contact surface. The config sidecar still carries the
     /// box's measured keys either way.
+    ///
+    /// `replacing` regenerates the declaration of an app the named stack already declares, from what the box
+    /// says now. The manifest entry is kept as it is. Without `refreshConfig` the config sidecar and the
+    /// secrets file it already has are left alone.
     public func plan(
         _ facts: AppFacts, kind: ServiceKind, into stackName: String, box: String,
-        manifest: StackManifest, kindFile: KindFile? = nil
+        manifest: StackManifest, kindFile: KindFile? = nil, replacing: Bool = false,
+        refreshConfig: Bool = false
     ) async throws -> AdoptResult {
         guard let stack = manifest.stack(named: stackName), stack.backend == .dokku,
             let host = stack.hostAddress, box.hasSuffix(host)
@@ -176,7 +221,11 @@ public struct Adopter: Sendable {
         }
         for declared in manifest.stacks
         where declared.services.contains(where: { $0.name == facts.name }) {
-            throw AdoptError.alreadyDeclared(app: facts.name, stack: declared.name)
+            // A replace regenerates the app where it already stands. An app declared in another stack is
+            // still a refusal, because moving it is not what this door does.
+            guard replacing, declared.name == stackName else {
+                throw AdoptError.alreadyDeclared(app: facts.name, stack: declared.name)
+            }
         }
 
         let service = ServiceSpec(
@@ -186,16 +235,36 @@ public struct Adopter: Sendable {
         let scaffolded = try await Scaffolder().plan(
             service: service, into: stackName, manifest: manifest,
             containerPort: kindFile?.port ?? facts.containerPort, network: facts.network,
-            hostPort: facts.hostPort, checksDisabled: facts.checksDisabled)
+            hostPort: facts.hostPort, checksDisabled: facts.checksDisabled, replacing: replacing,
+            storage: facts.storage, networkPostDeploy: facts.networkPostDeploy, extraPorts: facts.extraPorts)
 
         // The scaffolder minted a config. The box's config replaces it wholesale: keys the
         // contract does not know are kept too, because the running app reads them.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let configJSON = String(decoding: try encoder.encode(facts.config), as: UTF8.self)
-        let files = scaffolded.files.map { file -> GeneratedFile in
+        var files = scaffolded.files.map { file -> GeneratedFile in
             guard file.role == .config else { return file }
             return GeneratedFile(path: file.path, contents: configJSON + "\n", role: .config)
+        }
+
+        if replacing {
+            // The image variable was appended when the app was first declared, and a second append
+            // declares it twice, which stops tofu from planning at all.
+            files.removeAll { $0.role == .variableAppend }
+            // The sidecar and the secrets file hold what the app runs with, so they stay until
+            // --refresh-config asks for them.
+            if !refreshConfig {
+                files.removeAll { $0.role == .config }
+            }
+            // The manifest entry is kept whole. It carries what a person ruled and the box cannot say:
+            // the boot order in `after`, the `expectedStatus` a probe checks, and the image a deploy moves.
+            // A replace regenerates the declaration and nothing else.
+            if let existing = stack.service(named: facts.name) {
+                return AdoptResult(
+                    service: existing, files: files, manifest: manifest,
+                    importCommand: "tofu import dokku_app.\(tofuIdentifier(for: facts.name)) \(facts.name)")
+            }
         }
 
         return AdoptResult(
@@ -633,6 +702,21 @@ public struct Adopter: Sendable {
     }
 
     /// `http:80:8080` → 8080. The last field of the first http mapping.
+    /// Every mapping but the first http one, which the declaration carries as its primary mapping.
+    static func extraPorts(fromPortMap map: String) -> [DokkuPortMapping] {
+        let all = DokkuPortMapping.parse(portMap: map)
+        guard let primary = all.firstIndex(where: { $0.scheme == "http" }) else { return all }
+        return all.enumerated().filter { $0.offset != primary }.map(\.element)
+    }
+
+    /// Whether a port map holds an http mapping of the `scheme:host:container` shape.
+    static func hasHTTPMapping(_ map: String) -> Bool {
+        map.split(separator: " ").contains { entry in
+            let parts = entry.split(separator: ":")
+            return parts.count == 3 && parts[0] == "http" && Int(parts[2]) != nil
+        }
+    }
+
     static func containerPort(fromPortMap map: String) -> Int {
         for entry in map.split(separator: " ") {
             let parts = entry.split(separator: ":")

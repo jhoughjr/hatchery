@@ -141,7 +141,15 @@ public struct DokkuProvider: ServiceProvider {
                   scheme         = "http"
                   container_port = "\(request.containerPort)"
                 }
-              }
+            \(request.extraPorts.map { mapping in
+                """
+                    "\(mapping.hostPort)" = {
+                      scheme         = "\(mapping.scheme)"
+                      container_port = "\(mapping.containerPort)"
+                    }
+
+                """
+            }.joined())  }
 
             """
 
@@ -155,13 +163,38 @@ public struct DokkuProvider: ServiceProvider {
                 """
         }
 
-        if let network = request.network, !network.isEmpty {
+        let postCreate = request.network.flatMap { $0.isEmpty ? nil : $0 }
+        let postDeploy = request.networkPostDeploy.flatMap { $0.isEmpty ? nil : $0 }
+        if postCreate != nil || postDeploy != nil {
+            let phases = [
+                postCreate.map { "    attach_post_create = \"\($0)\"" },
+                postDeploy.map { "    attach_post_deploy = \"\($0)\"" },
+            ].compactMap { $0 }.joined(separator: "\n")
             body += """
 
                   # Shared docker network with the database app — removing this cuts the app off
-                  # from its database.
+                  # from its database. The provider clears a phase this block leaves out.
                   networks = {
-                    attach_post_create = "\(network)"
+                \(phases)
+                  }
+
+                """
+        }
+
+        if !request.storage.isEmpty {
+            let mounts = request.storage.map { mount in
+                """
+                    "\(mount.name)" = {
+                      mount_path = "\(mount.mountPath)"
+                    }
+                """
+            }.joined(separator: "\n")
+            body += """
+
+                  # The mounts the app runs with. The provider unmounts any mount a declaration leaves out,
+                  # and restarts the app, so every mount on the box is named here.
+                  storage = {
+                \(mounts)
                   }
 
                 """

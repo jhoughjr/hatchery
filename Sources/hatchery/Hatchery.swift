@@ -25,7 +25,7 @@ struct Hatchery: AsyncParsableCommand {
         commandName: "hatchery",
         abstract: "Configure, deploy and monitor MWServer stacks.",
         subcommands: [
-            Box.self, Config.self, Database.self, Declared.self, Deploy.self, Dns.self, Doctor.self, Events.self,
+            Box.self, Config.self, Database.self, Declared.self, Deploy.self, Dns.self, Doctor.self, Events.self, Forge.self,
             Host.self, Kind.self, Secrets.self, Serve.self,
             Service.self, Setup.self, Stack.self, State.self, Status.self,
             Up.self, Down.self, Restart.self, Vault.self,
@@ -33,11 +33,54 @@ struct Hatchery: AsyncParsableCommand {
     )
 }
 
+/// What a box has left, and the room a deploy can give back.
+struct Space: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "space",
+        abstract: "Say what a box has left, and with --free give back what nothing needs.",
+        discussion: """
+            A deploy pulls an image and leaves it, and a build leaves its cache. Twice on 2026-09-16 the opi filled: \
+            once failing an image build, once making the forge reject a push. --free takes the build cache and the \
+            images no container references, neither of which a running service uses. Call it after a deploy.
+            """
+    )
+
+    @Argument(help: "The box, as an ssh target such as jimmy@192.168.0.103.")
+    var box: String
+
+    @Flag(name: .long, help: "Give back the build cache and the images nothing references.")
+    var free = false
+
+    func run() async throws {
+        let before = BoxSpace.report(box: self.box)
+        guard let before else {
+            print("  \(self.box) did not answer, so nothing is known and nothing was freed")
+            throw ExitCode.failure
+        }
+        print("  \(self.box): \(before.free) free of \(before.size), \(before.percent)% used")
+        for row in before.repositories.prefix(5) {
+            print("    \(row.images) image\(row.images == 1 ? "" : "s")  \(row.name)")
+        }
+        guard self.free else {
+            if before.low { print("  the box is low. Run it again with --free, and prune the registry with hatchery forge prune") }
+            return
+        }
+        guard let after = BoxSpace.free(box: self.box) else {
+            print("  the box stopped answering while it was freeing space")
+            throw ExitCode.failure
+        }
+        print("  \(self.box): \(after.free) free of \(after.size), \(after.percent)% used")
+        if after.low {
+            print("  still low. The images a deploy leaves are the usual cause: hatchery forge prune <package> --box \(self.box) --yes")
+        }
+    }
+}
+
 /// Preparing machines to host stacks.
 struct Box: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Prepare machines to host stacks.",
-        subcommands: [Init.self, Scan.self, Adopt.self]
+        subcommands: [Init.self, Order.self, Scan.self, Adopt.self, Space.self]
     )
 
     /// The onboarding guide, executed: point it at an empty Debian/Ubuntu box and it
@@ -156,6 +199,80 @@ struct Box: AsyncParsableCommand {
 
         private func bare(_ host: String) -> String {
             host.split(separator: "@").last.map(String.init) ?? host
+        }
+    }
+
+    /// The boot order, declared by each service's `after` list and asserted onto the box at boot.
+    struct Order: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Assert the order a box brings its dokku apps up in, at every boot.",
+            discussion: """
+                Each dokku service may name the apps it comes up after, in its `after` list. \
+                Rookery and forgejo name vault, because both fail their boot while vault's proxy is stale. \
+                A reset then left the box down until a person ran the fixes by hand, in order.
+
+                This command renders those fixes as assertions: an app is serving, or it is started, \
+                its proxy is rebuilt, and it gets time to settle. It writes them to the box as a script \
+                and a user unit that runs at boot, and again a minute after a failure, for half an hour.
+
+                Without --yes, only the checks run, here and now, over ssh. Nothing is written or fixed. \
+                With --yes, the script and the unit are installed. A second run changes nothing.
+                """
+        )
+
+        @Argument(help: "The box, as the user@host whose account runs the unit, for example jimmy@192.168.0.103.")
+        var host: String
+
+        @Option(name: .long, help: "A manifest to read. Repeat it to read several, because an app and the app it names may be declared apart.")
+        var manifest: [String] = []
+
+        @Flag(name: .long, help: "Install the script and the unit. Without it, only the checks run.")
+        var yes: Bool = false
+
+        func run() async throws {
+            let manifests = try (self.manifest.isEmpty ? [ManifestLocator.defaultName] : self.manifest).map {
+                try ManifestLocator.load($0).manifest
+            }
+            let ordered: [BootOrder.App]
+            do {
+                ordered = try BootOrder.ordered(BootOrder.apps(from: manifests))
+            } catch let failure as BootOrder.Failure {
+                throw ValidationError(failure.description)
+            }
+            guard !ordered.isEmpty else {
+                throw ValidationError("no dokku service declares an after list, so there is no order to assert")
+            }
+            print("\(self.host)  boot order: \(ordered.map(\.name).joined(separator: " -> "))")
+
+            let order = BootOrder.assertions(for: ordered)
+            let initializer = BoxInitializer()
+            let locus = BoxLocus.ssh(host: self.host)
+            // The order is checked and never fixed from here, because a fix restarts a live app.
+            let checks = order.map { BoxAssertion(name: $0.name, check: $0.check, remedy: "not serving now") }
+            let now = await initializer.run(at: locus, assertions: checks) { print("  \($0)") }
+
+            let install = BootOrder.installAssertions(script: BootOrder.script(order))
+            let installed: [BoxStep]
+            if self.yes {
+                installed = await initializer.run(at: locus, assertions: install) { print("  \($0)") }
+            } else {
+                let withheld = install.map {
+                    BoxAssertion(name: $0.name, check: $0.check, remedy: $0.fix.isEmpty ? $0.remedy : "would fix with --yes")
+                }
+                installed = await initializer.run(at: locus, assertions: withheld) { print("  \($0)") }
+            }
+
+            print("")
+            let serving = now.count == checks.count && now.allSatisfy { $0.outcome != .failed }
+            let current = installed.count == install.count && installed.allSatisfy { $0.outcome != .failed }
+            if current {
+                print("  the boot order is installed\(serving ? ", and every app in it serves now" : ", and an app in it does not serve now")")
+            } else if !self.yes {
+                print("  re-run with --yes to install it")
+            }
+            if !current && self.yes {
+                throw ExitCode(1)
+            }
         }
     }
     /// The inverse of the manifest: read what a target runs, and say whose it is.
@@ -313,7 +430,7 @@ struct Box: AsyncParsableCommand {
 
         @Flag(
             name: .long,
-            help: "Regenerate a container the stack already declares, rewriting its tofu file and its manifest entry.")
+            help: "Regenerate an app or a container the stack already declares. A container's tofu file and manifest entry are rewritten; an app's tofu file is rewritten and its manifest entry is kept.")
         var replace: Bool = false
 
         @Flag(
@@ -360,9 +477,6 @@ struct Box: AsyncParsableCommand {
             guard provider == .dokku else {
                 throw ValidationError("adopt reads a box or a container; \(box) is \(provider.rawValue)")
             }
-            guard !replace else {
-                throw ValidationError("--replace is a container door; a dokku app is adopted once")
-            }
             let inventory = try await scanner.scan(target)
             guard inventory.apps.contains(where: { $0.name == app }) else {
                 throw ValidationError(AdoptError.notOnBox(app: app, box: box).description)
@@ -391,12 +505,13 @@ struct Box: AsyncParsableCommand {
             print("  port     \(resolved.kindFile?.port ?? facts.containerPort)")
             if let network = facts.network { print("  network  \(network)") }
             print("  config   \(facts.config.count) key(s)")
+            print("  storage  \(facts.storage.isEmpty ? "none" : facts.storage.map { "\($0.name) -> \($0.mountPath)" }.joined(separator: ", "))")
 
             let result: AdoptResult
             do {
                 result = try await adopter.plan(
                     facts, kind: resolved.kind, into: stack, box: box, manifest: parsed,
-                    kindFile: resolved.kindFile)
+                    kindFile: resolved.kindFile, replacing: replace, refreshConfig: refreshConfig)
             } catch let error as AdoptError {
                 throw ValidationError(error.description)
             }
@@ -412,13 +527,19 @@ struct Box: AsyncParsableCommand {
             guard let spec = parsed.stack(named: stack) else { return }
             let scaffolded = ScaffoldResult(
                 service: result.service, files: result.files, secrets: [], manifest: result.manifest)
-            let written = try Scaffolder().write(scaffolded, in: spec)
+            // The door opens for the files this plan carries, and for no other file in the directory.
+            let overwriting = replace ? Set(result.files.map(\.path)) : []
+            let written = try Scaffolder().write(scaffolded, in: spec, overwriting: overwriting)
             print("  wrote \(written.count) file(s)")
-            try result.manifest.write(to: manifestPath)
-            print("  manifest updated")
+            // A replace keeps the manifest entry, so there is nothing to write to the manifest.
+            if !replace {
+                try result.manifest.write(to: manifestPath)
+                print("  manifest updated")
+            }
 
+            // A replace regenerates an app vault already knows, so the registration is not asked for twice.
             let contract = resolved.kindFile?.contract(backend: spec.backend)
-            if !noVault, VaultStep.wanted(contract: contract), let contract {
+            if !replace, !noVault, VaultStep.wanted(contract: contract), let contract {
                 try await VaultStep.run(
                     service: result.service, in: spec, manifestPath: manifestPath,
                     contract: contract, dryRun: false)
@@ -426,7 +547,12 @@ struct Box: AsyncParsableCommand {
 
             if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
             print("")
-            print("  next, in \(spec.tofu?.directory ?? "the stack directory"): \(result.importCommand)")
+            if replace {
+                // The app is already in state, so a replace needs a plan, not an import.
+                print("  next, in \(spec.tofu?.directory ?? "the stack directory"): tofu plan")
+            } else {
+                print("  next, in \(spec.tofu?.directory ?? "the stack directory"): \(result.importCommand)")
+            }
         }
 
         /// The container path: one inspect, the kind the registry knows under that name, and the same
