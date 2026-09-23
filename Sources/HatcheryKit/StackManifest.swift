@@ -300,6 +300,14 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// Absent means any 2xx or 3xx reads as healthy. It is here rather than in each host's `ROOST_EXPECTED_HTTP`, because
     /// that was the only copy, every host kept its own, and the laptop and the mini disagreed about four apps.
     public var expectedStatus: String?
+    /// What this service is for, in one sentence a stranger reads.
+    ///
+    /// It is here because the estate already had two answers and they had drifted: pulse's own `descriptions.json`
+    /// carried a sentence for ten of twenty-six apps on 2026-09-23, and nothing said where the other sixteen should
+    /// come from. The declaration is what each stack says about itself, so it is where the sentence belongs, and a
+    /// page that reads the declaration then needs no second copy. Absent for a service nobody has described yet,
+    /// which is how a reader sees the gap rather than a plausible blank.
+    public var description: String?
     /// The registry's identifier for this deployment, once one exists.
     ///
     /// hatchery never mints this. The administration tier is the identity mint, and its
