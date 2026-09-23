@@ -300,6 +300,12 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// Absent means any 2xx or 3xx reads as healthy. It is here rather than in each host's `ROOST_EXPECTED_HTTP`, because
     /// that was the only copy, every host kept its own, and the laptop and the mini disagreed about four apps.
     public var expectedStatus: String?
+    /// What this service is called where a person reads it, when that is not its own name.
+    ///
+    /// A service's name is what the platform calls it, so it is `bin-brigade` and `mwlab-2-paylab`, and a page
+    /// that shows those is teaching a visitor the estate's spelling rather than saying what the thing is. Absent
+    /// for a service whose name reads well enough on its own.
+    public var title: String?
     /// What this service is for, in one sentence a stranger reads.
     ///
     /// It is here because the estate already had two answers and they had drifted: pulse's own `descriptions.json`
