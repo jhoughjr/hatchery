@@ -267,12 +267,16 @@ struct Secrets: AsyncParsableCommand {
                 }
             }
 
-            var vault = VaultAdmin(credential: .session(""))
+            // The credential is resolved once, before any rotation runs, and the value is fixed here so the executor
+            // closures below capture a constant.
+            let vault: VaultAdmin
             if self.yes, !self.dryRun, targets.contains(where: { Self.needsVaultSession(in: $0.kind) }) {
                 guard let credential = VaultAdminCredential.resolve() else {
                     throw RotationRefusal.noVaultSession
                 }
                 vault = VaultAdmin(credential: credential)
+            } else {
+                vault = VaultAdmin(credential: .session(""))
             }
 
             let (lines, outcomes) = await RotationRun.all(
