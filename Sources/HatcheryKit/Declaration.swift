@@ -33,6 +33,10 @@ public struct Declaration: Codable, Sendable, Equatable {
         public var expectedStatus: String?
         /// The apps that must be serving before this one starts. Absent for most services.
         public var after: [String]?
+        /// What this service is called where a person reads it, as its manifest declares it.
+        public var title: String?
+        /// What this service is for, in one sentence, as its manifest declares it.
+        public var description: String?
         /// What the box does with this container when it stops, for a service on the `host` backend.
         /// Absent for every other backend, where the platform owns the answer.
         public var restart: String?
@@ -110,6 +114,8 @@ public struct Declaration: Codable, Sendable, Equatable {
                             healthPath: service.healthPath ?? declaredHealth[service.kind.rawValue],
                             expectedStatus: service.expectedStatus,
                             after: service.after,
+                            title: service.title,
+                            description: service.description,
                             restart: service.container?.restart,
                             databases: service.databases.map { $0.map(Database.init) },
                             schedule: service.job?.schedule.map(Declaration.words(for:)),

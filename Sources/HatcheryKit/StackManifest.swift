@@ -311,6 +311,20 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// lists only people with a GitHub sign-in and tells anyone without one where to link it.
     /// `hatchery vault requires` and the vault step of `service new` and `box adopt` set it on the app's record.
     public var vaultRequires: [VaultRequirement]?
+    /// What this service is called where a person reads it, when that is not its own name.
+    ///
+    /// A service's name is what the platform calls it, so it is `bin-brigade` and `mwlab-2-paylab`, and a page
+    /// that shows those is teaching a visitor the estate's spelling rather than saying what the thing is. Absent
+    /// for a service whose name reads well enough on its own.
+    public var title: String?
+    /// What this service is for, in one sentence a stranger reads.
+    ///
+    /// It is here because the estate already had two answers and they had drifted: pulse's own `descriptions.json`
+    /// carried a sentence for ten of twenty-six apps on 2026-09-23, and nothing said where the other sixteen should
+    /// come from. The declaration is what each stack says about itself, so it is where the sentence belongs, and a
+    /// page that reads the declaration then needs no second copy. Absent for a service nobody has described yet,
+    /// which is how a reader sees the gap rather than a plausible blank.
+    public var description: String?
     /// The registry's identifier for this deployment, once one exists.
     ///
     /// hatchery never mints this. The administration tier is the identity mint, and its
