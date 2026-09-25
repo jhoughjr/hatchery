@@ -353,6 +353,11 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// A service carries this or `container`, never both: a program under a supervisor is not a container, and the
     /// two scaffolds write different artifacts. Absent for every other service, and left out of the encoded manifest.
     public var job: JobSpec?
+    /// The forge runner this service is, for a service that is a build box.
+    ///
+    /// Absent for every other service, and left out of the encoded manifest when absent. `hatchery box runner` reads it
+    /// off the box, so the labels declared here are the labels the runner declares to the forge.
+    public var runner: RunnerSpec?
 
     public init(
         name: String,

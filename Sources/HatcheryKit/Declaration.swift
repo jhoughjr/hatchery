@@ -56,8 +56,27 @@ public struct Declaration: Codable, Sendable, Equatable {
         /// The effective supervisor label the job carries on the box, computed from the spec's label if set,
         /// or from the service name and platform. Absent for services that are not jobs.
         public var label: String?
+        /// The forge runner this service is, for a build box. Absent for every other service.
+        public var runner: Runner?
         /// Empty when the service is clean. Filled by ``DeclarationAudit``, never by a manifest write.
         public var findings: [Finding] = []
+    }
+
+    /// A build box as a page reads it: its registration on the forge, what it takes, and where it runs a job.
+    public struct Runner: Codable, Sendable, Equatable {
+        public var registration: String
+        /// The label names a workflow's `runs-on` asks for, for example `macos`.
+        public var labels: [String]
+        public var capacity: Int
+        /// `host` when a job runs on the box itself, `container` when it runs in an image.
+        public var mode: String
+
+        public init(_ spec: RunnerSpec) {
+            self.registration = spec.registration
+            self.labels = spec.names
+            self.capacity = spec.capacity
+            self.mode = spec.mode
+        }
     }
 
     public struct Stack: Codable, Sendable, Equatable {
@@ -123,6 +142,7 @@ public struct Declaration: Codable, Sendable, Equatable {
                             log: service.job?.log,
                             platform: service.job.map { _ in stack.platform.rawValue },
                             label: jobLabel,
+                            runner: service.runner.map(Runner.init),
                             findings: findings["\(stack.name)/\(service.name)"] ?? []
                         )
                     }

@@ -80,8 +80,73 @@ struct Space: AsyncParsableCommand {
 struct Box: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Prepare machines to host stacks.",
-        subcommands: [Init.self, Order.self, Scan.self, Adopt.self, Space.self]
+        subcommands: [Init.self, Order.self, Scan.self, Adopt.self, Space.self, Runner.self]
     )
+
+    /// A build box's runner, read off the box into the service that already declares it.
+    struct Runner: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Declare what a build box's forge runner takes: its registration, labels and capacity.",
+            discussion: """
+                Reads the runner a declared service runs, on the host its stack names: the `runner:` block of \
+                its config and the name in its `.runner` file. The filtering is done on the box, so the \
+                cache secret and the runner token never leave it. Only the service's runner block changes. \
+                Nothing on the box changes.
+                """
+        )
+
+        @Argument(help: "The service that runs the runner, for example act_runner or forgejo-runner.")
+        var service: String
+
+        @Option(name: .shortAndLong, help: "The stack that declares it.")
+        var stack: String
+
+        @Option(name: .shortAndLong, help: "Path to the stack manifest.")
+        var manifest: String = "hatchery.json"
+
+        @Flag(name: .long, help: "Show what the box runs without writing anything.")
+        var dryRun: Bool = false
+
+        func run() async throws {
+            let manifestPath = try ManifestLocator.resolve(manifest)
+            let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: manifestPath)))
+            guard let spec = parsed.stack(named: stack) else {
+                throw ValidationError("the manifest declares no stack named \(stack)")
+            }
+            guard let declared = spec.services.first(where: { $0.name == service }) else {
+                throw ValidationError("stack \(stack) declares no service named \(service)")
+            }
+            let read: RunnerSpec
+            do {
+                read = try await BuildBox.read(declared, in: spec)
+            } catch let error as BuildBox.Trouble {
+                throw ValidationError(error.description)
+            }
+
+            print("\(service) on \(spec.host ?? stack)")
+            print("  registration  \(read.registration)")
+            print("  mode          \(read.mode), capacity \(read.capacity)")
+            print("  labels        \(read.names.joined(separator: ", "))")
+            print("  config        \(read.config)")
+            if declared.runner == read {
+                print("  the declaration already says this; nothing to write")
+                return
+            }
+            if let before = declared.runner {
+                let gone = Set(before.labels).subtracting(read.labels).sorted()
+                let new = Set(read.labels).subtracting(before.labels).sorted()
+                if !gone.isEmpty { print("  no longer     \(gone.joined(separator: ", "))") }
+                if !new.isEmpty { print("  new           \(new.joined(separator: ", "))") }
+            }
+            if dryRun {
+                print("  dry run; nothing written")
+                return
+            }
+            try parsed.settingRunner(stack: stack, service: service, to: read).write(to: manifestPath)
+            print("  manifest updated")
+            if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
+        }
+    }
 
     /// The onboarding guide, executed: point it at an empty Debian/Ubuntu box and it
     /// asserts the dokku prerequisites onto it, convergently. For a hosted platform there
