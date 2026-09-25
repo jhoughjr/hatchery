@@ -83,15 +83,22 @@ struct Box: AsyncParsableCommand {
         subcommands: [Init.self, Order.self, Scan.self, Adopt.self, Space.self, Runner.self]
     )
 
-    /// A build box's runner, read off the box into the service that already declares it.
+    /// A build box's runner: read off the box into its declaration, checked against it, or given new labels.
     struct Runner: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Declare what a build box's forge runner takes: its registration, labels and capacity.",
+            abstract: "Declare, check or change what a build box's forge runner takes: its registration, labels and capacity.",
             discussion: """
                 Reads the runner a declared service runs, on the host its stack names: the `runner:` block of \
                 its config and the name in its `.runner` file. The filtering is done on the box, so the \
-                cache secret and the runner token never leave it. Only the service's runner block changes. \
-                Nothing on the box changes.
+                cache secret and the runner token never leave it.
+
+                With no flag it writes what the box runs into the service's runner block. With --check it \
+                only compares, and exits 1 when the box and the declaration differ.
+
+                --add and --remove move a build without a commit: they change the labels in the runner's \
+                config on the box, restart the runner so it declares them to the forge, wait until the forge \
+                reports them, and then write the declaration. Without --yes they only show the plan. A runner \
+                in the middle of a job is not restarted without --force, because the restart ends the job.
                 """
         )
 
@@ -107,6 +114,21 @@ struct Box: AsyncParsableCommand {
         @Flag(name: .long, help: "Show what the box runs without writing anything.")
         var dryRun: Bool = false
 
+        @Flag(name: .long, help: "Compare the box with the declaration, write nothing, and exit 1 when they differ.")
+        var check: Bool = false
+
+        @Option(name: .long, help: "A label to give the runner. A bare name takes the target its other labels share.")
+        var add: [String] = []
+
+        @Option(name: .long, help: "A label to take from the runner, by name.")
+        var remove: [String] = []
+
+        @Flag(name: .long, help: "Apply the label change. Without it the change is only shown.")
+        var yes: Bool = false
+
+        @Flag(name: .long, help: "Restart a runner that is in the middle of a job, which ends that job.")
+        var force: Bool = false
+
         func run() async throws {
             let manifestPath = try ManifestLocator.resolve(manifest)
             let parsed = try StackManifest.decode(from: Data(contentsOf: URL(fileURLWithPath: manifestPath)))
@@ -116,33 +138,100 @@ struct Box: AsyncParsableCommand {
             guard let declared = spec.services.first(where: { $0.name == service }) else {
                 throw ValidationError("stack \(stack) declares no service named \(service)")
             }
+
+            // Measure before.
             let read: RunnerSpec
             do {
                 read = try await BuildBox.read(declared, in: spec)
             } catch let error as BuildBox.Trouble {
                 throw ValidationError(error.description)
             }
-
             print("\(service) on \(spec.host ?? stack)")
             print("  registration  \(read.registration)")
             print("  mode          \(read.mode), capacity \(read.capacity)")
             print("  labels        \(read.names.joined(separator: ", "))")
             print("  config        \(read.config)")
+
+            if !add.isEmpty || !remove.isEmpty {
+                try await self.relabel(read, declared: declared, in: spec, manifest: parsed, at: manifestPath)
+                return
+            }
+
+            let drift = declared.runner.map { before in
+                (gone: Set(before.labels).subtracting(read.labels).sorted(), new: Set(read.labels).subtracting(before.labels).sorted())
+            }
+            if let drift {
+                if !drift.gone.isEmpty { print("  no longer     \(drift.gone.joined(separator: ", "))") }
+                if !drift.new.isEmpty { print("  new           \(drift.new.joined(separator: ", "))") }
+            }
             if declared.runner == read {
                 print("  the declaration already says this; nothing to write")
                 return
             }
-            if let before = declared.runner {
-                let gone = Set(before.labels).subtracting(read.labels).sorted()
-                let new = Set(read.labels).subtracting(before.labels).sorted()
-                if !gone.isEmpty { print("  no longer     \(gone.joined(separator: ", "))") }
-                if !new.isEmpty { print("  new           \(new.joined(separator: ", "))") }
+            if check {
+                print(declared.runner == nil ? "  drift: the declaration has no runner block" : "  drift: the box and the declaration differ")
+                throw ExitCode(1)
             }
             if dryRun {
                 print("  dry run; nothing written")
                 return
             }
             try parsed.settingRunner(stack: stack, service: service, to: read).write(to: manifestPath)
+            print("  manifest updated")
+            if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
+        }
+
+        /// The label change: plan, the forge's word that the runner is free, the write and restart, and the forge's word after.
+        private func relabel(
+            _ read: RunnerSpec, declared: ServiceSpec, in spec: StackSpec, manifest parsed: StackManifest, at manifestPath: String
+        ) async throws {
+            let wanted: [String]
+            do {
+                wanted = try BuildBox.relabel(read.labels, adding: add, removing: remove)
+            } catch let error as BuildBox.Trouble {
+                throw ValidationError(error.description)
+            }
+            guard wanted != read.labels else {
+                print("  the runner already has these labels; nothing to change")
+                return
+            }
+            let after = RunnerSpec(registration: read.registration, labels: wanted, capacity: read.capacity, config: read.config)
+            print("  would become  \(after.names.joined(separator: ", "))")
+            guard yes else {
+                print("  run again with --yes to write the config on the box and restart the runner")
+                return
+            }
+
+            // The runner must be free, because a restart ends the job it is running.
+            let before = ForgeRunners.current(read.registration, in: try await ForgeRunners.live())
+            if before?.status == "active", !force {
+                throw ValidationError("\(read.registration) is running a job now; wait for it, or pass --force to end the job")
+            }
+
+            // Act.
+            let changed = try await BuildBox.apply(declared, in: spec, config: read.config, labels: wanted)
+            print("  config        \(changed ? "rewritten, the old one kept as " + read.config + ".bak-hatchery" : "already had these labels")")
+            print("  runner        restarted")
+
+            // Measure after: the box, then the forge, which learns the labels when the runner starts.
+            let now = try await BuildBox.read(declared, in: spec)
+            guard now.labels == wanted else {
+                throw ValidationError("the box reads \(now.names.joined(separator: ", ")) after the write, not the labels asked for")
+            }
+            var answered: ForgeRunners.Runner?
+            for _ in 0..<30 {
+                answered = ForgeRunners.current(read.registration, in: (try? await ForgeRunners.live()) ?? [])
+                if let answered, answered.status != "offline", Set(answered.labels) == Set(after.names) { break }
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+            guard let answered, answered.status != "offline", Set(answered.labels) == Set(after.names) else {
+                throw ValidationError(
+                    "the box has the new labels, but the forge still reports \(read.registration) as "
+                        + "\(answered.map { $0.status + " with " + $0.labels.joined(separator: ", ") } ?? "missing"); the declaration is not written")
+            }
+            print("  forge         \(answered.name) \(answered.status), \(answered.labels.joined(separator: ", "))")
+
+            try parsed.settingRunner(stack: stack, service: service, to: now).write(to: manifestPath)
             print("  manifest updated")
             if let line = await StateMaintenance.seal(after: manifestPath) { print("  \(line)") }
         }

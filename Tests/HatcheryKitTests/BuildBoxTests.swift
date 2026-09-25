@@ -133,6 +133,51 @@ struct BuildBoxTests {
         let plain = try JSONEncoder().encode(self.opiRunner())
         #expect(String(decoding: plain, as: UTF8.self).contains("\"runner\"") == false)
     }
+
+    @Test("a bare name takes the target the labels share, a removal goes by name, and nothing else moves")
+    func relabels() throws {
+        let host = ["self-hosted:host", "macos:host", "rosetta:host"]
+        #expect(try BuildBox.relabel(host, adding: ["big"], removing: ["rosetta"]) == ["self-hosted:host", "macos:host", "big:host"])
+        #expect(try BuildBox.relabel(host, adding: ["macos"], removing: []) == host)
+        let image = ["linux:docker://roost-ci:arm64", "arm64:docker://roost-ci:arm64"]
+        #expect(try BuildBox.relabel(image, adding: ["swift"], removing: []).last == "swift:docker://roost-ci:arm64")
+    }
+
+    @Test("a label that could break the config, a mixed runner's bare name, and an empty runner are refused")
+    func refusesBadLabels() {
+        #expect(throws: BuildBox.Trouble.self) { try BuildBox.relabel(["a:host"], adding: ["b'; echo"], removing: []) }
+        #expect(throws: BuildBox.Trouble.self) {
+            try BuildBox.relabel(["a:host", "b:docker://img"], adding: ["c"], removing: [])
+        }
+        #expect(throws: BuildBox.Trouble.self) { try BuildBox.relabel(["a:host"], adding: [], removing: ["a"]) }
+    }
+
+    @Test("a container runner restarts through docker, and a Mac job through launchd under its own label")
+    func restarts() {
+        #expect(BuildBox.restartCommand(for: self.opiRunner(), platform: .linux) == "docker restart 'act_runner'")
+        #expect(BuildBox.restartCommand(for: self.miniRunner(), platform: .darwin)
+            == "launchctl kickstart -k gui/$(id -u)/net.jimmyhoughjr.forgejo-runner")
+    }
+
+    @Test("the rewrite carries its program and its labels as base64, so no label is read by the shell")
+    func rewriteIsEncoded() throws {
+        let command = try BuildBox.rewriteCommand(for: self.opiRunner(), config: "/data/config.yaml", labels: ["x:host"])
+        #expect(command.hasPrefix("echo "))
+        #expect(command.contains("python3 /tmp/hatchery-relabel.py docker 'act_runner' '/data/config.yaml' "))
+        #expect(command.contains("x:host") == false)
+    }
+
+    @Test("the forge's runner list reads as a list, and a live registration wins over its offline twin")
+    func forgeRunners() {
+        let data = Data("""
+            [{"id":1,"name":"opi-forge","status":"offline","labels":["linux"]},
+             {"id":2,"name":"opi-forge","status":"idle","labels":["linux","big"]}]
+            """.utf8)
+        let runners = ForgeRunners.parse(data)
+        #expect(runners.count == 2)
+        #expect(ForgeRunners.current("opi-forge", in: runners)?.id == 2)
+        #expect(ForgeRunners.current("mini-forge", in: runners) == nil)
+    }
 }
 
 /// The commands a fake box was asked to run, in order.
