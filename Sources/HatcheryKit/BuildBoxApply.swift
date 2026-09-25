@@ -89,12 +89,16 @@ extension BuildBox {
     """#
 
     /// The command that rewrites a runner's labels on its box, with the program and the labels carried as base64.
+    ///
+    /// The exit code is kept in `rc` and not `status`, because `status` is read only in zsh, which is a Mac's login shell.
+    /// On 2026-09-25 that name failed the command after the rewrite and before the restart, and the mini's config
+    /// named a label its runner had not declared.
     static func rewriteCommand(for service: ServiceSpec, config: String, labels: [String]) throws -> String {
         let program = Data(self.rewriteProgram.utf8).base64EncodedString()
         let wanted = try JSONEncoder().encode(labels).base64EncodedString()
         let where_ = service.container != nil ? "docker" : "file"
         return "echo \(program) | base64 -d > /tmp/hatchery-relabel.py && python3 /tmp/hatchery-relabel.py "
-            + "\(where_) '\(service.name)' '\(config)' \(wanted); status=$?; rm -f /tmp/hatchery-relabel.py; exit $status"
+            + "\(where_) '\(service.name)' '\(config)' \(wanted); rc=$?; rm -f /tmp/hatchery-relabel.py; exit $rc"
     }
 
     /// The command that restarts a runner so it declares its labels to the forge again.

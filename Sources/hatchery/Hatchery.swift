@@ -152,8 +152,17 @@ struct Box: AsyncParsableCommand {
             print("  labels        \(read.names.joined(separator: ", "))")
             print("  config        \(read.config)")
 
+            // What the runner declared when it last started, which the config only becomes after a restart.
+            let forge = ForgeRunners.current(read.registration, in: (try? await ForgeRunners.live()) ?? [])
+            let started = forge.map { Set($0.labels) == Set(read.names) } ?? true
+            if let forge, !started {
+                print("  forge         \(forge.name) \(forge.status), \(forge.labels.joined(separator: ", "))")
+                print("  the runner has not started with this config, so the forge still sends it jobs by the labels above")
+            }
+
             if !add.isEmpty || !remove.isEmpty {
-                try await self.relabel(read, declared: declared, in: spec, manifest: parsed, at: manifestPath)
+                try await self.relabel(
+                    read, declared: declared, in: spec, manifest: parsed, at: manifestPath, forge: forge, started: started)
                 return
             }
 
@@ -163,6 +172,10 @@ struct Box: AsyncParsableCommand {
             if let drift {
                 if !drift.gone.isEmpty { print("  no longer     \(drift.gone.joined(separator: ", "))") }
                 if !drift.new.isEmpty { print("  new           \(drift.new.joined(separator: ", "))") }
+            }
+            if check, !started {
+                print("  drift: restart the runner, or pass the labels again with --add or --remove and --yes")
+                throw ExitCode(1)
             }
             if declared.runner == read {
                 print("  the declaration already says this; nothing to write")
@@ -183,7 +196,8 @@ struct Box: AsyncParsableCommand {
 
         /// The label change: plan, the forge's word that the runner is free, the write and restart, and the forge's word after.
         private func relabel(
-            _ read: RunnerSpec, declared: ServiceSpec, in spec: StackSpec, manifest parsed: StackManifest, at manifestPath: String
+            _ read: RunnerSpec, declared: ServiceSpec, in spec: StackSpec, manifest parsed: StackManifest, at manifestPath: String,
+            forge before: ForgeRunners.Runner?, started: Bool
         ) async throws {
             let wanted: [String]
             do {
@@ -191,7 +205,8 @@ struct Box: AsyncParsableCommand {
             } catch let error as BuildBox.Trouble {
                 throw ValidationError(error.description)
             }
-            guard wanted != read.labels else {
+            // A config that already names these labels still needs the restart when the runner has not started with it.
+            guard wanted != read.labels || !started else {
                 print("  the runner already has these labels; nothing to change")
                 return
             }
@@ -203,7 +218,6 @@ struct Box: AsyncParsableCommand {
             }
 
             // The runner must be free, because a restart ends the job it is running.
-            let before = ForgeRunners.current(read.registration, in: try await ForgeRunners.live())
             if before?.status == "active", !force {
                 throw ValidationError("\(read.registration) is running a job now; wait for it, or pass --force to end the job")
             }

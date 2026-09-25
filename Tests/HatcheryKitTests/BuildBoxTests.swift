@@ -165,6 +165,9 @@ struct BuildBoxTests {
         #expect(command.hasPrefix("echo "))
         #expect(command.contains("python3 /tmp/hatchery-relabel.py docker 'act_runner' '/data/config.yaml' "))
         #expect(command.contains("x:host") == false)
+        // `status` is read only in zsh, a Mac's login shell, and assigning it failed the command after the rewrite.
+        #expect(command.contains("status=") == false)
+        #expect(command.hasSuffix("rc=$?; rm -f /tmp/hatchery-relabel.py; exit $rc"))
     }
 
     @Test("the forge's runner list reads as a list, and a live registration wins over its offline twin")
