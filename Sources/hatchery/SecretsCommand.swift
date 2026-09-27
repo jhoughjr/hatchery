@@ -299,7 +299,6 @@ struct Secrets: AsyncParsableCommand {
             }
 
             // Lines print as they happen, so a run that is killed leaves every finished step on the screen.
-            setvbuf(stdout, nil, _IOLBF, 0)
             let run = await RotationRun.all(
                 targets: targets, apps: apps, hosts: hosts, dryRun: self.dryRun, yes: self.yes,
                 makeExecutor: { target in
@@ -312,7 +311,8 @@ struct Secrets: AsyncParsableCommand {
                 probe: ShellRunner.live,
                 say: { line in
                     print(line)
-                    fflush(stdout)
+                    // Every open stream, so no global stream is named, which Linux's Swift counts as shared state.
+                    fflush(nil)
                 })
 
             guard run.silent.isEmpty || self.dryRun else { throw ExitCode.failure }
