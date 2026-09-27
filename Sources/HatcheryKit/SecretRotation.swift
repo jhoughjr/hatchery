@@ -412,10 +412,42 @@ public enum RotationRun {
         hosts: Set<String>,
         dryRun: Bool,
         yes: Bool,
-        makeExecutor: @Sendable (RotationTarget) -> RotationExecutor
-    ) async -> (lines: [String], outcomes: [RotationOutcome]) {
+        makeExecutor: @Sendable (RotationTarget) -> RotationExecutor,
+        probe: CommandRunner? = nil,
+        say: @Sendable (String) -> Void = { _ in }
+    ) async -> RotationRunResult {
         var lines: [String] = []
         var outcomes: [RotationOutcome] = []
+        // Every line is said the moment it is made, and kept for the caller. A run that is killed then leaves
+        // every finished step on the screen, which the run of 2026-09-27 did not.
+        func tell(_ line: String) {
+            lines.append(line)
+            say(line)
+        }
+
+        // The plans a run would execute, so the preflight probes every host they reach before the first issuer runs.
+        var planned: [(RotationTarget, RotationPlan)] = []
+        for target in targets {
+            for group in target.kind.rotationGroups() {
+                if let carried = target.carried, !group.keys.contains(where: { carried.contains($0) }) { continue }
+                guard case .declared(let rotation) = group.rotation else { continue }
+                let plan = RotationPlan(service: target.service, keys: group.keys, rotation: rotation)
+                guard (try? RotationPlanner.check(plan, apps: apps, hosts: hosts)) != nil else { continue }
+                planned.append((target, plan))
+            }
+        }
+        var silent: [String] = []
+        if let probe {
+            let probes = RotationPreflight.probes(of: planned.map { ($0.1, $0.0.dokkuTargets, $0.0.adminTargets) })
+            silent = await RotationPreflight.silent(probes, run: probe)
+            for host in silent {
+                tell("  \(host) did not answer, so nothing is minted for a holder on it")
+            }
+            if !silent.isEmpty, yes, !dryRun {
+                tell("  refused: a rotation mints nothing while a holder cannot be reached")
+                return RotationRunResult(lines: lines, outcomes: [], silent: silent)
+            }
+        }
 
         for target in targets {
             for group in target.kind.rotationGroups() {
@@ -426,8 +458,8 @@ public enum RotationRun {
 
                 switch group.rotation {
                 case .owned(let owner):
-                    lines.append(heading)
-                    lines.append("    held from \(owner)")
+                    tell(heading)
+                    tell("    held from \(owner)")
                     outcomes.append(
                         RotationOutcome(
                             stack: target.stack, service: target.service, keys: group.keys, state: .skipped))
@@ -437,8 +469,8 @@ public enum RotationRun {
                     do {
                         try RotationPlanner.check(plan, apps: apps, hosts: hosts)
                     } catch {
-                        lines.append(heading)
-                        lines.append("    refused  \(error)")
+                        tell(heading)
+                        tell("    refused  \(error)")
                         outcomes.append(
                             RotationOutcome(
                                 stack: target.stack, service: target.service, keys: group.keys, state: .refused))
@@ -446,7 +478,7 @@ public enum RotationRun {
                     }
 
                     guard yes, !dryRun else {
-                        lines.append(contentsOf: plan.lines())
+                        plan.lines().forEach(tell)
                         outcomes.append(
                             RotationOutcome(
                                 stack: target.stack, service: target.service, keys: group.keys, state: .dry))
@@ -454,7 +486,7 @@ public enum RotationRun {
                     }
 
                     let report = await makeExecutor(target).execute(plan)
-                    lines.append(contentsOf: report.lines())
+                    report.lines().forEach(tell)
                     outcomes.append(
                         RotationOutcome(
                             stack: target.stack, service: target.service, keys: group.keys,
@@ -463,8 +495,87 @@ public enum RotationRun {
             }
         }
 
-        lines.append(contentsOf: outcomes.map(\.line))
-        return (lines, outcomes)
+        outcomes.map(\.line).forEach(tell)
+        return RotationRunResult(lines: lines, outcomes: outcomes, silent: silent)
+    }
+}
+
+/// What `rotate --all` did: every line it said, one outcome per key, and the hosts the preflight found silent.
+public struct RotationRunResult: Sendable {
+    public var lines: [String]
+    public var outcomes: [RotationOutcome]
+    public var silent: [String]
+
+    public init(lines: [String], outcomes: [RotationOutcome], silent: [String]) {
+        self.lines = lines
+        self.outcomes = outcomes
+        self.silent = silent
+    }
+}
+
+// MARK: - The preflight
+
+/// The hosts a set of plans reaches, probed before any issuer runs.
+///
+/// A rotation that mints and then cannot deliver leaves a value in vault that no holder has. On 2026-09-27 a run
+/// from a Mac off the home network did exactly that for two keys, because the planner checks the manifest and not
+/// the network. So every distinct host a plan's holders, restarts and postgres issuers reach is asked once, before
+/// the first mint, and one silent host refuses the whole run.
+public enum RotationPreflight {
+    /// One probe per host: what to run, and the host it names.
+    public struct Probe: Sendable, Equatable {
+        public var host: String
+        public var command: [String]
+    }
+
+    /// The distinct probes for these plans. `local` and its spellings are this machine and are never probed.
+    /// A dokku target runs only dokku commands, so it is asked its `version`; a shell host is asked for `true`.
+    public static func probes(of plans: [(RotationPlan, [String: String], [String: String])]) -> [Probe] {
+        var seen: Set<String> = []
+        var out: [Probe] = []
+        func add(_ host: String, _ command: [String]) {
+            guard !AdminChannel.isLocal(host), !seen.contains(host) else { return }
+            seen.insert(host)
+            out.append(Probe(host: host, command: command))
+        }
+        for (plan, dokkuTargets, adminTargets) in plans {
+            if case .postgresRole(let server, _) = plan.rotation.issuer, let admin = adminTargets[server] {
+                add(admin, Self.shellProbe(admin))
+            }
+            for holder in plan.rotation.holders {
+                switch holder {
+                case .dokkuConfig(let app, _, _):
+                    if let target = dokkuTargets[app] { add(target, Self.dokkuProbe(target)) }
+                case .roostrc(let host, _), .launchdEnvironment(let host, _, _), .systemdEnvironment(let host, _, _),
+                    .file(let host, _):
+                    add(host, Self.shellProbe(host))
+                case .vaultSecret:
+                    break
+                }
+            }
+        }
+        return out
+    }
+
+    /// Runs every probe through `run`, and answers the hosts that failed, in probe order.
+    public static func silent(_ probes: [Probe], run: CommandRunner) async -> [String] {
+        var silent: [String] = []
+        for probe in probes {
+            do {
+                _ = try await run(probe.command)
+            } catch {
+                silent.append(probe.host)
+            }
+        }
+        return silent
+    }
+
+    static func shellProbe(_ host: String) -> [String] {
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", host, "true"]
+    }
+
+    static func dokkuProbe(_ target: String) -> [String] {
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", target, "version"]
     }
 }
 

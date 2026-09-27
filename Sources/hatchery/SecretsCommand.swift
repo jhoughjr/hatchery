@@ -223,11 +223,22 @@ struct Secrets: AsyncParsableCommand {
                 credential = .session("")
             }
 
+            // Every host the plans reach is asked once before the first issuer runs. A silent host is the run refused.
+            let dokkuTargets = Secrets.dokkuTargets(for: resolved)
+            let adminTargets = Secrets.adminTargets(for: resolved)
+            let silent = await RotationPreflight.silent(
+                RotationPreflight.probes(of: plans.map { ($0, dokkuTargets, adminTargets) }), run: ShellRunner.live)
+            if !silent.isEmpty {
+                silent.forEach { print("  \($0) did not answer, so nothing is minted for a holder on it") }
+                print("  refused: a rotation mints nothing while a holder cannot be reached")
+                throw ExitCode.failure
+            }
+
             let executor = RotationExecutor(
                 vault: VaultAdmin(credential: credential),
                 secrets: .onDisk(at: Secrets.secretsURL(for: resolved)),
-                dokkuTargets: Secrets.dokkuTargets(for: resolved),
-                adminTargets: Secrets.adminTargets(for: resolved))
+                dokkuTargets: dokkuTargets,
+                adminTargets: adminTargets)
 
             // One plan at a time, and the first failure ends the run. A later plan would issue a value while
             // an earlier one had already turned a value over that nothing took.
@@ -287,7 +298,9 @@ struct Secrets: AsyncParsableCommand {
                 vault = VaultAdmin(credential: .session(""))
             }
 
-            let (lines, outcomes) = await RotationRun.all(
+            // Lines print as they happen, so a run that is killed leaves every finished step on the screen.
+            setvbuf(stdout, nil, _IOLBF, 0)
+            let run = await RotationRun.all(
                 targets: targets, apps: apps, hosts: hosts, dryRun: self.dryRun, yes: self.yes,
                 makeExecutor: { target in
                     RotationExecutor(
@@ -295,10 +308,15 @@ struct Secrets: AsyncParsableCommand {
                         secrets: .onDisk(at: target.secretsURL),
                         dokkuTargets: target.dokkuTargets,
                         adminTargets: target.adminTargets)
+                },
+                probe: ShellRunner.live,
+                say: { line in
+                    print(line)
+                    fflush(stdout)
                 })
 
-            lines.forEach { print($0) }
-            guard !outcomes.contains(where: { $0.state == .failed }) else { throw ExitCode.failure }
+            guard run.silent.isEmpty || self.dryRun else { throw ExitCode.failure }
+            guard !run.outcomes.contains(where: { $0.state == .failed }) else { throw ExitCode.failure }
         }
 
         /// Whether any of a kind file's declared, unowned rotations reaches vault, so `--all` knows to resolve

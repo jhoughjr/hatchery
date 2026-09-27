@@ -165,7 +165,7 @@ public struct RotationExecutor: Sendable {
                 report.done.append(step)
             } catch {
                 report.stopped = step
-                report.reason = "\(error)"
+                report.reason = Self.explain(error)
                 return report
             }
         }
@@ -179,11 +179,24 @@ public struct RotationExecutor: Sendable {
                 report.done.append(step)
             } catch {
                 report.stopped = step
-                report.reason = "\(error)"
+                report.reason = Self.explain(error)
                 return report
             }
         }
         return report
+    }
+
+    /// The reason a step stopped, in words a person acts on.
+    ///
+    /// A dokku command that answers `command not found` reached a shell and not dokku, which is what a box running
+    /// Tailscale SSH does for the dokku user over its Tailscale address, seen on 2026-09-27. Everything else is
+    /// the error as it came.
+    static func explain(_ error: Error) -> String {
+        if let failure = error as? CommandFailure, failure.message.contains("command not found") {
+            return "the dokku user answered with a shell and not with dokku; on the box, `sudo tailscale set --ssh=false` "
+                + "puts sshd back on port 22 for its Tailscale address"
+        }
+        return "\(error)"
     }
 
     // MARK: - The issuers

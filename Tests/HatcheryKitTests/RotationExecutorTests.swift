@@ -102,6 +102,15 @@ private func rookeryPlan(_ key: String) throws -> RotationPlan {
 
 @Suite("Running a rotation in the ruled order")
 struct RotationExecutorTests {
+    @Test("a dokku command that reached a shell is explained as one, with the fix on the box named")
+    func shellInPlaceOfDokkuIsExplained() {
+        let reason = RotationExecutor.explain(
+            CommandFailure(command: "ssh", status: 127, message: "bash: line 1: config:set: command not found"))
+        #expect(reason.contains("answered with a shell"))
+        #expect(reason.contains("tailscale set --ssh=false"))
+        #expect(RotationExecutor.explain(CommandFailure(command: "ssh", status: 1, message: "the box refused it")).contains("refused"))
+    }
+
     @Test("vault mints the app key once, it reaches the secrets file, then the config, then the restart")
     func vaultAppKeyRunsInOrder() async throws {
         let estate = Estate()
