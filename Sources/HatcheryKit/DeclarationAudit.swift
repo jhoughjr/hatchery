@@ -18,6 +18,8 @@ public enum FindingCode {
     public static let secretNoRotation = "secret-no-rotation"
     /// How many of a service's secrets declare a rotation, and how many do not.
     public static let rotationCoverage = "rotation-coverage"
+    /// A secret's typed expiry is near or past, or a key no API can check has no expiry typed.
+    public static let secretExpiry = "secret-expiry"
     /// The box holds a different proxy map than the kind file declares, so the app answers somewhere else.
     public static let portMapDrift = "port-map-drift"
     /// A resolver answers nothing at the box's LAN address, so every host that points at it is blind.
@@ -229,7 +231,10 @@ public struct DeclarationAudit: Sendable {
     ///
     /// Only key names appear in the text, the same rule the other findings keep. The coverage line is a
     /// finding rather than a new field, because the document already has one shape for a fact about a service.
-    static func rotationFindings(in kind: KindFile) -> [Declaration.Finding] {
+    ///
+    /// The expiry reminders come last. The daily `hatchery declared --publish` job is the scheduled route that reaches the
+    /// board, and a key no API can check has no other warning before it stops working.
+    static func rotationFindings(in kind: KindFile, today: Date = Date()) -> [Declaration.Finding] {
         let rotations = kind.secretRotations()
         guard !rotations.isEmpty else { return [] }
 
@@ -245,6 +250,18 @@ public struct DeclarationAudit: Sendable {
                 code: FindingCode.rotationCoverage,
                 text: "\(rotations.count - missing.count) of \(rotations.count) secret(s) declare a rotation, "
                     + "and \(missing.count) do not"))
+
+        for entry in rotations {
+            guard let declared = kind.environment[entry.key] else { continue }
+            guard
+                let text = SecretLedger.reminder(
+                    key: entry.key,
+                    entry: declared,
+                    within: SecretLedger.reminderDays,
+                    today: today)
+            else { continue }
+            findings.append(Declaration.Finding(code: FindingCode.secretExpiry, text: text))
+        }
         return findings
     }
 

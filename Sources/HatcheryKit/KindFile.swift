@@ -72,11 +72,16 @@ public struct KindFile: Codable, Sendable, Equatable {
         /// declared, which is the `secret-no-rotation` finding. Optional, so every kind file written before it
         /// still reads.
         public var rotation: RotationDeclaration?
+        /// The day the issuer says this value stops working, as `yyyy-MM-dd`, typed by a person from the issuer's console.
+        /// The ledger reminds before this day, which is the only warning a key with no API to check it gets.
+        public var expires: String?
+        /// Whether an API can say this value is live. Absent means the issuer has one, unless the ledger knows otherwise.
+        public var probe: Probe?
 
         public init(
             default: String? = nil, deployed: String? = nil, example: String? = nil,
             required: Bool? = nil, secret: Bool? = nil, why: String? = nil,
-            rotation: RotationDeclaration? = nil
+            rotation: RotationDeclaration? = nil, expires: String? = nil, probe: Probe? = nil
         ) {
             self.default = `default`
             self.deployed = deployed
@@ -85,7 +90,17 @@ public struct KindFile: Codable, Sendable, Equatable {
             self.secret = secret
             self.why = why
             self.rotation = rotation
+            self.expires = expires
+            self.probe = probe
         }
+    }
+
+    /// How the ledger can learn whether a secret still works.
+    ///
+    /// - `unavailable`: written `"none"`. No issuer API checks the value, so it is checked only by use.
+    ///   The ledger shows it as cannot probe, and never as live.
+    public enum Probe: String, Codable, Sendable, Equatable {
+        case unavailable = "none"
     }
 
     public init(

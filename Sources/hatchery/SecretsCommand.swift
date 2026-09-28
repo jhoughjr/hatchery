@@ -19,7 +19,7 @@ struct Secrets: AsyncParsableCommand {
             The vault credential is the operator token this machine signed in with, and never an argument, \
             because an argument lands in the shell history and in ps. Run hatchery vault login to get one.
             """,
-        subcommands: [Holders.self, Rotate.self, Sync.self]
+        subcommands: [Holders.self, Rotate.self, Sync.self, Ledger.self, Issued.self]
     )
 
     /// What a `<stack>/<service>` target resolves to: the service, and the kind file that declares its rotations.
@@ -165,6 +165,9 @@ struct Secrets: AsyncParsableCommand {
         @Flag(name: .long, help: "Execute the plan. Without it the plan prints and nothing changes.")
         var yes = false
 
+        @Option(name: .long, help: "The ledger file each finished rotation stamps with its issue date.")
+        var ledger: String?
+
         func validate() throws {
             if self.all {
                 guard self.target == nil else {
@@ -246,6 +249,13 @@ struct Secrets: AsyncParsableCommand {
                 let report = await executor.execute(plan)
                 report.lines().forEach { print($0) }
                 guard report.succeeded else { throw ExitCode.failure }
+                Secrets.stampLedger(at: Secrets.ledgerURL(self.ledger)) { state, day in
+                    state.stampIssued(
+                        stack: resolved.stack.name,
+                        service: resolved.service.name,
+                        keys: plan.keys,
+                        on: day)
+                }
             }
             print("  run hatchery state seal so the new values reach the encrypted backup.")
         }
@@ -315,6 +325,11 @@ struct Secrets: AsyncParsableCommand {
                     fflush(nil)
                 })
 
+            if run.outcomes.contains(where: { $0.state == .run }) {
+                Secrets.stampLedger(at: Secrets.ledgerURL(self.ledger)) { state, day in
+                    state.stampIssued(from: run.outcomes, on: day)
+                }
+            }
             guard run.silent.isEmpty || self.dryRun else { throw ExitCode.failure }
             guard !run.outcomes.contains(where: { $0.state == .failed }) else { throw ExitCode.failure }
         }
@@ -382,6 +397,123 @@ struct Secrets: AsyncParsableCommand {
             let vault = VaultAdmin(baseURL: baseURL, credential: credential)
             let held = try await vault.setSecrets(app: app, values: values)
             print("  \(app) now holds \(held.joined(separator: " + "))")
+        }
+    }
+
+    /// Every secret the manifests declare, with who issues it, whether it is known to work, when it was issued, and when it
+    /// expires.
+    ///
+    /// A run records the day it first sees each key, so a token older than the ledger shows that day and is put up for
+    /// rotation. With `--due` it prints only the reminders and exits 1 when any is owed, for a check that runs on a schedule.
+    struct Ledger: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "ledger",
+            abstract: "List every declared secret: issuer, liveness, issue date, expiry, and what is owed next.",
+            discussion: """
+                LIVE reads cannot probe for a key no issuer API can check, such as an Apple private key or a Google \
+                client secret. Such a key is checked by use, and it never reads live. A key whose issue date is \
+                unknown shows the day the ledger first saw it and is put up for rotation; a finished rotation, or \
+                hatchery secrets issued, stamps the date.
+
+                The ledger file holds names and dates, never a value.
+                """
+        )
+
+        @Option(name: .shortAndLong, help: "Path to a stack manifest. Repeat it to read several.")
+        var manifest: [String] = []
+
+        @Option(name: .long, help: "The ledger file. Defaults to ~/.config/hatchery/ledger.json.")
+        var ledger: String?
+
+        @Option(name: .long, help: "Print only the reminders owed within this many days, and exit 1 when any is owed.")
+        var due: Int?
+
+        func run() async throws {
+            let requested = self.manifest.isEmpty ? [ManifestLocator.defaultName] : self.manifest
+            let loaded = try requested.map { try ManifestLocator.load($0) }
+            let targets = try SecretLedger.targets(in: loaded)
+            let url = Secrets.ledgerURL(self.ledger)
+            let today = Date()
+
+            var state = try LedgerState.load(from: url)
+            let rows = SecretLedger.rows(for: targets, state: &state, today: today)
+            try state.save(to: url)
+
+            let window = self.due ?? SecretLedger.reminderDays
+            let reminders = SecretLedger.reminders(for: targets, within: window, today: today)
+            if let due = self.due {
+                guard !reminders.isEmpty else {
+                    print("  no expiry falls within \(due) day(s), and every key no API can check has one typed")
+                    return
+                }
+                reminders.forEach { print("  \($0)") }
+                throw ExitCode.failure
+            }
+
+            SecretLedger.lines(for: rows).forEach { print($0) }
+            print("")
+            print("  \(rows.count) token(s), \(rows.filter(\.listedForRotation).count) put up for rotation")
+            reminders.forEach { print("  reminder: \($0)") }
+        }
+    }
+
+    /// Stamps the issue date of a key a person turned over by hand, which no rotation run records.
+    struct Issued: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "issued",
+            abstract: "Record the day a person issued a new value for these keys."
+        )
+
+        @Argument(help: "The service, as <stack>/<service>.")
+        var target: String
+
+        @Argument(help: "The keys a person issued.")
+        var keys: [String]
+
+        @Option(name: .long, help: "The day, as yyyy-MM-dd. Today when omitted.")
+        var on: String?
+
+        @Option(name: .long, help: "The ledger file. Defaults to ~/.config/hatchery/ledger.json.")
+        var ledger: String?
+
+        func validate() throws {
+            guard DeclaredProvision.target(self.target) != nil else {
+                throw ValidationError("name the service as <stack>/<service>, for example estate/vault")
+            }
+            guard !self.keys.isEmpty else { throw ValidationError("name at least one key") }
+            if let on = self.on, LedgerDay.date(on) == nil {
+                throw ValidationError("--on takes a day as yyyy-MM-dd")
+            }
+        }
+
+        func run() async throws {
+            guard let target = DeclaredProvision.target(self.target) else {
+                throw ValidationError("name the service as <stack>/<service>, for example estate/vault")
+            }
+            let url = Secrets.ledgerURL(self.ledger)
+            var state = try LedgerState.load(from: url)
+            let day = self.on ?? LedgerDay.string(Date())
+            state.stampIssued(stack: target.stack, service: target.service, keys: self.keys, on: day)
+            try state.save(to: url)
+            print("  \(target.stack)/\(target.service) \(self.keys.joined(separator: " + ")) issued \(day)")
+        }
+    }
+
+    /// The ledger file a command reads and stamps.
+    static func ledgerURL(_ path: String?) -> URL {
+        path.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) } ?? LedgerState.defaultURL
+    }
+
+    /// Stamps the ledger after a rotation finished.
+    /// A ledger that cannot be written warns and never fails the run, because the new value is already out on every holder.
+    static func stampLedger(at url: URL, _ change: (inout LedgerState, String) -> Void) {
+        do {
+            var state = try LedgerState.load(from: url)
+            change(&state, LedgerDay.string(Date()))
+            try state.save(to: url)
+        } catch {
+            print("  the ledger at \(url.path) was not stamped: \(error)")
+            print("  run hatchery secrets issued with the keys above to record today's date")
         }
     }
 
