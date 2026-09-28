@@ -195,8 +195,9 @@ extension Declaration {
     }
 
     /// POST the document to pulse. The answer is nil on success and a short reason otherwise.
-    public static func publish(_ document: Data, to pulse: String, key: String) async -> String? {
-        guard let url = URL(string: pulse + "/api/declared") else { return "bad pulse url" }
+    /// The route is the declaration's unless a caller names another, and the ledger names `/api/ledger`.
+    public static func publish(_ document: Data, to pulse: String, key: String, path: String = "/api/declared") async -> String? {
+        guard let url = URL(string: pulse + path) else { return "bad pulse url" }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 20

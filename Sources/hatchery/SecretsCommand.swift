@@ -416,6 +416,11 @@ struct Secrets: AsyncParsableCommand {
                 hatchery secrets issued, stamps the date.
 
                 The ledger file holds names and dates, never a value.
+
+                --json prints the same rows as one document, and --publish sends that document to pulse with the \
+                roost node key, where the coop's Tokens page reads it beside the declaration. Pulse is the ruled \
+                read route, house ticket 2, and the dates live in the ledger file on the Mac that runs house-rotate, \
+                so that Mac is the one that publishes.
                 """
         )
 
@@ -427,6 +432,18 @@ struct Secrets: AsyncParsableCommand {
 
         @Option(name: .long, help: "Print only the reminders owed within this many days, and exit 1 when any is owed.")
         var due: Int?
+
+        @Flag(name: .long, help: "Print the ledger as one JSON document instead of the table.")
+        var json = false
+
+        @Flag(name: .long, help: "POST the document to pulse, with the roost node key.")
+        var publish = false
+
+        @Option(name: .long, help: "The pulse instance to publish to.")
+        var pulse: String = "https://pulse.jimmyhoughjr.net"
+
+        @Option(name: .long, help: "The file holding the pulse node key.")
+        var keyFile: String = "~/.roost_node_key"
 
         func run() async throws {
             let requested = self.manifest.isEmpty ? [ManifestLocator.defaultName] : self.manifest
@@ -448,6 +465,20 @@ struct Secrets: AsyncParsableCommand {
                 }
                 reminders.forEach { print("  \($0)") }
                 throw ExitCode.failure
+            }
+
+            if self.json || self.publish {
+                let document = LedgerDocument(manifests: loaded.map(\.path), rows: rows, reminders: reminders)
+                let data = try document.encoded()
+                if self.json { print(String(decoding: data, as: UTF8.self)) }
+                guard self.publish else { return }
+                let key = try Declaration.nodeKey(at: self.keyFile)
+                if let reason = await Declaration.publish(data, to: self.pulse, key: key, path: LedgerDocument.pulsePath) {
+                    FileHandle.standardError.write(Data("  publish: pulse did not take the ledger (\(reason))\n".utf8))
+                    throw ExitCode.failure
+                }
+                print("  published \(rows.count) token(s) to \(self.pulse)\(LedgerDocument.pulsePath)")
+                return
             }
 
             SecretLedger.lines(for: rows).forEach { print($0) }

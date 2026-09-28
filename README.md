@@ -80,6 +80,7 @@ Every command that reads a manifest takes `-m, --manifest <path>`. See [Finding 
 | `secrets holders <stack>/<service>` | Print who holds each of a service's rotatable secrets. |
 | `secrets rotate <stack>/<service> [<key>...] [--dry-run] [--yes]` | Replace declared secrets in order: the issuer, then each holder, then each restart. |
 | `secrets sync <stack>/<service> [--dry-run]` | Set a service's secret keys into its vault document. |
+| `secrets ledger [-m <manifest>]... [--due <days>] [--json] [--publish]` | List every declared secret with its issuer, liveness, dates and what is owed next. `--json` prints one document, and `--publish` sends it to pulse's `/api/ledger` with the node key, where the coop's Tokens page reads it. |
 | `vault login [--name <label>]` | Sign this machine in to vault through the browser, and store the operator token. |
 | `vault status` | Show who this machine is signed in to vault as. |
 | `vault logout` | Remove this machine's vault token file. |

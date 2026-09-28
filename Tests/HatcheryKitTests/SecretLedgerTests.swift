@@ -219,6 +219,63 @@ struct UnknownIssueDateTests {
         #expect(listed["BASE_URL"] == nil)
     }
 
+    @Test("a held key shows the day its owner's rotation stamped, and stays unknown when the owner has no stamp")
+    func heldKeyTakesOwnersDate() throws {
+        var state = LedgerState()
+        #expect(rows(try vaultKind(), state: &state)["HATCHERY_TOKEN"]?.issued == nil)
+
+        state.stampIssued(stack: "air", service: "hatchery-serve", keys: ["HATCHERY_TOKEN"], on: "2026-09-27")
+        let listed = rows(try vaultKind(), state: &state)
+
+        #expect(listed["HATCHERY_TOKEN"]?.issued == "2026-09-27")
+        #expect(listed["HATCHERY_TOKEN"]?.next == .heldFrom("air/hatchery-serve"))
+    }
+
+    @Test("a typed expiry on a key no API can check is a review date, and on a key a probe checks it is the issuer's")
+    func cannotProbeExpiryIsReview() throws {
+        var state = LedgerState()
+        var kind = try vaultKind(appleExpires: "2027-09-28")
+        kind.environment["NODE_KEY"]?.expires = "2026-12-01"
+
+        let listed = rows(kind, state: &state)
+
+        #expect(listed["APPLE_PRIVATE_KEY"]?.review == true)
+        #expect(listed["NODE_KEY"]?.review == false)
+        let lines = SecretLedger.lines(for: [listed["APPLE_PRIVATE_KEY"]!, listed["NODE_KEY"]!])
+        #expect(lines.contains { $0.contains("review by 2027-09-28") })
+        #expect(lines.contains { $0.contains("2026-12-01") && !$0.contains("review by 2026-12-01") })
+    }
+
+    @Test("the published document carries every row as words and days, never a value, and reads back whole")
+    func documentRoundTrips() throws {
+        var state = LedgerState()
+        state.stampIssued(stack: "estate", service: "vault", keys: ["NODE_KEY"], on: "2026-09-28")
+        let kind = try vaultKind(appleExpires: "2027-09-28", googleExpires: "soon")
+        let target = LedgerTarget(stack: "estate", service: "vault", kind: kind)
+        let listed = SecretLedger.rows(for: [target], state: &state, today: day("2026-09-28"))
+        let reminders = SecretLedger.reminders(for: [target], within: 30, today: day("2026-09-28"))
+
+        let document = LedgerDocument(manifests: ["/state/estate/hatchery.json"], rows: listed, reminders: reminders)
+        let data = try document.encoded()
+        let back = try JSONDecoder().decode(LedgerDocument.self, from: data)
+
+        #expect(back == document)
+        let byKey = Dictionary(uniqueKeysWithValues: back.rows.map { ($0.key, $0) })
+        #expect(byKey["NODE_KEY"]?.issued == "2026-09-28")
+        #expect(byKey["NODE_KEY"]?.next == "nothing")
+        #expect(byKey["NODE_KEY"]?.listedForRotation == false)
+        #expect(byKey["APPLE_PRIVATE_KEY"]?.expires == "2027-09-28")
+        #expect(byKey["APPLE_PRIVATE_KEY"]?.review == true)
+        #expect(byKey["APPLE_PRIVATE_KEY"]?.liveness == "cannot probe")
+        #expect(byKey["GOOGLE_CLIENT_SECRET"]?.expires == nil)
+        #expect(byKey["GOOGLE_CLIENT_SECRET"]?.expiryNote == "unreadable: soon")
+        #expect(byKey["SESSION_SECRET"]?.next == "reseal")
+        #expect(byKey["HATCHERY_TOKEN"]?.next == "heldFrom")
+        #expect(byKey["HATCHERY_TOKEN"]?.owner == "air/hatchery-serve")
+        #expect(back.reminders.contains { $0.contains("GOOGLE_CLIENT_SECRET") })
+        #expect(!String(decoding: data, as: UTF8.self).contains("deployed"))
+    }
+
     @Test("a service that does not carry a key gets no row for it")
     func carriedFiltersRows() throws {
         var state = LedgerState()

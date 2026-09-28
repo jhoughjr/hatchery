@@ -29,6 +29,9 @@ public struct LedgerRow: Sendable, Equatable {
     public var issued: String?
     public var firstSeen: String
     public var expiry: Expiry
+    /// Whether the typed expiry is a review date and not the issuer's own: no API checks this key, so the day in the
+    /// kind file is when a person looks at the issuer's console, which is what Jimmy typed for Apple and Google on 2026-09-28.
+    public var review: Bool
     public var next: Next
     /// The recipe of a person-issued key, which is the whole of what a person needs to turn it over.
     public var recipe: String?
@@ -122,14 +125,19 @@ public enum SecretLedger {
                 let record = state.see(
                     LedgerState.id(stack: target.stack, service: target.service, key: entry.key),
                     on: day)
-                rows.append(
-                    Self.row(
-                        stack: target.stack,
-                        service: target.service,
-                        kind: target.kind.kind,
-                        key: entry.key,
-                        entry: declared,
-                        record: record))
+                var row = Self.row(
+                    stack: target.stack,
+                    service: target.service,
+                    kind: target.kind.kind,
+                    key: entry.key,
+                    entry: declared,
+                    record: record)
+                // A held key is turned over by its owner's rotation, so the owner's stamp is its issue date.
+                // The owner's record is read and not seen, because the owner may sit on a manifest this run did not load.
+                if case .heldFrom(let owner) = row.next, row.issued == nil {
+                    row.issued = state.records["\(owner) \(entry.key)"]?.issued
+                }
+                rows.append(row)
             }
         }
         return rows
@@ -190,6 +198,7 @@ public enum SecretLedger {
             issued: record.issued,
             firstSeen: record.firstSeen,
             expiry: expiry,
+            review: cannotProbe,
             next: next,
             recipe: recipe)
     }
@@ -291,7 +300,7 @@ extension SecretLedger {
                 row.issuer,
                 row.liveness.rawValue,
                 row.issued ?? "unknown, first seen \(row.firstSeen)",
-                Self.expiryText(row.expiry),
+                Self.expiryText(row.expiry, review: row.review),
                 Self.nextText(row.next),
             ]
         }
@@ -318,12 +327,12 @@ extension SecretLedger {
         return out
     }
 
-    static func expiryText(_ expiry: LedgerRow.Expiry) -> String {
+    static func expiryText(_ expiry: LedgerRow.Expiry, review: Bool) -> String {
         switch expiry {
         case .undeclared: return "-"
         case .notTyped: return "expiry not typed"
         case .unreadable(let text): return "unreadable: \(text)"
-        case .on(let day): return day
+        case .on(let day): return review ? "review by \(day)" : day
         }
     }
 
@@ -337,4 +346,90 @@ extension SecretLedger {
         case .declareRotation: return "rotate; declare a rotation first"
         }
     }
+}
+
+// MARK: - Publishing
+
+/// The ledger as pulse keeps it and the coop draws it: one object per token with the same facts as the table, the
+/// reminders owed inside the window, and the manifests it was read from. Names and dates, never a value.
+public struct LedgerDocument: Codable, Sendable, Equatable {
+    public var manifests: [String]
+    public var rows: [Row]
+    public var reminders: [String]
+
+    /// One token, flattened for a page: the enums of ``LedgerRow`` as words, and the typed day beside its kind.
+    public struct Row: Codable, Sendable, Equatable {
+        public var stack: String
+        public var service: String
+        public var key: String
+        public var issuer: String
+        /// `live`, `dead`, `cannot probe`, or `not checked`.
+        public var liveness: String
+        public var issued: String?
+        public var firstSeen: String
+        /// The typed `yyyy-MM-dd` day, or `nil` when none is typed or the typed text is not a day.
+        public var expires: String?
+        /// `expiry not typed` or `unreadable: <text>` when `expires` is nil for a reason a page should say.
+        public var expiryNote: String?
+        /// Whether `expires` is a review date, so a page says "review by" and not "expires".
+        public var review: Bool
+        /// `nothing`, `rotate`, `rotateByHand`, `reseal`, `heldFrom`, or `declareRotation`.
+        public var next: String
+        /// The owner's `stack/service` when `next` is `heldFrom`.
+        public var owner: String?
+        public var listedForRotation: Bool
+        public var recipe: String?
+
+        public init(_ row: LedgerRow) {
+            self.stack = row.stack
+            self.service = row.service
+            self.key = row.key
+            self.issuer = row.issuer
+            self.liveness = row.liveness.rawValue
+            self.issued = row.issued
+            self.firstSeen = row.firstSeen
+            switch row.expiry {
+            case .undeclared:
+                self.expires = nil
+                self.expiryNote = nil
+            case .notTyped:
+                self.expires = nil
+                self.expiryNote = "expiry not typed"
+            case .unreadable(let text):
+                self.expires = nil
+                self.expiryNote = "unreadable: \(text)"
+            case .on(let day):
+                self.expires = day
+                self.expiryNote = nil
+            }
+            self.review = row.review
+            switch row.next {
+            case .nothing: self.next = "nothing"
+            case .rotate: self.next = "rotate"
+            case .rotateByHand: self.next = "rotateByHand"
+            case .reseal: self.next = "reseal"
+            case .heldFrom: self.next = "heldFrom"
+            case .declareRotation: self.next = "declareRotation"
+            }
+            if case .heldFrom(let owner) = row.next { self.owner = owner } else { self.owner = nil }
+            self.listedForRotation = row.listedForRotation
+            self.recipe = row.recipe
+        }
+    }
+
+    public init(manifests: [String], rows: [LedgerRow], reminders: [String]) {
+        self.manifests = manifests
+        self.rows = rows.map(Row.init)
+        self.reminders = reminders
+    }
+
+    /// The document as JSON, sorted and pretty, so a person can read what pulse holds.
+    public func encoded() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(self)
+    }
+
+    /// Where pulse keeps the ledger. The declaration's route sits beside it and both take the node key.
+    public static let pulsePath = "/api/ledger"
 }
