@@ -90,6 +90,18 @@ struct InstallRowsTests {
         #expect(plan.rows(from: output, forgeMain: [:])[0].state == .level)
     }
 
+    @Test("a checkout that holds the forge's main and more is ahead, and the forge is what wants a push")
+    func ahead() {
+        let output = "checkout\t/home/jimmy/roost\tf065074000000000000000000000000000000000\t0\t\nahead\t/home/jimmy/roost\tyes\n"
+        let forge = ["roost": "ab5fed7000000000000000000000000000000000"] as [String: String?]
+        let rows = plan.rows(from: output, forgeMain: forge)
+
+        #expect(rows[0].state == .ahead)
+        #expect(rows[0].needsInstall == false)
+        #expect(plan.script(forgeMain: forge).contains("merge-base --is-ancestor ab5fed7000000000000000000000000000000000 HEAD"))
+        #expect(!plan.script().contains("merge-base"))
+    }
+
     @Test("a dirty checkout and a missing thing are named, and neither is installed over")
     func dirtyAndMissing() {
         let output = """

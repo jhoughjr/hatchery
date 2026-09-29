@@ -81,7 +81,7 @@ struct Install: AsyncParsableCommand {
         var rows: [InstallRow] = []
         var byHost: [(plan: InstallPlan, rows: [InstallRow])] = []
         for plan in plans {
-            let output = try await execute(plan.command(plan.script()), nil)
+            let output = try await execute(plan.command(plan.script(forgeMain: forgeMain)), nil)
             guard output.status == 0 else {
                 print("  \(plan.host) refused the read: \(output.combined.trimmingCharacters(in: .whitespacesAndNewlines))")
                 throw ExitCode.failure
@@ -98,7 +98,11 @@ struct Install: AsyncParsableCommand {
             print("")
             let owed = rows.filter(\.needsInstall).count
             let dirty = rows.filter { $0.state == .dirty }.count
-            print("  \(rows.count) thing(s) on \(plans.count) host(s), \(owed) to install" + (dirty > 0 ? ", \(dirty) dirty and left alone" : ""))
+            let ahead = rows.filter { $0.state == .ahead }.count
+            print(
+                "  \(rows.count) thing(s) on \(plans.count) host(s), \(owed) to install"
+                    + (dirty > 0 ? ", \(dirty) dirty and left alone" : "")
+                    + (ahead > 0 ? ", \(ahead) ahead of the forge, which wants a push" : ""))
         }
 
         if self.yes {
@@ -126,7 +130,7 @@ struct Install: AsyncParsableCommand {
             // The report after the install is the one worth keeping.
             rows = []
             for (plan, _) in byHost {
-                let output = try await execute(plan.command(plan.script()), nil)
+                let output = try await execute(plan.command(plan.script(forgeMain: forgeMain)), nil)
                 rows += plan.rows(from: output.standardOutput, forgeMain: forgeMain)
             }
             let left = rows.filter(\.needsInstall).count

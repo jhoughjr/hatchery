@@ -32,6 +32,8 @@ public struct InstallRow: Sendable, Equatable {
         case level
         /// The host holds an older commit than the source's main.
         case behind
+        /// The host holds commits the source's main lacks, so the source is what is behind; push it.
+        case ahead
         /// The checkout has local changes, so no install touches it.
         case dirty
         /// The thing is not on the host.
@@ -65,7 +67,7 @@ public struct InstallRow: Sendable, Equatable {
     public var needsInstall: Bool {
         switch self.state {
         case .behind, .missing, .differs: return true
-        case .level, .dirty, .unknown: return false
+        case .level, .ahead, .dirty, .unknown: return false
         }
     }
 }
@@ -269,7 +271,7 @@ extension InstallPlan {
     /// Each line is `kind<TAB>path<TAB>fact...`. A hash is the first twelve characters of a sha256, enough to tell two
     /// files apart and short enough for a column. The rendered job file travels as base64 and is hashed on the host,
     /// so this machine needs no hash of its own and the two hashes come from one tool.
-    public func script() -> String {
+    public func script(forgeMain: [String: String?] = [:]) -> String {
         // A job file is compared in its canonical form, because the executor writes tabs where the renderer writes
         // spaces, and a unit's comments say nothing to systemd. `c` reads a file or, as `-`, standard input.
         let canonical = self.platform == .darwin
@@ -283,13 +285,19 @@ extension InstallPlan {
         ]
         for thing in self.things {
             switch thing {
-            case .checkout(_, let root):
+            case .checkout(let name, let root):
                 lines.append(
                     "if [ -d \"\(root)/.git\" ]; then printf 'checkout\\t%s\\t%s\\t%s\\t%s\\n' '\(root)' "
                         + "\"$(git -C \"\(root)\" rev-parse HEAD 2>/dev/null)\" "
                         + "\"$(git -C \"\(root)\" status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')\" "
                         + "\"$(git -C \"\(root)\" ls-remote --heads origin main 2>/dev/null | cut -c1-40)\"; "
                         + "else printf 'checkout\\t%s\\tmissing\\t0\\t\\n' '\(root)'; fi")
+                // Whether the source's main is already in what the host holds, which tells behind from ahead.
+                if let sha = forgeMain[name].flatMap({ $0 }) {
+                    lines.append(
+                        "printf 'ahead\\t%s\\t%s\\n' '\(root)' "
+                            + "\"$(git -C \"\(root)\" merge-base --is-ancestor \(sha) HEAD 2>/dev/null && echo yes || echo no)\"")
+                }
 
             case .binary(_, let path, _):
                 lines.append(
@@ -339,7 +347,8 @@ extension InstallPlan {
                 } else if dirty > 0 {
                     row.state = .dirty
                 } else if let wanted {
-                    row.state = wanted == head ? .level : .behind
+                    let holdsMain = (facts["ahead " + root] ?? []).first == "yes"
+                    row.state = wanted == head ? .level : (holdsMain ? .ahead : .behind)
                 } else {
                     row.state = .unknown
                 }
