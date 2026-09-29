@@ -408,7 +408,9 @@ public struct RotationExecutor: Sendable {
     /// owner can read it.
     static func fileScript(path: String, value: String) -> String {
         let target = path.hasPrefix("~/") ? "$HOME/" + path.dropFirst(2) : path
-        return "umask 077; printf '%s' '\(value)' > \"\(target)\"; chmod 600 \"\(target)\""
+        // The directory is made first: on 2026-09-29 a holder under ~/.config/gigs failed on a Mac that had no such directory,
+        // after the issuer had minted and the other holders had taken the value.
+        return "umask 077; mkdir -p \"$(dirname \"\(target)\")\"; printf '%s' '\(value)' > \"\(target)\"; chmod 600 \"\(target)\""
     }
 
     /// Sets a key in a launchd plist's `EnvironmentVariables`, adding it when the plist carries none.

@@ -102,6 +102,14 @@ private func rookeryPlan(_ key: String) throws -> RotationPlan {
 
 @Suite("Running a rotation in the ruled order")
 struct RotationExecutorTests {
+    @Test("a file holder makes its directory before it writes, so a first key file on a host does not fail the run")
+    func fileHolderMakesItsDirectory() {
+        let script = RotationExecutor.fileScript(path: "~/.config/gigs/draft.token", value: "v")
+        #expect(script.contains("mkdir -p \"$(dirname "))
+        #expect(script.contains("chmod 600"))
+        #expect(script.hasPrefix("umask 077;"))
+    }
+
     @Test("a dokku command that reached a shell is explained as one, with the fix on the box named")
     func shellInPlaceOfDokkuIsExplained() {
         let reason = RotationExecutor.explain(
