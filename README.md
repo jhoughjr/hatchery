@@ -51,6 +51,7 @@ Every command that reads a manifest takes `-m, --manifest <path>`. See [Finding 
 | `box scan [<target>]` | Read the apps, containers and jobs that run on a box or a platform, and sort each one as declared, hatchery-shaped or foreign. |
 | `box adopt <target> <app> --stack <s> [--kind <k>] [--kind-file <path>] [--dry-run]` | Declare an app or a container that already runs on a box into a stack. Also takes `--replace`, `--refresh-config`, `--name` and `--no-vault`. |
 | `box space <box> [--free]` | Show the free disk on a box, and with `--free` remove the build cache and the images that no container uses. |
+| `install [-m <manifest>]... [--host <target>] [--yes] [--jobs] [--json] [--publish]` | Read what each host holds against its declaration and the forge's main, and with `--yes` install the difference. |
 | `host add <name> <target>` | Save an SSH target under a name. |
 | `host list` | Show the saved targets, the targets stacks use, and the targets `~/.roostrc` names. |
 | `host rm <name>` | Remove a saved target. |
@@ -448,6 +449,23 @@ One key is never rotated: vault seals every app's secrets document and every S3 
 `secrets ledger` lists every declared secret: its issuer, whether it is known to work, the day it was issued, its expiry, and what is owed next. The dates live in `~/.config/hatchery/ledger.json` on the Mac that runs the rotations, names and dates and never a value. A key the ledger has never seen with a date shows the day it first saw it and is put up for rotation; a finished rotation stamps the day, and `secrets issued <stack>/<service> KEY` stamps a key a person turned over by hand. A held key shows its owner's day. A key no API can check, an Apple private key or a Google client secret, never reads live, and a typed `expires` on such a key is a review date, when a person looks at the issuer's console. `--due <days>` prints the reminders owed inside the window and exits 1 when any is, which is how the daily publish carries a reminder to the board.
 
 `secrets ledger --publish` sends the same rows as one document to pulse's `/api/ledger` with the roost node key, beside the declaration, and the coop's Tokens page draws them with the owed tokens first. `house-rotate` publishes after every run, and the air runs it daily.
+
+### Installing what a host declares
+
+A merge to hatchery, roost or the house skill changed nothing on a box until a hand ran an installer there, and five traps in the house skill traced to that gap. `hatchery install` closes it from the declaration: each declared job names the program it runs, and the program lives in a checkout, is a built binary, or is a copy of a file from a checkout. Each of those and the job's own plist or unit is one row per host.
+
+```
+$ hatchery install -m ~/infra-state/air/hatchery.json -m ~/infra-state/box/hatchery.json
+  jimmy@opi.jimmyhoughjr.net
+    THING               KIND      INSTALLED     WANTED        STATE
+    roost               checkout  876998f       ab5fed7       behind
+    dokku-reconcile.sh  copy      676807740da1  5e127985e63a  differs
+    opi-backup          job       3f36742f535e  3f36742f535e  level
+```
+
+One script per host reads every fact in one round trip. A checkout is measured against the forge's main, read from this machine, so a clone whose origin is GitHub still answers for the forge. A copy is measured against the file in its checkout on that host. A job file is measured against the rendering in its canonical form, `plutil` on a Mac and the unit stripped of comments on Linux, so the executor's tabs and a comment say nothing. A binary is measured by the sha `bin/install` writes beside it.
+
+Without `--yes` the table prints and nothing changes. With it every host is probed first and a silent one refuses the run before anything is written; then a checkout fetches the forge's main and fast-forwards, a binary is rebuilt by its checkout's `bin/install`, a copy is placed by its tool's installer, and a missing job file is written and the supervisor reads it again. A dirty checkout is never touched. A job file that differs is rewritten only with `--jobs`, because a hand-written unit may hold what the declaration cannot yet say, such as an `OnFailure` line. `--publish` sends the report to pulse beside the declaration, where the coop's Estate page reads it.
 
 ### Signing in to vault
 
