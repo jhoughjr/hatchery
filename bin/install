@@ -15,6 +15,9 @@ swift build -c release
 mkdir -p "$DEST"
 install -m 0755 .build/release/hatchery "$DEST/hatchery"
 codesign --force --sign - "$DEST/hatchery"
+# The sha the binary was built from, beside it, so `hatchery install` can read what a host holds against the
+# forge's main. A binary is a build of one commit and says nothing about it otherwise.
+git rev-parse HEAD > "$DEST/hatchery.sha" 2>/dev/null || true
 
 # Prove it runs, rather than reporting a copy that succeeded.
 "$DEST/hatchery" --help >/dev/null
