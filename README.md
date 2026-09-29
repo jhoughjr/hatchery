@@ -81,6 +81,7 @@ Every command that reads a manifest takes `-m, --manifest <path>`. See [Finding 
 | `secrets rotate <stack>/<service> [<key>...] [--dry-run] [--yes]` | Replace declared secrets in order: the issuer, then each holder, then each restart. |
 | `secrets sync <stack>/<service> [--dry-run]` | Set a service's secret keys into its vault document. |
 | `secrets ledger [-m <manifest>]... [--due <days>] [--json] [--publish]` | List every declared secret with its issuer, liveness, dates and what is owed next. `--json` prints one document, and `--publish` sends it to pulse's `/api/ledger` with the node key, where the coop's Tokens page reads it. |
+| `secrets issued <stack>/<service> <key>... [--on <day>]` | Stamp the day a person issued a new value for these keys, so the ledger stops putting them up for rotation. |
 | `vault login [--name <label>]` | Sign this machine in to vault through the browser, and store the operator token. |
 | `vault status` | Show who this machine is signed in to vault as. |
 | `vault logout` | Remove this machine's vault token file. |
@@ -403,6 +404,50 @@ PKCS#1 structure directly — nine DER integers that are exactly a private RSA J
 
 Not everything is an environment variable. Stripe credentials for the lab live in the database,
 so the origins above cover the config half of the problem and not the whole of it.
+
+### Rotating secrets, and the ledger
+
+A secret is declared in its kind file with a `rotation`: who issues the value, and who holds it. hatchery turns it over in one order, the issuer, then every holder, then every restart, and the same declaration is what the ledger lists.
+
+```json
+"NODE_KEY": {
+  "secret": true,
+  "rotation": {
+    "issuer": { "type": "vaultSecret", "app": "roost", "name": "NODE_KEY" },
+    "holders": [
+      { "type": "dokkuConfig", "app": "pulse", "key": "NODE_KEY" },
+      { "type": "file", "host": "jimmy@opi.jimmyhoughjr.net", "path": "~/.roost_node_key" }
+    ]
+  }
+}
+```
+
+| Issuer | Who mints the value |
+| --- | --- |
+| `vaultAppKey` | vault, a new app key for the service |
+| `vaultS3Key` `app` | vault, a new S3 key for an app |
+| `vaultSecret` `app` `name` | vault, a named secret in an app's document |
+| `postgresRole` `server` `role` | a new password on a database role |
+| `random` `bytes` | hatchery, random bytes |
+| `manual` `recipe` | a person, by the recipe; the rotation refuses and prints it |
+
+| Holder | Where the value lands |
+| --- | --- |
+| `dokkuConfig` `app` `key` [`restart`] | an app's config on the box, then a rolling restart or `stopStart` |
+| `roostrc` `host` `key` | a key in a host's `~/.roostrc` |
+| `file` `host` `path` | one file on one host, over ssh or local |
+| `launchdEnvironment` `host` `label` `key`, `systemdEnvironment` `host` `unit` `key` | a job's environment on a host, then the job restarts |
+| `vaultSecret` `app` `name` | the same named secret in another app's document |
+
+A key another service turns over is declared as `{ "rotation": { "owner": "<stack>/<service>" } }`, and its row points at the owner. A kind shared by several jobs declares a key once, and only the jobs whose config or secrets file carries it are planned, so a shared kind rotates once per issuer.
+
+`secrets rotate --all` runs every declared rotation on every manifest. Before its first issuer it probes every host it will touch, and a silent host refuses the whole run, because a value minted in vault with no holder able to take it is the failure of 2026-09-27. Lines print as each step finishes. A person-issued key is refused with its recipe.
+
+One key is never rotated: vault seals every app's secrets document and every S3 key under a key derived from its `SESSION_SECRET`, so a new value locks every document with no symptom until an app restarts. It is declared `manual` with that reason, and the ledger shows it as a re-seal until vault has a route that re-seals under the new value.
+
+`secrets ledger` lists every declared secret: its issuer, whether it is known to work, the day it was issued, its expiry, and what is owed next. The dates live in `~/.config/hatchery/ledger.json` on the Mac that runs the rotations, names and dates and never a value. A key the ledger has never seen with a date shows the day it first saw it and is put up for rotation; a finished rotation stamps the day, and `secrets issued <stack>/<service> KEY` stamps a key a person turned over by hand. A held key shows its owner's day. A key no API can check, an Apple private key or a Google client secret, never reads live, and a typed `expires` on such a key is a review date, when a person looks at the issuer's console. `--due <days>` prints the reminders owed inside the window and exits 1 when any is, which is how the daily publish carries a reminder to the board.
+
+`secrets ledger --publish` sends the same rows as one document to pulse's `/api/ledger` with the roost node key, beside the declaration, and the coop's Tokens page draws them with the owed tokens first. `house-rotate` publishes after every run, and the air runs it daily.
 
 ### Signing in to vault
 
