@@ -15,6 +15,8 @@ public struct ForgeSecrets: Sendable {
     public static let vaultApp = "forge"
     public static let forgeBaseURL = "https://forgejo.jimmyhoughjr.net"
     public static let defaultNames = ["FORGE_PACKAGE_TOKEN"]
+    /// The repository a token scoped to issues is shown, when the user route refuses it.
+    public static let scopeProbeRepo = "jimmy/house"
 
     /// What a run did for one secret on one repository.
     ///
@@ -70,15 +72,20 @@ public struct ForgeSecrets: Sendable {
     /// A `FORGE_` value is shown to the forge first, and one the forge does not take as a token is refused.
     /// On 2026-09-15 a clipboard held something else, and a 51-character value with a line break in it was stored as the package token.
     /// The forge answers 401 for a value that is no token, and 403 for a real token scoped away from the account, so only 401 refuses.
+    /// A token scoped to issues alone answers 401 on the user route too, so a 401 there is asked again at the issues of a
+    /// repository, which such a token reads; on 2026-09-29 the read-only token for `forge-issue` was refused for that.
     public func seed(name: String, value: String) async throws {
         if name.hasPrefix("FORGE_") {
-            var request = URLRequest(url: URL(string: self.forgeBaseURL + "/api/v1/user")!)
-            request.setValue("token " + value, forHTTPHeaderField: "Authorization")
-            request.setValue("hatchery-forge-secrets/1", forHTTPHeaderField: "User-Agent")
-            let (_, response) = try await self.exchange(request)
-            guard value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil, response.statusCode != 401 else {
-                throw Failure.notAToken(name)
+            guard value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { throw Failure.notAToken(name) }
+            var accepted = false
+            for route in ["/api/v1/user", "/api/v1/repos/\(Self.scopeProbeRepo)/issues?limit=1&state=all"] {
+                var request = URLRequest(url: URL(string: self.forgeBaseURL + route)!)
+                request.setValue("token " + value, forHTTPHeaderField: "Authorization")
+                request.setValue("hatchery-forge-secrets/1", forHTTPHeaderField: "User-Agent")
+                let (_, response) = try await self.exchange(request)
+                if response.statusCode != 401 { accepted = true; break }
             }
+            guard accepted else { throw Failure.notAToken(name) }
         }
         _ = try await self.vault.registerApp(slug: Self.vaultApp, name: "Forge CI")
         try await self.vault.setSecret(app: Self.vaultApp, name: name, value: value)

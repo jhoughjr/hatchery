@@ -39,9 +39,12 @@ struct ForgeSecretsTests {
                 return request.value(forHTTPHeaderField: "Authorization") == "Bearer fresh-key" ? answer(200, self.document) : answer(401, [:])
             case ("GET", "/api/v1/user"):
                 return request.value(forHTTPHeaderField: "Authorization") == "token good-token" ? answer(403, [:]) : answer(401, [:])
+            case ("GET", "/api/v1/repos/jimmy/house/issues"):
+                // A token scoped to issues alone reads here and nowhere else.
+                return request.value(forHTTPHeaderField: "Authorization") == "token issues-token" ? answer(200, [:]) : answer(401, [:])
             case ("PUT", "/api/admin/apps/forge/secrets"):
                 self.seeded = true
-                return answer(200, ["names": ["FORGE_PACKAGE_TOKEN"]])
+                return answer(200, ["names": ["FORGE_PACKAGE_TOKEN", "FORGE_READ_TOKEN"]])
             case ("GET", "/api/v1/repos/jimmy/vault-hb/actions/secrets"):
                 return answer(200, self.repoNames.map { ["name": $0] })
             case ("PUT", "/api/v1/repos/jimmy/vault-hb/actions/secrets/FORGE_PACKAGE_TOKEN"):
@@ -103,6 +106,20 @@ struct ForgeSecretsTests {
 
         try await self.secrets(estate).seed(name: "FORGE_PACKAGE_TOKEN", value: "good-token")
         #expect(estate.seeded)
+    }
+
+    @Test("A token scoped to issues alone is refused by the user route, read at a repository's issues, and stored")
+    func seedTakesAnIssuesToken() async throws {
+        let estate = Estate(repoNames: [], document: [:])
+
+        try await self.secrets(estate).seed(name: "FORGE_READ_TOKEN", value: "issues-token")
+        #expect(estate.seeded)
+
+        let stranger = Estate(repoNames: [], document: [:])
+        await #expect(throws: ForgeSecrets.Failure.notAToken("FORGE_READ_TOKEN")) {
+            try await self.secrets(stranger).seed(name: "FORGE_READ_TOKEN", value: "nobodys-token")
+        }
+        #expect(stranger.seeded == false)
     }
 }
 
