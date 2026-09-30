@@ -150,7 +150,9 @@ struct InstallRowsTests {
         #expect(mac.script().contains("plutil -convert xml1"))
         let steps = mac.steps(for: row, forgeMain: [:])
         #expect(steps[1] == "launchctl bootout gui/$(id -u)/l >/dev/null 2>&1 || true")
-        #expect(steps[2] == "launchctl bootstrap gui/$(id -u) \"$HOME/Library/LaunchAgents/l.plist\"")
+        // The load waits for the old instance to be gone, or it races the unload and the job stays down.
+        #expect(steps[2].contains("while launchctl print gui/$(id -u)/l"))
+        #expect(steps[3] == "launchctl bootstrap gui/$(id -u) \"$HOME/Library/LaunchAgents/l.plist\"")
         #expect(mac.command("x") == ["sh", "-c", "x"])
         #expect(mac.probe() == nil)
     }

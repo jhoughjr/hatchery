@@ -480,6 +480,10 @@ extension InstallPlan {
             switch self.platform {
             case .darwin:
                 lines.append("launchctl bootout gui/$(id -u)/\(label) >/dev/null 2>&1 || true")
+                // bootout answers before the old instance is gone, and a bootstrap that races it fails with
+                // "5: Input/output error" and leaves the job unloaded. On 2026-09-30 three runners went down that way.
+                lines.append(
+                    "i=0; while launchctl print gui/$(id -u)/\(label) >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done")
                 lines.append("launchctl bootstrap gui/$(id -u) \"$HOME/\(file)\"")
             case .linux:
                 let unit = (file as NSString).lastPathComponent
