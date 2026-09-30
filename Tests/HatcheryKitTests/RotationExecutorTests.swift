@@ -30,12 +30,13 @@ private final class Estate: @unchecked Sendable {
     var happened: [String] { self.lock.withLock { self.log } }
     var secrets: [String: String] { self.lock.withLock { self.file } }
 
-    /// Every command lands here as one line, so a test reads the run as a story.
-    func run(_ argv: [String]) throws -> Data {
-        let line = argv.joined(separator: " ")
+    /// Every command lands here as one line, so a test reads the run as a story. Its input shows after a `<`.
+    func run(_ command: ShellCommand) throws -> Data {
+        let input = command.standardInput.map { " < " + String(decoding: $0, as: UTF8.self) } ?? ""
+        let line = command.argv.joined(separator: " ") + input
         self.lock.withLock { self.log.append("run " + line) }
         if !self.failing.isEmpty, line.contains(self.failing) {
-            throw CommandFailure(command: argv.first ?? "", status: 1, message: "the box refused it")
+            throw CommandFailure(command: command.argv.first ?? "", status: 1, message: "the box refused it")
         }
         return Data()
     }
@@ -109,10 +110,10 @@ private func rookeryPlan(_ key: String) throws -> RotationPlan {
 struct RotationExecutorTests {
     @Test("a file holder makes its directory before it writes, so a first key file on a host does not fail the run")
     func fileHolderMakesItsDirectory() {
-        let script = RotationExecutor.fileScript(path: "~/.config/gigs/draft.token", value: "v")
+        let script = RotationExecutor.fileScript(path: "~/.config/gigs/draft.token")
         #expect(script.contains("mkdir -p \"$(dirname "))
         #expect(script.contains("chmod 600"))
-        #expect(script.hasPrefix("umask 077;"))
+        #expect(RotationExecutor.valuePreamble.hasPrefix("umask 077;"))
     }
 
     @Test("a dokku command that reached a shell is explained as one, with the fix on the box named")
@@ -135,7 +136,7 @@ struct RotationExecutorTests {
             estate.happened == [
                 "vault POST /api/admin/apps/rookery/key",
                 "record VAULT_APP_KEY",
-                "run ssh -o BatchMode=yes dokku@opi config:set rookery VAULT_APP_KEY=new-app-key",
+                #"run ssh -o BatchMode=yes dokku@opi --quiet config:import --format=json rookery - < {"VAULT_APP_KEY":"new-app-key"}"#,
             ])
         #expect(estate.secrets["VAULT_APP_KEY"] == "new-app-key")
     }
@@ -159,14 +160,14 @@ struct RotationExecutorTests {
         #expect(report.done.last?.what == "vault stopped the old key when it minted the new one")
     }
 
-    @Test("the secrets file holds the new value before the first config:set, so a crash between them loses nothing")
+    @Test("the secrets file holds the new value before the first config:import, so a crash between them loses nothing")
     func theRecordComesBeforeAnyHolder() async throws {
         let estate = Estate()
 
         _ = await makeExecutor(estate).execute(try rookeryPlan("ROOKERY_TOKEN"))
 
         let record = try #require(estate.happened.firstIndex(where: { $0.hasPrefix("record") }))
-        let firstSet = try #require(estate.happened.firstIndex(where: { $0.contains("config:set") }))
+        let firstSet = try #require(estate.happened.firstIndex(where: { $0.contains("config:import") }))
         #expect(record < firstSet)
         #expect(estate.secrets["ROOKERY_TOKEN"] == "minted-1")
     }
@@ -181,8 +182,8 @@ struct RotationExecutorTests {
         #expect(
             estate.happened == [
                 "record ROOKERY_TOKEN",
-                "run ssh -o BatchMode=yes dokku@opi config:set rookery ROOKERY_TOKEN=minted-1",
-                "run ssh -o BatchMode=yes dokku@opi config:set coop ROOKERY_TOKEN=minted-1",
+                #"run ssh -o BatchMode=yes dokku@opi --quiet config:import --format=json rookery - < {"ROOKERY_TOKEN":"minted-1"}"#,
+                #"run ssh -o BatchMode=yes dokku@opi --quiet config:import --format=json coop - < {"ROOKERY_TOKEN":"minted-1"}"#,
             ])
     }
 
@@ -194,7 +195,7 @@ struct RotationExecutorTests {
         let report = await makeExecutor(estate).execute(try rookeryPlan("DATABASE_URL"))
 
         #expect(report.succeeded)
-        #expect(estate.happened[0].contains("ssh -o BatchMode=yes jimmy@opi docker exec rookery-pg psql"))
+        #expect(estate.happened[0].contains("ssh -o BatchMode=yes jimmy@opi docker exec -i rookery-pg psql"))
         #expect(estate.happened[0].contains("ALTER ROLE"))
         #expect(estate.happened[1] == "record DATABASE_URL")
         #expect(
@@ -202,9 +203,9 @@ struct RotationExecutorTests {
                 == "postgresql://rookery:minted-1@rookery-pg:5432/rookery")
     }
 
-    @Test("a failed config:set stops the run and the report names what already ran")
+    @Test("a failed config:import stops the run and the report names what already ran")
     func aFailedHolderStopsTheRun() async throws {
-        let estate = Estate(failing: "config:set coop")
+        let estate = Estate(failing: "config:import --format=json coop")
 
         let report = await makeExecutor(estate).execute(try rookeryPlan("ROOKERY_TOKEN"))
 
@@ -270,9 +271,9 @@ struct RotationExecutorTests {
         _ = await makeExecutor(estate).execute(plan)
 
         #expect(estate.happened.allSatisfy { !$0.contains("ps:restart") })
-        #expect(estate.happened.filter { $0.contains("config:set --no-restart") }.count == 2)
+        #expect(estate.happened.filter { $0.contains("config:import --format=json --no-restart") }.count == 2)
         let stop = try #require(estate.happened.firstIndex(where: { $0.contains("ps:stop") }))
-        let lastSet = try #require(estate.happened.lastIndex(where: { $0.contains("config:set") }))
+        let lastSet = try #require(estate.happened.lastIndex(where: { $0.contains("config:import") }))
         #expect(lastSet < stop)
         #expect(estate.happened.last == "run ssh -o BatchMode=yes dokku@opi ps:start forgejo")
     }
@@ -298,16 +299,16 @@ struct RotationExecutorTests {
 
 @Suite("The pieces a rotation is built from")
 struct RotationCommandTests {
-    @Test("ALTER ROLE goes through the same docker exec channel db provision uses")
+    @Test("ALTER ROLE goes through the same docker exec channel db provision uses, with the statement on standard input")
     func alterRoleUsesTheProvisioningChannel() {
+        let command = RotationExecutor.alterRoleCommand(server: "rookery-pg", role: "rookery", password: "abc", on: "jimmy@opi")
+
         #expect(
-            RotationExecutor.alterRoleCommand(
-                server: "rookery-pg", role: "rookery", password: "abc", on: "local")
-                == [
-                    "docker", "exec", "rookery-pg", "psql", "-U", "postgres", "-v",
-                    "ON_ERROR_STOP=1", "-Atc",
-                    "ALTER ROLE \"rookery\" WITH LOGIN PASSWORD 'abc'",
-                ])
+            command.argv == [
+                "ssh", "-o", "BatchMode=yes", "jimmy@opi", "docker", "exec", "-i", "rookery-pg", "psql", "-U", "postgres", "-v",
+                "ON_ERROR_STOP=1", "-At",
+            ])
+        #expect(command.standardInput == Data("ALTER ROLE \"rookery\" WITH LOGIN PASSWORD 'abc';\n".utf8))
     }
 
     @Test("a new password replaces the old one and leaves the rest of the URL alone")
@@ -337,7 +338,7 @@ struct RotationCommandTests {
 
     @Test("the roostrc rewrite keeps every other line and moves the new file into place")
     func roostrcRewriteIsAtomic() {
-        let script = RotationExecutor.roostrcScript(key: "ROOST_HATCHERY_TOKEN", value: "abc")
+        let script = RotationExecutor.roostrcScript(key: "ROOST_HATCHERY_TOKEN")
 
         #expect(script.contains("grep -v '^ROOST_HATCHERY_TOKEN='"))
         #expect(script.hasSuffix("mv \"$f.rotating\" \"$f\""))
@@ -355,8 +356,9 @@ struct RotationCommandTests {
             holder, plan: plan, values: ["TOKEN": "abc"], dokkuTargets: [:])
         let restart = try RotationExecutor.restartCommands(holder, dokkuTargets: [:])
 
-        #expect(write[0].last?.contains("PlistBuddy") == true)
-        #expect(write[0].last?.contains("Set :EnvironmentVariables:TOKEN abc") == true)
+        #expect(write[0].argv.last?.contains("PlistBuddy") == true)
+        #expect(write[0].argv.last?.contains("Merge $x :EnvironmentVariables") == true)
+        #expect(write[0].standardInput == Data("abc".utf8))
         #expect(restart[0].last?.contains("launchctl bootstrap gui/$(id -u)") == true)
     }
 
@@ -372,8 +374,8 @@ struct RotationCommandTests {
             holder, plan: plan, values: ["TOKEN": "abc"], dokkuTargets: [:])
         let restart = try RotationExecutor.restartCommands(holder, dokkuTargets: [:])
 
-        #expect(write[0].last?.contains("roost-node.service.d/rotation.conf") == true)
-        #expect(write[0].last?.contains("systemctl --user daemon-reload") == true)
+        #expect(write[0].argv.last?.contains("roost-node.service.d") == true)
+        #expect(write[0].argv.last?.contains("systemctl --user daemon-reload") == true)
         #expect(restart[0].last?.contains("systemctl --user restart roost-node.service") == true)
     }
 

@@ -100,7 +100,7 @@ public struct SecretsFile: Sendable {
 /// The run stops at the first failure and reports what ran. It never rolls back: the issuer already invalidated
 /// the old value, so going backwards is not a thing that exists.
 public struct RotationExecutor: Sendable {
-    private let run: CommandRunner
+    private let run: ShellCommandRunner
     private let vault: VaultAdmin
     private let mint: @Sendable (Int) -> String
     private let secrets: SecretsFile
@@ -125,7 +125,7 @@ public struct RotationExecutor: Sendable {
         dokkuTargets: [String: String] = [:],
         adminTargets: [String: String] = [:],
         holderSecrets: [String: SecretsFile] = [:],
-        run: @escaping CommandRunner = ShellRunner.live,
+        run: @escaping ShellCommandRunner = ShellRunner.withInput,
         mint: @escaping @Sendable (Int) -> String = { SecretMinter().token(bytes: $0) },
         pause: @escaping @Sendable (Int) async -> Void = { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000) }
     ) {
@@ -218,7 +218,7 @@ public struct RotationExecutor: Sendable {
                 report.done.append(step)
             } catch {
                 report.stopped = step
-                report.reason = Self.afterReseal(Self.explain(error), resealed: resealed)
+                report.reason = Self.afterReseal(Self.redacting(Array(values.values), in: Self.explain(error)), resealed: resealed)
                 return report
             }
         }
@@ -227,12 +227,12 @@ public struct RotationExecutor: Sendable {
             let step = RotationStep(phase: .restart, what: holder.restartLabel)
             do {
                 for command in try Self.restartCommands(holder, dokkuTargets: self.dokkuTargets) {
-                    _ = try await self.run(command)
+                    _ = try await self.run(ShellCommand(command))
                 }
                 report.done.append(step)
             } catch {
                 report.stopped = step
-                report.reason = Self.afterReseal(Self.explain(error), resealed: resealed)
+                report.reason = Self.afterReseal(Self.redacting(Array(values.values), in: Self.explain(error)), resealed: resealed)
                 return report
             }
         }
@@ -310,10 +310,19 @@ public struct RotationExecutor: Sendable {
 
         case .postgresRole(let server, let role):
             let password = self.mint(32)
-            _ = try await self.run(
-                Self.alterRoleCommand(
-                    server: server, role: role, password: password,
-                    on: self.adminTargets[server] ?? server))
+            do {
+                _ = try await self.run(
+                    Self.alterRoleCommand(
+                        server: server,
+                        role: role,
+                        password: password,
+                        on: self.adminTargets[server] ?? server))
+            } catch let failure as CommandFailure {
+                throw CommandFailure(
+                    command: failure.command,
+                    status: failure.status,
+                    message: Self.redacting([password], in: failure.message))
+            }
             return Issued(values: try self.rewrittenURLs(plan, password: password))
 
         case .vaultReseal:
@@ -340,7 +349,7 @@ public struct RotationExecutor: Sendable {
         for holder in plan.rotation.holders {
             guard case .dokkuConfig(let app, _, _) = holder else { continue }
             let target = try Self.dokkuTarget(app, in: self.dokkuTargets)
-            let answer = try await self.run(Self.runningCommand(app, on: target))
+            let answer = try await self.run(ShellCommand(Self.runningCommand(app, on: target)))
             guard String(decoding: answer, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "true" else {
                 throw RotationExecutorError.notRunning(app: app)
             }
@@ -420,18 +429,15 @@ public struct RotationExecutor: Sendable {
         return [identifierKey: pair.accessKeyID, secretKeys[0]: pair.secretAccessKey]
     }
 
-    /// `ALTER ROLE` over the same `docker exec` channel `db provision` uses.
-    ///
-    /// The SQL travels through two shells when the box is another machine, so it is quoted for the remote one
-    /// and left bare when there is no second shell to parse it.
+    /// `ALTER ROLE` over the same `docker exec` channel `db provision` uses, with the statement on psql's standard input.
+    /// The statement holds the password, so it goes through ssh and `docker exec -i` as input and is never an argument on either machine.
     static func alterRoleCommand(
         server: String, role: String, password: String, on target: String
-    ) -> [String] {
-        let sql = "ALTER ROLE \"\(role)\" WITH LOGIN PASSWORD '\(password)'"
-        let prefix = AdminChannel.prefix(target)
-        return prefix
-            + ["docker", "exec", server, "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-Atc"]
-            + [prefix.isEmpty ? sql : DatabaseProvisioner.shellQuoted(sql)]
+    ) -> ShellCommand {
+        let sql = "ALTER ROLE \"\(role)\" WITH LOGIN PASSWORD '\(password)';\n"
+        return ShellCommand(
+            AdminChannel.prefix(target) + ["docker", "exec", "-i", server, "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-At"],
+            standardInput: Data(sql.utf8))
     }
 
     /// The same connection URL with a new password.
@@ -451,32 +457,35 @@ public struct RotationExecutor: Sendable {
     // MARK: - The holders
 
     /// What a holder must run to take the new value. Empty for a holder that reads it from vault itself.
+    /// Every command carries the value on its standard input and never in an argument, house#46.
     static func writeCommands(
         _ holder: KindFile.Holder,
         plan: RotationPlan,
         values: [String: String],
         dokkuTargets: [String: String]
-    ) throws -> [[String]] {
+    ) throws -> [ShellCommand] {
         switch holder {
         case .dokkuConfig(let app, let key, let restart):
             let value = try Self.value(for: key, plan: plan, values: values)
             let target = try Self.dokkuTarget(app, in: dokkuTargets)
             let flags = restart == .stopStart ? ["--no-restart"] : []
-            return [[
-                "ssh", "-o", "BatchMode=yes", target, "config:set",
-            ] + flags + [app, "\(key)=\(value)"]]
+            return [
+                ShellCommand(
+                    ["ssh", "-o", "BatchMode=yes", target, "--quiet", "config:import", "--format=json"] + flags + [app, "-"],
+                    standardInput: try Self.dokkuImport(key: key, value: value))
+            ]
 
         case .roostrc(let host, let key):
             let value = try Self.value(for: key, plan: plan, values: values)
-            return [Self.onHost(host, script: Self.roostrcScript(key: key, value: value))]
+            return [Self.onHost(host, script: Self.roostrcScript(key: key), value: value)]
 
         case .launchdEnvironment(let host, let label, let key):
             let value = try Self.value(for: key, plan: plan, values: values)
-            return [Self.onHost(host, script: Self.plistScript(label: label, key: key, value: value))]
+            return [Self.onHost(host, script: Self.plistScript(label: label, key: key), value: value)]
 
         case .systemdEnvironment(let host, let unit, let key):
             let value = try Self.value(for: key, plan: plan, values: values)
-            return [Self.onHost(host, script: Self.dropInScript(unit: unit, key: key, value: value))]
+            return [Self.onHost(host, script: Self.dropInScript(unit: unit, key: key), value: value)]
 
         case .vaultSecret:
             // Vault already holds the value, and this holder reads it at boot. Its restart is the whole step.
@@ -484,8 +493,17 @@ public struct RotationExecutor: Sendable {
 
         case .file(let host, let path):
             let value = try Self.value(for: path, plan: plan, values: values)
-            return [Self.onHost(host, script: Self.fileScript(path: path, value: value))]
+            return [Self.onHost(host, script: Self.fileScript(path: path), value: value)]
         }
+    }
+
+    /// The one key and its value as the JSON object `dokku config:import --format=json` reads from standard input.
+    ///
+    /// `config:set` takes the value only as an argument, which `ps` shows on the box, and its `--encoded` form is the same value in base64.
+    /// `config:import` in dokku 0.38.19 reads a JSON map of strings from `-` and merges it without `--replace`,
+    /// so no process holds the value in its arguments.
+    static func dokkuImport(key: String, value: String) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [key: value], options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
     /// What a holder must run to read the new value, after every holder has taken it.
@@ -547,29 +565,48 @@ public struct RotationExecutor: Sendable {
         return prefix + ["sh", "-c", prefix.isEmpty ? script : DatabaseProvisioner.shellQuoted(script)]
     }
 
-    /// Replaces a key in `~/.roostrc`, keeping every other line.
-    ///
-    /// The file is rewritten beside itself and moved into place, so a failure halfway leaves the old file whole
-    /// rather than a truncated one.
-    static func roostrcScript(key: String, value: String) -> String {
-        "f=$HOME/.roostrc; touch \"$f\"; grep -v '^\(key)=' \"$f\" > \"$f.rotating\"; "
-            + "printf '\(key)=%s\\n' '\(value)' >> \"$f.rotating\"; mv \"$f.rotating\" \"$f\""
+    /// A holder's script on its host, with the value on standard input and the value preamble in front of the script.
+    static func onHost(_ host: String, script: String, value: String) -> ShellCommand {
+        ShellCommand(Self.onHost(host, script: Self.valuePreamble + script), standardInput: Data(value.utf8))
     }
 
-    /// Writes the value whole to a path, `~` expanded against `$HOME`, and locks it to mode 600 so only its
-    /// owner can read it.
-    static func fileScript(path: String, value: String) -> String {
+    /// The opening of every holder script: standard input goes to a mode 600 file in `$t`, which the shell removes when it exits.
+    /// An empty input stops the script before it touches the holder,
+    /// because a pipe that carried nothing looks like success, as `"KEY=$(cat)"` did on 2026-09-08.
+    static let valuePreamble = #"umask 077; t=$(mktemp) || exit 1; trap 'rm -f "$t"' EXIT; cat > "$t"; "#
+        + #"[ -s "$t" ] || { echo 'no value arrived on standard input' >&2; exit 1; }; "#
+
+    /// Replaces a key in `~/.roostrc` with the value in `$t`, keeping every other line.
+    /// The file is rewritten beside itself and moved into place, so a failure halfway leaves the old file whole.
+    static func roostrcScript(key: String) -> String {
+        #"f="$HOME/.roostrc"; touch "$f"; rm -f "$f.rotating"; "#
+            + #"{ grep -v '^\#(key)=' "$f"; printf '\#(key)='; cat "$t"; printf '\n'; } > "$f.rotating" && mv "$f.rotating" "$f""#
+    }
+
+    /// Writes the value in `$t` whole to a path, `~` expanded against `$HOME`, as a mode 600 file only its owner can read.
+    static func fileScript(path: String) -> String {
         let target = path.hasPrefix("~/") ? "$HOME/" + path.dropFirst(2) : path
         // The directory is made first: on 2026-09-29 a holder under ~/.config/gigs failed on a Mac that had no such directory,
         // after the issuer had minted and the other holders had taken the value.
-        return "umask 077; mkdir -p \"$(dirname \"\(target)\")\"; printf '%s' '\(value)' > \"\(target)\"; chmod 600 \"\(target)\""
+        return #"p="\#(target)"; mkdir -p "$(dirname "$p")" && rm -f "$p.rotating" && cat "$t" > "$p.rotating" && "#
+            + #"chmod 600 "$p.rotating" && mv "$p.rotating" "$p""#
     }
 
-    /// Sets a key in a launchd plist's `EnvironmentVariables`, adding it when the plist carries none.
-    static func plistScript(label: String, key: String, value: String) -> String {
-        let plist = "$HOME/Library/LaunchAgents/\(label).plist"
-        return "/usr/libexec/PlistBuddy -c 'Set :EnvironmentVariables:\(key) \(value)' \"\(plist)\" "
-            + "|| /usr/libexec/PlistBuddy -c 'Add :EnvironmentVariables:\(key) string \(value)' \"\(plist)\""
+    /// Sets a key in a launchd plist's `EnvironmentVariables` to the value in `$t`, adding the dictionary when the plist carries none.
+    ///
+    /// PlistBuddy takes a value only inside its `-c` argument, so the value goes into a small plist file that `Merge` reads.
+    /// `Merge` skips a key that is already there, so the key is deleted first, on a copy that is moved into place.
+    static func plistScript(label: String, key: String) -> String {
+        let buddy = "/usr/libexec/PlistBuddy"
+        return #"pl="$HOME/Library/LaunchAgents/\#(label).plist"; "#
+            + #"[ -f "$pl" ] || { echo "no launchd plist at $pl" >&2; exit 1; }; "#
+            + #"x=$(mktemp) || exit 1; trap 'rm -f "$t" "$x" "$pl.rotating"' EXIT; "#
+            + #"{ printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>\#(key)</key><string>'; "#
+            + #"sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' "$t"; printf '</string></dict></plist>\n'; } > "$x" && "#
+            + #"cp "$pl" "$pl.rotating" && "#
+            + #"{ \#(buddy) -c 'Add :EnvironmentVariables dict' "$pl.rotating" >/dev/null 2>&1; "#
+            + #"\#(buddy) -c 'Delete :EnvironmentVariables:\#(key)' "$pl.rotating" >/dev/null 2>&1; "#
+            + #"\#(buddy) -c "Merge $x :EnvironmentVariables" "$pl.rotating"; } && mv "$pl.rotating" "$pl""#
     }
 
     /// Bootstraps a launchd agent again, the same two lines the job installer writes.
@@ -578,14 +615,27 @@ public struct RotationExecutor: Sendable {
             + "launchctl bootstrap gui/$(id -u) \"$HOME/Library/LaunchAgents/\(label).plist\""
     }
 
-    /// Sets a key in a systemd user unit's environment, through a drop-in of hatchery's own.
+    /// Sets a key in a systemd user unit's environment to the value in `$t`, through a drop-in of hatchery's own.
     ///
     /// A drop-in rather than the unit file, so a rotation never rewrites the artifact the job installer owns.
-    static func dropInScript(unit: String, key: String, value: String) -> String {
-        let directory = "$HOME/.config/systemd/user/\(unit).d"
-        return "mkdir -p \(directory) && "
-            + "printf '[Service]\\nEnvironment=\"\(key)=%s\"\\n' '\(value)' > \(directory)/rotation.conf && "
-            + "systemctl --user daemon-reload"
+    /// Inside the quotes systemd reads a backslash and a double quote as escapes and a percent sign as a specifier, so the script escapes all three.
+    static func dropInScript(unit: String, key: String) -> String {
+        #"d="$HOME/.config/systemd/user/\#(unit).d"; mkdir -p "$d" && rm -f "$d/rotation.conf.rotating" && "#
+            + #"{ printf '[Service]\nEnvironment="\#(key)='; sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g' "$t"; printf '"\n'; } "#
+            + #"> "$d/rotation.conf.rotating" && mv "$d/rotation.conf.rotating" "$d/rotation.conf" && systemctl --user daemon-reload"#
+    }
+
+    /// The text with every value in it replaced by a mark, for a reason a person reads.
+    /// A holder's error is the remote side's standard error, and nothing promises that a tool on the box never echoes its input there,
+    /// so the value is withheld both as it is and as the JSON a dokku holder sends.
+    static func redacting(_ values: [String], in text: String) -> String {
+        let forms = values.filter { !$0.isEmpty }.flatMap { value -> [String] in
+            let encoded = (try? JSONSerialization.data(withJSONObject: [value], options: .withoutEscapingSlashes))
+                .map { String(decoding: $0, as: UTF8.self).dropFirst(2).dropLast(2) }
+                .map(String.init)
+            return [value] + (encoded.map { [$0] } ?? [])
+        }
+        return forms.reduce(text) { $0.replacingOccurrences(of: $1, with: "<value withheld>") }
     }
 }
 

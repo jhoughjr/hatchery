@@ -57,8 +57,10 @@ private final class Estate: @unchecked Sendable {
     var happened: [String] { self.lock.withLock { self.log } }
     func file(_ app: String) -> [String: String] { self.lock.withLock { self.files[app] ?? [:] } }
 
-    func run(_ argv: [String]) -> Data {
-        let line = argv.joined(separator: " ")
+    /// A command's input shows after a `<`, so a test reads what went on standard input apart from the arguments.
+    func run(_ command: ShellCommand) -> Data {
+        let input = command.standardInput.map { " < " + String(decoding: $0, as: UTF8.self) } ?? ""
+        let line = command.argv.joined(separator: " ") + input
         self.lock.withLock { self.log.append("run " + line) }
         return line.contains("ps:report") ? Data((self.running + "\n").utf8) : Data()
     }
@@ -212,8 +214,8 @@ struct ResealRotationTests {
             "vault took secret minted-session-secret",
             "record vault SESSION_SECRET",
             "record pulse NODE_KEY,SESSION_SECRET",
-            "run ssh -o BatchMode=yes dokku@opi config:set --no-restart vault SESSION_SECRET=minted-session-secret",
-            "run ssh -o BatchMode=yes dokku@opi config:set --no-restart pulse SESSION_SECRET=minted-session-secret",
+            #"run ssh -o BatchMode=yes dokku@opi --quiet config:import --format=json --no-restart vault - < {"SESSION_SECRET":"minted-session-secret"}"#,
+            #"run ssh -o BatchMode=yes dokku@opi --quiet config:import --format=json --no-restart pulse - < {"SESSION_SECRET":"minted-session-secret"}"#,
             "run ssh -o BatchMode=yes dokku@opi ps:stop vault",
             "run ssh -o BatchMode=yes dokku@opi ps:start vault",
             "run ssh -o BatchMode=yes dokku@opi ps:stop pulse",
@@ -236,7 +238,7 @@ struct ResealRotationTests {
         #expect(!report.succeeded)
         #expect(report.stopped?.phase == .issue)
         #expect(report.reason?.contains("gigs.secrets.json") == true)
-        #expect(!estate.happened.contains { $0.hasPrefix("record") || $0.contains("config:set") || $0.contains("ps:stop") })
+        #expect(!estate.happened.contains { $0.hasPrefix("record") || $0.contains("config:import") || $0.contains("ps:stop") })
         #expect(estate.file("vault")["SESSION_SECRET"] == "old")
         #expect(estate.file("pulse")["SESSION_SECRET"] == "old")
     }

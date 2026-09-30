@@ -442,6 +442,8 @@ A secret is declared in its kind file with a `rotation`: who issues the value, a
 | `launchdEnvironment` `host` `label` `key`, `systemdEnvironment` `host` `unit` `key` | a job's environment on a host, then the job restarts |
 | `vaultSecret` `app` `name` | the same named secret in another app's document |
 
+A value never goes into a command's arguments, because `ps` on the Mac and on the box shows every argument to every account, house#46. A `dokkuConfig` holder sends the key and value as JSON on the ssh connection's standard input to `dokku --quiet config:import --format=json <app> -`, which merges it into the app's config. Every other holder runs a small script over ssh that reads the value from standard input into a mode 600 temp file, stops when the input is empty, sets the holder from the file, and removes the file when the shell exits. The `postgresRole` issuer sends its `ALTER ROLE` to `psql` over `docker exec -i` the same way. An error that echoes the value reaches the report with the value withheld.
+
 A key another service turns over is declared as `{ "rotation": { "owner": "<stack>/<service>" } }`, and its row points at the owner. A kind shared by several jobs declares a key once, and only the jobs whose config or secrets file carries it are planned, so a shared kind rotates once per issuer.
 
 `secrets rotate --all` runs every declared rotation on every manifest. Before its first issuer it probes every host it will touch, and a silent host refuses the whole run, because a value minted in vault with no holder able to take it is the failure of 2026-09-27. Lines print as each step finishes. A person-issued key is refused with its recipe.
