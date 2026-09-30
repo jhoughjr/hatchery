@@ -282,3 +282,26 @@ struct ResealRotationTests {
         #expect(report.done.map(\.phase) == [.ready, .issue, .record, .record, .hold, .hold, .restart, .restart])
     }
 }
+
+@Suite("A step that stops after the re-seal says the way back")
+struct AfterResealTests {
+    @Test("a reason with no re-seal is unchanged")
+    func noReseal() {
+        #expect(RotationExecutor.afterReseal("the holder refused", resealed: nil) == "the holder refused")
+    }
+
+    @Test("a reason after the re-seal names the backup and both ways back")
+    func afterReseal() {
+        // given a re-seal that kept the old set
+        let count = VaultResealCount(appDocuments: 4, s3Keys: 3, backup: "reseal-backups/20260930T120000Z")
+
+        // when a later step stops
+        let reason = RotationExecutor.afterReseal("config:set failed", resealed: count)
+
+        // then the reason keeps the error and says where the old set is and how to recover
+        #expect(reason.hasPrefix("config:set failed"))
+        #expect(reason.contains("reseal-backups/20260930T120000Z"))
+        #expect(reason.contains("set the new value from vault's secrets file"))
+        #expect(reason.contains("copy the old set back"))
+    }
+}

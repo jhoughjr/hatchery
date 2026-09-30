@@ -186,7 +186,7 @@ public struct RotationExecutor: Sendable {
                     what: "\(values.keys.sorted().joined(separator: " + ")) written to the secrets file"))
         } catch {
             report.stopped = RotationStep(phase: .record, what: "the secrets file")
-            report.reason = "\(error)"
+            report.reason = Self.afterReseal("\(error)", resealed: resealed)
             return report
         }
 
@@ -202,7 +202,7 @@ public struct RotationExecutor: Sendable {
                 report.done.append(step)
             } catch {
                 report.stopped = step
-                report.reason = "\(error)"
+                report.reason = Self.afterReseal("\(error)", resealed: resealed)
                 return report
             }
         }
@@ -218,7 +218,7 @@ public struct RotationExecutor: Sendable {
                 report.done.append(step)
             } catch {
                 report.stopped = step
-                report.reason = Self.explain(error)
+                report.reason = Self.afterReseal(Self.explain(error), resealed: resealed)
                 return report
             }
         }
@@ -232,7 +232,7 @@ public struct RotationExecutor: Sendable {
                 report.done.append(step)
             } catch {
                 report.stopped = step
-                report.reason = Self.explain(error)
+                report.reason = Self.afterReseal(Self.explain(error), resealed: resealed)
                 return report
             }
         }
@@ -371,6 +371,17 @@ public struct RotationExecutor: Sendable {
             return found
         }
         throw last
+    }
+
+    /// The reason for a step that stopped after vault re-sealed, with the way back.
+    /// Vault's files are sealed under the new value by then, so a vault that restarts on the old value locks every document.
+    static func afterReseal(_ reason: String, resealed: VaultResealCount?) -> String {
+        guard let resealed else { return reason }
+        return reason
+            + ". Vault already re-sealed every document under the new value, and the old set is in "
+            + (resealed.backup ?? "vault's reseal-backups")
+            + ". Before vault restarts, either set the new value from vault's secrets file on vault and pulse and restart both, "
+            + "or stop vault, copy the old set back over its authz directory, and set the old value on vault and pulse"
     }
 
     /// The plan's keys with the new password put back into the connection URL each one holds.
