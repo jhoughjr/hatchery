@@ -313,6 +313,13 @@ enum Wire {
         let confirm: String
     }
 
+    /// One declared rotation: the service as `<stack>/<service>`, the key, and both again as the confirmation.
+    struct RotateBody: Decodable {
+        let target: String
+        let key: String
+        let confirm: String
+    }
+
     /// A watchable job's transcript, from wherever the page last polled.
     struct JobView: Encodable {
         let lines: [String]
@@ -589,6 +596,8 @@ public struct HatcheryAPI: Sendable {
             return await jobClone(request)
         case ("POST", "/api/jobs/destroy"):
             return jobDestroy(request)
+        case ("POST", "/api/jobs/rotate"):
+            return jobRotate(request)
         case ("GET", "/api/jobs"):
             return jobStatus(request)
         case ("POST", "/api/config/set"):
@@ -1300,6 +1309,76 @@ public struct HatcheryAPI: Sendable {
             store.finish(id, ok: status == 0)
         }
         return .json(["job": id])
+    }
+
+    /// One declared rotation as a watchable job, for the page that shows what is owed.
+    ///
+    /// The rotation runs on the machine that holds the operator token and the ledger, which is where this serve runs,
+    /// so a page on the box asks for it here. It runs the same verb `house-rotate` runs, as a child of this process
+    /// over the manifests the house names, so the order, the probes and the refusals are the ones a person at a
+    /// terminal gets, and its lines are the transcript. No value is in them: a rotation prints its steps and never a
+    /// value. The ledger goes to pulse after a run that finished, so the page shows the new date.
+    /// Ruled on 2026-09-29, house#40 and #48: serve is the door.
+    private func jobRotate(_ request: WebRequest) -> WebResponse {
+        // A serve with no token answers anyone, and a rotation is not for anyone.
+        guard token != nil else {
+            return .failure(403, "a rotation runs only on a serve that holds a token")
+        }
+        guard let body = try? JSONDecoder().decode(Wire.RotateBody.self, from: request.body) else {
+            return .failure(400, "expected {target, key, confirm}")
+        }
+        let targetShape = #"^[a-z0-9][a-z0-9-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$"#
+        let keyShape = #"^[A-Z][A-Z0-9_]*$"#
+        guard body.target.range(of: targetShape, options: .regularExpression) != nil,
+            body.key.range(of: keyShape, options: .regularExpression) != nil
+        else {
+            return .failure(400, "the target is <stack>/<service> and the key is a declared name")
+        }
+        guard body.confirm == "\(body.target) \(body.key)" else {
+            return .failure(400, "confirmation did not match; expected '\(body.target) \(body.key)'")
+        }
+        let manifests = Self.rotationManifests()
+        guard !manifests.isEmpty else {
+            return .failure(500, "no manifest to rotate over; set HATCHERY_ROTATE_MANIFESTS")
+        }
+        let id = jobs.create()
+        let store = jobs
+        let runner = stream
+        let binary = CommandLine.arguments.first ?? "hatchery"
+        let named = manifests.flatMap { ["-m", $0] }
+        jobs.append(id, "rotate \(body.target) \(body.key)")
+        Task.detached {
+            let status = await runner([binary, "secrets", "rotate", body.target, body.key, "--yes"] + named, nil) { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty { store.append(id, trimmed) }
+            }
+            guard status == 0 else {
+                store.append(id, "the rotation stopped (exit \(status))")
+                store.finish(id, ok: false)
+                return
+            }
+            let published = await runner([binary, "secrets", "ledger", "--publish"] + named, nil) { _ in }
+            store.append(id, published == 0 ? "the ledger is on pulse" : "the ledger did not reach pulse; publish it by hand")
+            store.append(id, "rotation complete")
+            store.finish(id, ok: true)
+        }
+        return .json(["job": id])
+    }
+
+    /// The manifests a rotation runs over: `HATCHERY_ROTATE_MANIFESTS`, colon separated, or the six the house keeps,
+    /// each only where it exists. A rotation over one manifest would miss a holder another manifest declares.
+    static func rotationManifests(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> [String] {
+        if let listed = environment["HATCHERY_ROTATE_MANIFESTS"], !listed.isEmpty {
+            return listed.split(separator: ":").map { Paths.expanded(String($0)) }
+        }
+        let home = environment["HOME"] ?? NSHomeDirectory()
+        let state = environment["HOUSE_INFRA_STATE"] ?? home + "/infra-state"
+        let house = [home + "/.config/hatchery/hatchery.json"]
+            + ["estate", "sites", "air", "mini", "box"].map { "\(state)/\($0)/hatchery.json" }
+        return house.filter(exists)
     }
 
     private func jobStatus(_ request: WebRequest) -> WebResponse {
