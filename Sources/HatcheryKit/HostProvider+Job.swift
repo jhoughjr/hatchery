@@ -72,14 +72,16 @@ extension HostProvider {
                 GeneratedFile(
                     path: names[0],
                     contents: Self.systemdService(
-                        name: unit, service: service.name, job: job, environment: declared, cronAdoption: isCronAdoption),
+                        name: unit, service: service.name, job: job, environment: declared, cronAdoption: isCronAdoption,
+                        description: service.description),
                     role: .declaration)
             ]
             if let schedule = job.schedule {
                 files.append(
                     GeneratedFile(
                         path: names[1],
-                        contents: Self.systemdTimer(name: unit, schedule: schedule, cronAdoption: isCronAdoption),
+                        contents: Self.systemdTimer(
+                            name: unit, schedule: schedule, cronAdoption: isCronAdoption, directives: job.directives ?? [:]),
                         role: .declaration))
             }
             return files
@@ -129,7 +131,19 @@ extension HostProvider {
         body += try Self.launchSchedule(job: job)
         if let log = job.log, !log.isEmpty {
             body += "    <key>StandardOutPath</key>\n    <string>\(Self.xmlEscaped(log))</string>\n"
-            body += "    <key>StandardErrorPath</key>\n    <string>\(Self.xmlEscaped(log))</string>\n"
+            body += "    <key>StandardErrorPath</key>\n    <string>\(Self.xmlEscaped(job.errorLog ?? log))</string>\n"
+        }
+        // What the declaration says beyond the shape, in key order: a word is a string, true and false are
+        // booleans, and digits are an integer, which is every kind of value a launchd key of this sort takes.
+        for (key, value) in (job.directives ?? [:]).sorted(by: { $0.key < $1.key }) {
+            body += "    <key>\(Self.xmlEscaped(key))</key>\n"
+            if value == "true" || value == "false" {
+                body += "    <\(value)/>\n"
+            } else if !value.isEmpty, value.allSatisfy(\.isNumber) {
+                body += "    <integer>\(value)</integer>\n"
+            } else {
+                body += "    <string>\(Self.xmlEscaped(value))</string>\n"
+            }
         }
         body += """
             </dict>
@@ -174,19 +188,29 @@ extension HostProvider {
     /// own install target would be started once at login as well as on its schedule.
     static func systemdService(
         name: String, service: String, job: JobSpec, environment: [(key: String, value: String)],
-        cronAdoption: Bool = false
+        cronAdoption: Bool = false, description: String? = nil
     ) -> String {
         var body = "# Written by hatchery.\n"
         if cronAdoption {
             body += "# The crontab line must be removed by hand once the timer is installed.\n"
         }
+        let directives = (job.directives ?? [:]).sorted { $0.key < $1.key }
+        func lines(of section: String) -> String {
+            directives.filter { $0.key.hasPrefix(section + ".") }
+                .map { "\($0.key.dropFirst(section.count + 1))=\(Self.unitEscaped($0.value))\n" }.joined()
+        }
+        body += "[Unit]\n"
+        body += "Description=\(Self.unitEscaped(description.flatMap { $0.isEmpty ? nil : $0 } ?? "\(service), declared by hatchery"))\n"
+        if let onFailure = job.onFailure, !onFailure.isEmpty {
+            // A [Unit] directive. In [Service] systemd ignores it with one line in the journal and the alert never fires.
+            body += "OnFailure=\(Self.unitEscaped(onFailure))\n"
+        }
+        body += lines(of: "Unit")
         body += """
-            [Unit]
-            Description=\(service), declared by hatchery
 
             [Service]
             Type=\(job.keepAlive ? "simple" : "oneshot")
-            ExecStart=\(job.program.map(Self.unitEscaped).joined(separator: " "))
+            ExecStart=\(job.program.map(Self.unitArgument).joined(separator: " "))
 
             """
         if let directory = job.workingDirectory, !directory.isEmpty {
@@ -202,9 +226,12 @@ extension HostProvider {
             // Without these systemd writes to the journal, which is where a job on this box belongs.
             // A declaration that names a path is asking for the file, usually because something else reads it.
             body += "StandardOutput=append:\(Self.unitEscaped(log))\n"
-            body += "StandardError=append:\(Self.unitEscaped(log))\n"
+            body += "StandardError=append:\(Self.unitEscaped(job.errorLog ?? log))\n"
         }
-        if job.schedule == nil {
+        body += lines(of: "Service")
+        // Only a job the supervisor starts itself is wanted by a target. A job with no schedule that is neither kept
+        // alive nor run at load is started by another unit, as an OnFailure alert is, and enabling it would fire it.
+        if job.start == .keep || job.start == .load {
             body += """
 
                 [Install]
@@ -220,7 +247,9 @@ extension HostProvider {
     /// `Persistent=true` replays a window the box slept through, which is the case a scheduled job exists for.
     /// An interval uses `OnCalendar=` with a calendar expression rather than `OnBootSec` and `OnUnitActiveSec`,
     /// because a timer anchoring off boot and last activation computes no next elapse if it has never run.
-    static func systemdTimer(name: String, schedule: Schedule, cronAdoption: Bool = false) -> String {
+    static func systemdTimer(
+        name: String, schedule: Schedule, cronAdoption: Bool = false, directives: [String: String] = [:]
+    ) -> String {
         var body = "# Written by hatchery.\n"
         if cronAdoption {
             body += "# The crontab line must be removed by hand once the timer is installed.\n"
@@ -241,6 +270,11 @@ extension HostProvider {
 
         case .at(let expression):
             body += "OnCalendar=\(expression)\n"
+        }
+        // A timer's own settings, as declared: a thirty-second report needs `AccuracySec`, since systemd's default
+        // accuracy of a minute would run it half as often, and a nightly job spreads its start with `RandomizedDelaySec`.
+        for (key, value) in directives.sorted(by: { $0.key < $1.key }) where key.hasPrefix("Timer.") {
+            body += "\(key.dropFirst(6))=\(Self.unitEscaped(value))\n"
         }
         body += """
             Persistent=true
@@ -297,6 +331,17 @@ extension HostProvider {
         value.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    /// One argument of `ExecStart`, quoted when systemd would otherwise split it.
+    ///
+    /// systemd splits a command line on whitespace, so `/bin/sh -c` followed by a script with spaces in it must carry
+    /// that script in quotes or the shell is given its first word alone. On 2026-09-30 the reconcile's mesh alert
+    /// rendered that way, which would have sent nothing.
+    static func unitArgument(_ value: String) -> String {
+        let folded = Self.unitEscaped(value)
+        guard folded.contains(where: { $0 == " " || $0 == "\t" || $0 == "\"" || $0 == "'" || $0 == ";" }) else { return folded }
+        return "'" + folded.replacingOccurrences(of: "'", with: "\\'") + "'"
     }
 
     /// systemd reads a newline as the end of a directive, so a value carrying one is folded to a space.

@@ -41,6 +41,9 @@ struct Install: AsyncParsableCommand {
     @Flag(name: .long, help: "Print the report as one JSON document instead of the table.")
     var json = false
 
+    @Option(name: .long, help: "Print the job file hatchery renders for this label, and read no host. For reading a hand-written file against the declaration before --jobs rewrites it.")
+    var render: String?
+
     @Flag(name: .long, help: "POST the report to pulse, with the roost node key.")
     var publish = false
 
@@ -55,6 +58,17 @@ struct Install: AsyncParsableCommand {
         let loaded = try requested.map { try ManifestLocator.load($0) }
         var plans = try InstallPlan.plans(in: loaded)
         if let host = self.host { plans = plans.filter { $0.host == host } }
+        if let label = self.render {
+            for plan in plans {
+                for thing in plan.things {
+                    if case .job(let name, let file) = thing, name == label, let contents = plan.rendered[file] {
+                        print(contents, terminator: "")
+                        return
+                    }
+                }
+            }
+            throw ValidationError("no declared job is labelled \(label)")
+        }
         guard !plans.isEmpty else {
             print("  no host stack declares a job, so nothing is installed anywhere")
             return

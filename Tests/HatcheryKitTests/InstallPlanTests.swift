@@ -118,9 +118,10 @@ struct InstallRowsTests {
         #expect(plan.steps(for: rows[1], forgeMain: [:]).first?.contains("bin/install") == true)
         #expect(plan.steps(for: rows[2], forgeMain: [:]).first?.contains("install-r.sh") == true)
         let jobSteps = plan.steps(for: rows[3], forgeMain: [:])
-        #expect(jobSteps.count == 3)
+        #expect(jobSteps.count == 4)
         #expect(jobSteps[0].contains("base64 --decode > \"$HOME/.config/systemd/user/roost-node-report.service\""))
-        #expect(jobSteps[2] == "systemctl --user enable --now roost-node-report.service")
+        #expect(jobSteps[2] == "systemctl --user enable roost-node-report.service")
+        #expect(jobSteps[3] == "systemctl --user restart roost-node-report.service")
     }
 
     @Test("a checkout behind the forge fetches the forge by URL and fast-forwards, and pulls its origin when the forge has none")
@@ -164,6 +165,21 @@ struct InstallRowsTests {
         let mac = InstallPlan(host: "local", platform: .darwin, things: [], rendered: [:], longRunning: ["net.x.watch": "/Users/j/repos/roost/bin/box-watch.py"])
         #expect(mac.restartSteps(afterCheckout: "/Users/j/repos/roost").first?.step == "launchctl kickstart -k gui/$(id -u)/net.x.watch")
         #expect(mac.restartSteps(afterCheckout: "/Users/j/repos/hatchery").isEmpty)
+    }
+
+    @Test("an install starts a timer, only reads an on-demand unit again, and never starts a scheduled job's own unit")
+    func startsByHowTheJobRuns() {
+        let files = [".config/systemd/user/a.service", ".config/systemd/user/a.timer", ".config/systemd/user/alert.service"]
+        let plan = InstallPlan(
+            host: "jimmy@opi", platform: .linux, things: [], rendered: Dictionary(uniqueKeysWithValues: files.map { ($0, "x") }),
+            starts: [files[0]: .timer, files[1]: .timer, files[2]: .demand])
+        func steps(_ file: String) -> [String] {
+            plan.steps(for: InstallRow(host: "h", kind: .job(label: "l", file: file), installed: nil, wanted: "w", state: .missing), forgeMain: [:])
+        }
+        #expect(steps(files[0]).last == "systemctl --user daemon-reload")
+        #expect(steps(files[1]).last == "systemctl --user enable --now a.timer")
+        #expect(steps(files[2]).last == "systemctl --user daemon-reload")
+        #expect(!steps(files[2]).contains { $0.contains("enable") || $0.contains("restart") })
     }
 
     @Test("the report groups rows by host and reads back whole")

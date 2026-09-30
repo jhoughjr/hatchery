@@ -195,6 +195,16 @@ public struct JobSpec: Codable, Sendable, Equatable {
     /// The supervisor's own name for the job, when it is not the label this kind would give it.
     /// A Mac names an agent `net.jimmyhoughjr.<service>` unless this says otherwise, and Linux names a unit `<service>`.
     public var label: String?
+    /// The unit systemd starts when this one fails, such as the reconcile's mesh alert. Linux only: launchd has none.
+    public var onFailure: String?
+    /// Where stderr goes when it is not the log. Absent means the log takes both streams.
+    public var errorLog: String?
+    /// What the supervisor is told that the shape above does not carry, written as declared and in key order.
+    ///
+    /// A systemd key names its section, `Service.RestartSec` or `Unit.Documentation`, and a launchd key is the plist
+    /// key, `ProcessType`. On 2026-09-30 sixteen hand-written job files held settings the declaration could not say,
+    /// among them a runner's `KillMode=process` and a watchdog's `SuccessExitStatus`, and a rewrite would have lost them.
+    public var directives: [String: String]?
 
     public init(
         program: [String],
@@ -204,7 +214,10 @@ public struct JobSpec: Codable, Sendable, Equatable {
         log: String? = nil,
         runAtLoad: Bool = false,
         environmentFromVault: Bool = false,
-        label: String? = nil
+        label: String? = nil,
+        onFailure: String? = nil,
+        errorLog: String? = nil,
+        directives: [String: String]? = nil
     ) {
         self.program = program
         self.workingDirectory = workingDirectory
@@ -214,10 +227,14 @@ public struct JobSpec: Codable, Sendable, Equatable {
         self.runAtLoad = runAtLoad
         self.environmentFromVault = environmentFromVault
         self.label = label
+        self.onFailure = onFailure
+        self.errorLog = errorLog
+        self.directives = directives
     }
 
     enum CodingKeys: String, CodingKey {
         case program, workingDirectory, schedule, keepAlive, log, runAtLoad, environmentFromVault, label
+        case onFailure, errorLog, directives
     }
 
     /// A manifest that names no `keepAlive` reads as kept alive when it declares no schedule, which is the same
@@ -233,6 +250,9 @@ public struct JobSpec: Codable, Sendable, Equatable {
         self.runAtLoad = try values.decodeIfPresent(Bool.self, forKey: .runAtLoad) ?? false
         self.environmentFromVault = try values.decodeIfPresent(Bool.self, forKey: .environmentFromVault) ?? false
         self.label = try values.decodeIfPresent(String.self, forKey: .label)
+        self.onFailure = try values.decodeIfPresent(String.self, forKey: .onFailure)
+        self.errorLog = try values.decodeIfPresent(String.self, forKey: .errorLog)
+        self.directives = try values.decodeIfPresent([String: String].self, forKey: .directives)
     }
 
     /// The two flags are written only when they are true, so an adopted job adds no key a reader has to skip.
@@ -250,6 +270,21 @@ public struct JobSpec: Codable, Sendable, Equatable {
             try values.encode(true, forKey: .environmentFromVault)
         }
         try values.encodeIfPresent(self.label, forKey: .label)
+        try values.encodeIfPresent(self.onFailure, forKey: .onFailure)
+        try values.encodeIfPresent(self.errorLog, forKey: .errorLog)
+        try values.encodeIfPresent(self.directives, forKey: .directives)
+    }
+
+    /// How the supervisor comes to run the job: on its timer, kept alive, once as it loads, or only when another unit
+    /// asks for it. An install starts the first three and never the last, because an on-demand unit is an alert.
+    public enum Start: String, Sendable, Equatable {
+        case timer, keep, load, demand
+    }
+
+    public var start: Start {
+        if self.schedule != nil { return .timer }
+        if self.keepAlive { return .keep }
+        return self.runAtLoad ? .load : .demand
     }
 }
 

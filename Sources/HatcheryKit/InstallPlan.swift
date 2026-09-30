@@ -134,13 +134,20 @@ public struct InstallPlan: Sendable, Equatable {
     /// The jobs that are kept alive, by label, with the program each runs. A job that runs for ever never reads a
     /// pulled checkout on its own, so an install restarts it when its checkout moves.
     public var longRunning: [String: String]
+    /// How the supervisor comes to run each job file's job, by the file's destination. An install starts a timer and
+    /// a kept-alive job, and never a job that only another unit asks for.
+    public var starts: [String: JobSpec.Start]
 
-    public init(host: String, platform: HostPlatform, things: [InstallKind], rendered: [String: String], longRunning: [String: String] = [:]) {
+    public init(
+        host: String, platform: HostPlatform, things: [InstallKind], rendered: [String: String],
+        longRunning: [String: String] = [:], starts: [String: JobSpec.Start] = [:]
+    ) {
         self.host = host
         self.platform = platform
         self.things = things
         self.rendered = rendered
         self.longRunning = longRunning
+        self.starts = starts
     }
 
     /// The remote lines that restart every kept-alive job whose program lives in this checkout.
@@ -174,6 +181,7 @@ public struct InstallPlan: Sendable, Equatable {
                 var things: [InstallKind] = []
                 var rendered: [String: String] = [:]
                 var longRunning: [String: String] = [:]
+                var starts: [String: JobSpec.Start] = [:]
                 let platform = stack.platform
                 let roost = Self.roostRoot(in: stack, platform: platform)
                 for service in stack.services {
@@ -185,17 +193,22 @@ public struct InstallPlan: Sendable, Equatable {
                     }
                     let label = HostProvider.jobLabel(for: service, platform: platform)
                     if job.keepAlive, let program = Self.program(of: job) { longRunning[label] = Self.homed(program) }
-                    guard let file = HostProvider.jobDestinations(for: service, platform: platform).first else { continue }
+                    // A job that reads its secrets from vault at start carries none in its file, so its rendering
+                    // takes the config alone. On 2026-09-30 the serve job's rendering held its token for want of this.
                     let environment = try ConfigSync.readDeclared(
                         config: ConfigSync.configURL(for: service, in: stack, manifestPath: entry.path),
-                        secrets: ConfigSync.secretsURL(for: service, in: stack, manifestPath: entry.path))
+                        secrets: job.environmentFromVault ? nil : ConfigSync.secretsURL(for: service, in: stack, manifestPath: entry.path))
                     let files = try HostProvider.jobFiles(for: service, platform: platform, environment: environment)
-                    if let first = files.first {
-                        rendered[file] = first.contents
-                        things.append(.job(label: label, file: file))
+                    // Every file of the job is a row: a scheduled job on Linux is a unit and its timer, and a timer
+                    // nobody compared is a schedule nobody checked.
+                    for (index, destination) in HostProvider.jobDestinations(for: service, platform: platform).enumerated()
+                    where index < files.count {
+                        rendered[destination] = files[index].contents
+                        starts[destination] = job.start
+                        things.append(.job(label: index == 0 ? label : (destination as NSString).lastPathComponent, file: destination))
                     }
                 }
-                plans.append(InstallPlan(host: host, platform: platform, things: things, rendered: rendered, longRunning: longRunning))
+                plans.append(InstallPlan(host: host, platform: platform, things: things, rendered: rendered, longRunning: longRunning, starts: starts))
             }
         }
         return plans
@@ -469,8 +482,23 @@ extension InstallPlan {
                 lines.append("launchctl bootout gui/$(id -u)/\(label) >/dev/null 2>&1 || true")
                 lines.append("launchctl bootstrap gui/$(id -u) \"$HOME/\(file)\"")
             case .linux:
+                let unit = (file as NSString).lastPathComponent
                 lines.append("systemctl --user daemon-reload")
-                lines.append("systemctl --user enable --now \(label)\(file.hasSuffix(".timer") ? "" : ".service")")
+                // The timer is what starts a scheduled job, a kept-alive or run-at-load job starts itself, and a job
+                // another unit asks for is only read again: starting the reconcile's alert would send the alert.
+                if file.hasSuffix(".timer") {
+                    lines.append("systemctl --user enable --now \(unit)")
+                } else {
+                    switch self.starts[file] ?? .keep {
+                    case .keep:
+                        lines.append("systemctl --user enable \(unit)")
+                        lines.append("systemctl --user restart \(unit)")
+                    case .load:
+                        lines.append("systemctl --user enable --now \(unit)")
+                    case .timer, .demand:
+                        break
+                    }
+                }
             }
             return lines
         }
