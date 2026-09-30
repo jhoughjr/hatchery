@@ -76,6 +76,7 @@ public struct LedgerRow: Sendable, Equatable {
     /// - `heldFrom`: another service's rotation turns it over, so the owner's row carries the date.
     /// - `declareRotation`: the issue date is unknown, and no rotation is declared to turn it over.
     /// - `declareClass`: the key declares no class, so the rotation refuses it until the kind file names one.
+    /// - `notRotated`: the kind file declares a rotation of none, with this reason, so nothing is owed, house#50.
     public enum Next: Sendable, Equatable {
         case nothing
         case rotate
@@ -84,6 +85,7 @@ public struct LedgerRow: Sendable, Equatable {
         case heldFrom(String)
         case declareRotation
         case declareClass
+        case notRotated(String)
     }
 
     /// Whether this row is put up for rotation: its issue date is unknown, and a rotation is how it becomes known.
@@ -92,7 +94,7 @@ public struct LedgerRow: Sendable, Equatable {
         case .rotate, .rotateByHand, .declareRotation:
             return true
 
-        case .nothing, .reseal, .heldFrom, .declareClass:
+        case .nothing, .reseal, .heldFrom, .declareClass, .notRotated:
             return false
         }
     }
@@ -189,6 +191,9 @@ public enum SecretLedger {
                 next = rotation.issuer.isManual ? .rotateByHand : .rotate
             }
 
+        case .unrotated?:
+            issuer = "not rotated"
+
         case nil:
             break
         }
@@ -207,6 +212,9 @@ public enum SecretLedger {
         case .token?, .sharedKey?, .password?, .address?:
             break
         }
+        // A rotation of none is a ruling that nothing is owed, so it wins over a class owed and a re-seal alike.
+        // The class stays owed in its own column.
+        if case .unrotated(let reason)? = entry.rotation { next = .notRotated(reason) }
 
         return LedgerRow(
             stack: stack,
@@ -247,7 +255,9 @@ public enum SecretLedger {
 extension SecretLedger {
     /// The reminder one key owes today, or `nil` when it owes none.
     /// A cannot-probe key with no typed expiry owes one too, because a reminder with no date can never fire.
+    /// A key with a rotation of none owes no reminder, because nobody turns it over.
     public static func reminder(key: String, entry: KindFile.EnvEntry, within days: Int, today: Date) -> String? {
+        if case .unrotated? = entry.rotation { return nil }
         guard let typed = entry.expires else {
             guard Self.cannotProbe(key: key, entry: entry) else { return nil }
             return "\(key) has no API to check it and no typed expiry, so no reminder can fire; "
@@ -369,6 +379,7 @@ extension SecretLedger {
         case .heldFrom(let owner): return "the owner's row, \(owner)"
         case .declareRotation: return "rotate; declare a rotation first"
         case .declareClass: return "declare a class first; the rotation refuses it until then"
+        case .notRotated(let reason): return "not rotated: \(reason)"
         }
     }
 }
@@ -398,7 +409,7 @@ public struct LedgerDocument: Codable, Sendable, Equatable {
         public var expiryNote: String?
         /// Whether `expires` is a review date, so a page says "review by" and not "expires".
         public var review: Bool
-        /// `nothing`, `rotate`, `rotateByHand`, `reseal`, `heldFrom`, `declareRotation`, or `declareClass`.
+        /// `nothing`, `rotate`, `rotateByHand`, `reseal`, `heldFrom`, `declareRotation`, `declareClass`, or `none`.
         public var next: String
         /// The owner's `stack/service` when `next` is `heldFrom`.
         public var owner: String?
@@ -411,10 +422,12 @@ public struct LedgerDocument: Codable, Sendable, Equatable {
         public var classOwed: Bool
         /// The database role of a password, which a page names beside the key.
         public var role: String?
+        /// The kind file's reason when `next` is `none`, so a page shows why nothing rotates the key.
+        public var noneReason: String?
 
         private enum CodingKeys: String, CodingKey {
             case stack, service, key, issuer, liveness, issued, firstSeen, expires, expiryNote, review, next, owner
-            case listedForRotation, recipe, classOwed, role
+            case listedForRotation, recipe, classOwed, role, noneReason
             case secretClass = "class"
         }
 
@@ -449,8 +462,10 @@ public struct LedgerDocument: Codable, Sendable, Equatable {
             case .heldFrom: self.next = "heldFrom"
             case .declareRotation: self.next = "declareRotation"
             case .declareClass: self.next = "declareClass"
+            case .notRotated: self.next = "none"
             }
             if case .heldFrom(let owner) = row.next { self.owner = owner } else { self.owner = nil }
+            if case .notRotated(let reason) = row.next { self.noneReason = reason } else { self.noneReason = nil }
             self.listedForRotation = row.listedForRotation
             self.recipe = row.recipe
             self.secretClass = row.secretClass?.rawValue

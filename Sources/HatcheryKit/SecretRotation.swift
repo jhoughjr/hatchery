@@ -343,7 +343,8 @@ public enum RotationPlanner {
             wanted = groups
         } else {
             let rotatable = kind.rotatableKeys()
-            for key in keys where !rotatable.contains(key) {
+            // A key with a rotation of none is named on purpose, so it is skipped with its reason and not refused.
+            for key in keys where !rotatable.contains(key) && kind.unrotatedReason(forKey: key) == nil {
                 throw RotationRefusal.notRotatable(key: key, service: service, rotatable: rotatable)
             }
             // A named half of the forge's pair brings its other half with it, because one issuer answers for
@@ -374,6 +375,18 @@ public enum RotationPlanner {
         return matching.compactMap { group in
             guard case .owned(let owner) = group.rotation else { return nil }
             return (keys: group.keys, owner: owner)
+        }
+    }
+
+    /// The named keys, or every key when none are named, that declare a rotation of none, each with its reason.
+    ///
+    /// `rotate` reads this to print why a key is not rotated, in place of a plan for it.
+    public static func unrotated(keys: [String], in kind: KindFile) -> [(keys: [String], reason: String)] {
+        let groups = kind.rotationGroups()
+        let matching = keys.isEmpty ? groups : groups.filter { group in group.keys.contains { keys.contains($0) } }
+        return matching.compactMap { group in
+            guard case .unrotated(let reason) = group.rotation else { return nil }
+            return (keys: group.keys, reason: reason)
         }
     }
 
@@ -490,7 +503,7 @@ public struct RotationTarget: Sendable {
 ///   moved on to the next one.
 /// - `failed`: the executor stopped partway; the printed report says where.
 /// - `dry`: `--dry-run`, or `--yes` was not given, so the plan printed and nothing ran.
-/// - `skipped`: another service owns this key's rotation, so it did not run here.
+/// - `skipped`: another service owns this key's rotation, or the key declares a rotation of none, so it did not run here.
 public struct RotationOutcome: Sendable, Equatable {
     public enum State: String, Sendable, Equatable {
         case run, refused, failed, dry, skipped
@@ -520,6 +533,7 @@ public struct RotationOutcome: Sendable, Equatable {
 public enum RotationRun {
     /// A manual issuer or an unreachable holder refuses that one key and the run goes on to the next; a key
     /// another service owns is skipped, because its rotation runs once, under that service, and never here.
+    /// A key with a rotation of none is skipped too, and its reason prints.
     /// The lines a person reads print as each key finishes, and the outcomes are handed back for the table
     /// that ends the run.
     public static func all(
@@ -578,6 +592,14 @@ public enum RotationRun {
                     tell(heading)
                     tell(classLine)
                     tell("    held from \(owner)")
+                    outcomes.append(
+                        RotationOutcome(
+                            stack: target.stack, service: target.service, keys: group.keys, state: .skipped))
+
+                case .unrotated(let reason):
+                    tell(heading)
+                    tell(classLine)
+                    tell("    not rotated  \(reason)")
                     outcomes.append(
                         RotationOutcome(
                             stack: target.stack, service: target.service, keys: group.keys, state: .skipped))

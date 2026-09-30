@@ -101,6 +101,9 @@ struct Secrets: AsyncParsableCommand {
 
                 case .owned(let owner):
                     print("    held from \(owner)")
+
+                case .unrotated(let reason):
+                    print("    not rotated  \(reason)")
                 }
             }
             let missing = resolved.kind.secretRotations().filter { $0.rotation == nil }
@@ -139,7 +142,8 @@ struct Secrets: AsyncParsableCommand {
                 A key issued by a person refuses the run and prints the recipe instead, and a holder the \
                 manifest does not know refuses it too, because a bearer nothing can reach keeps the old \
                 value after the new one is issued. A key another service owns is skipped, not run; that \
-                service's own rotation is what turns it over.
+                service's own rotation is what turns it over. A key that declares a rotation of none is \
+                skipped too, and its reason prints.
 
                 --all reads every named manifest and runs every declared rotation of every service it finds, \
                 in the same order, instead of the one service named on the command line. A refused key does \
@@ -203,12 +207,17 @@ struct Secrets: AsyncParsableCommand {
                 apps: resolved.apps,
                 hosts: resolved.hosts)
             let owned = RotationPlanner.owned(keys: self.keys, in: resolved.kind)
+            let unrotated = RotationPlanner.unrotated(keys: self.keys, in: resolved.kind)
 
             print("  \(resolved.stack.name)/\(resolved.service.name), \(plans.count) rotation(s):")
             plans.flatMap { $0.lines() }.forEach { print($0) }
             for entry in owned {
                 print("  \(entry.keys.joined(separator: " + "))")
                 print("    held from \(entry.owner)")
+            }
+            for entry in unrotated {
+                print("  \(entry.keys.joined(separator: " + "))")
+                print("    not rotated  \(entry.reason)")
             }
 
             guard self.yes, !self.dryRun else {
@@ -416,7 +425,8 @@ struct Secrets: AsyncParsableCommand {
                 LIVE reads cannot probe for a key no issuer API can check, such as an Apple private key or a Google \
                 client secret. Such a key is checked by use, and it never reads live. A key whose issue date is \
                 unknown shows the day the ledger first saw it and is put up for rotation; a finished rotation, or \
-                hatchery secrets issued, stamps the date.
+                hatchery secrets issued, stamps the date. A key whose kind file declares a rotation of none \
+                shows the reason as NEXT, is never put up for rotation, and owes no reminder.
 
                 The ledger file holds names and dates, never a value.
 

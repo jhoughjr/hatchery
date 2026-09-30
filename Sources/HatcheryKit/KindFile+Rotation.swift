@@ -17,23 +17,45 @@ extension KindFile {
         }
     }
 
-    /// What a secret's `rotation` key decodes to: a full declaration, or a note that another service's own
-    /// rotation is the one that turns this key over.
+    /// What a secret's `rotation` key decodes to: a full declaration, a note that another service's own
+    /// rotation is the one that turns this key over, or a ruling that nothing rotates it.
     ///
     /// - `declared`: this service issues the value and tells every holder, in ``Rotation``'s ruled order.
     /// - `owned`: `<stack>/<service>` runs the rotation that replaces this key. `holders` prints where it is
     ///   held rather than an issuer, `rotate` skips it rather than running it, and `rotate --all` counts it once,
     ///   under the owner, rather than running it again here.
+    /// - `unrotated`: written `{"none": "<reason>"}`. Nothing rotates this key, for the reason given, house#50.
+    ///   The ledger shows the reason and never puts the key up for rotation, and `rotate` skips it with the reason.
     public enum RotationDeclaration: Codable, Sendable, Equatable {
         case declared(Rotation)
         case owned(by: String)
+        case unrotated(reason: String)
 
         private enum CodingKeys: String, CodingKey {
-            case owner
+            case owner, issuer, holders
+            case unrotated = "none"
         }
 
+        /// A `none` with an empty reason, or with an issuer or holders beside it, fails here.
+        /// The lab passwords of 2026-09-30 are why a reason is required: a bare `none` hides the ruling from the next reader.
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let reason = try container.decodeIfPresent(String.self, forKey: .unrotated) {
+                guard !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .unrotated,
+                        in: container,
+                        debugDescription: "a rotation of none needs a reason")
+                }
+                guard !container.contains(.issuer), !container.contains(.holders), !container.contains(.owner) else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .unrotated,
+                        in: container,
+                        debugDescription: "a rotation of none takes no issuer, holders or owner")
+                }
+                self = .unrotated(reason: reason)
+                return
+            }
             if let owner = try container.decodeIfPresent(String.self, forKey: .owner) {
                 self = .owned(by: owner)
                 return
@@ -49,6 +71,10 @@ extension KindFile {
             case .owned(let owner):
                 var container = encoder.container(keyedBy: CodingKeys.self)
                 try container.encode(owner, forKey: .owner)
+
+            case .unrotated(let reason):
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(reason, forKey: .unrotated)
             }
         }
     }
@@ -296,8 +322,21 @@ extension KindFile {
 
     /// The keys a rotation is declared for, sorted by name, whether this service runs that rotation itself or
     /// another service owns it. `rotate` acts on the first kind and skips the second.
+    /// A key declared with a rotation of none is not in this list.
     public func rotatableKeys() -> [String] {
-        self.secretRotations().filter { $0.rotation != nil }.map(\.key)
+        self.secretRotations()
+            .filter { entry in
+                guard let rotation = entry.rotation else { return false }
+                if case .unrotated = rotation { return false }
+                return true
+            }
+            .map(\.key)
+    }
+
+    /// The reason nothing rotates one key, or `nil` when the key does not declare a rotation of none.
+    public func unrotatedReason(forKey key: String) -> String? {
+        guard case .unrotated(let reason)? = self.environment[key]?.rotation else { return nil }
+        return reason
     }
 
     /// The rotation this service runs for one key: its issuer and its holders.
@@ -335,10 +374,15 @@ extension KindFile {
     /// both keys declare the same rotation, and running it once replaces the pair. The same folding applies to
     /// two keys owned by the same service, which is one pointer read once rather than two.
     /// Two keys fold only when their classes match too, so a key with its class owed never runs inside a group that has one.
+    /// A key with a rotation of none never folds, so every such key gets its own line and its own outcome.
     public func rotationGroups() -> [(keys: [String], rotation: RotationDeclaration)] {
         var groups: [(keys: [String], rotation: RotationDeclaration)] = []
         for entry in self.secretRotations() {
             guard let rotation = entry.rotation else { continue }
+            if case .unrotated = rotation {
+                groups.append((keys: [entry.key], rotation: rotation))
+                continue
+            }
             let secretClass = self.environment[entry.key]?.secretClass
             if let index = groups.firstIndex(where: {
                 $0.rotation == rotation && self.environment[$0.keys[0]]?.secretClass == secretClass
