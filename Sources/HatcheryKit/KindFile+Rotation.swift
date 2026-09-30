@@ -59,6 +59,7 @@ extension KindFile {
     /// - `vaultS3Key`: vault rotates the app's S3 key pair, and answers both halves once.
     /// - `vaultSecret`: hatchery mints a value, and vault stores it under that name on that app.
     /// - `postgresRole`: a new password by `ALTER ROLE` on the named server's role.
+    /// - `vaultReseal`: hatchery mints a value, and vault re-seals every app secrets document and S3 key under it before any holder takes it.
     /// - `random`: hatchery mints this many bytes, because nothing else holds a claim on the value.
     /// - `manual`: a person issues it. The recipe is printed, and the run refuses to go on.
     ///
@@ -69,6 +70,7 @@ extension KindFile {
         case vaultS3Key(app: String)
         case vaultSecret(app: String, name: String)
         case postgresRole(server: String, role: String)
+        case vaultReseal
         case random(bytes: Int)
         case manual(recipe: String)
 
@@ -96,6 +98,9 @@ extension KindFile {
                     server: try container.decode(String.self, forKey: .server),
                     role: try container.decode(String.self, forKey: .role))
 
+            case "vaultReseal":
+                self = .vaultReseal
+
             case "random":
                 self = .random(bytes: try container.decodeIfPresent(Int.self, forKey: .bytes) ?? 32)
 
@@ -116,6 +121,7 @@ extension KindFile {
             case .vaultS3Key: return "vaultS3Key"
             case .vaultSecret: return "vaultSecret"
             case .postgresRole: return "postgresRole"
+            case .vaultReseal: return "vaultReseal"
             case .random: return "random"
             case .manual: return "manual"
             }
@@ -140,6 +146,9 @@ extension KindFile {
                 try container.encode("postgresRole", forKey: .type)
                 try container.encode(server, forKey: .server)
                 try container.encode(role, forKey: .role)
+
+            case .vaultReseal:
+                try container.encode("vaultReseal", forKey: .type)
 
             case .random(let bytes):
                 try container.encode("random", forKey: .type)

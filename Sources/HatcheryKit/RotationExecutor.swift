@@ -4,6 +4,7 @@ import Foundation
 
 /// One thing a rotation did, in the order it did it.
 ///
+/// - `ready`: a re-seal's own checks passed before anything was minted.
 /// - `issue`: the issuer answered with a new value.
 /// - `record`: the new values reached the service's secrets file, before any holder was told.
 /// - `hold`: a holder took the value.
@@ -12,7 +13,7 @@ import Foundation
 /// - `revoke`: a token's old value stopped working.
 public struct RotationStep: Sendable, Equatable {
     public enum Phase: String, Sendable, Equatable {
-        case issue, record, hold, restart, check, revoke
+        case ready, issue, record, hold, restart, check, revoke
     }
 
     public var phase: Phase
@@ -107,33 +108,66 @@ public struct RotationExecutor: Sendable {
     private let dokkuTargets: [String: String]
     /// Postgres server name to the shell account that can `docker exec` its container.
     private let adminTargets: [String: String]
+    /// App name to the secrets file of another service that holds a value this service issues.
+    /// A dokku holder takes the value in its config, and this is where the declaration keeps it, so a later apply does not put the old one back.
+    private let holderSecrets: [String: SecretsFile]
+    /// Waits between two reads of vault's re-seal check, while vault starts again.
+    private let pause: @Sendable (Int) async -> Void
+
+    /// How many times the re-seal check reads vault after the restart, and the seconds between two reads.
+    /// Twenty reads three seconds apart give a restarted vault a minute to answer before the run calls the check failed.
+    static let resealCheckAttempts = 20
+    static let resealCheckPause = 3
 
     public init(
         vault: VaultAdmin,
         secrets: SecretsFile,
         dokkuTargets: [String: String] = [:],
         adminTargets: [String: String] = [:],
+        holderSecrets: [String: SecretsFile] = [:],
         run: @escaping CommandRunner = ShellRunner.live,
-        mint: @escaping @Sendable (Int) -> String = { SecretMinter().token(bytes: $0) }
+        mint: @escaping @Sendable (Int) -> String = { SecretMinter().token(bytes: $0) },
+        pause: @escaping @Sendable (Int) async -> Void = { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000) }
     ) {
         self.vault = vault
         self.secrets = secrets
         self.dokkuTargets = dokkuTargets
         self.adminTargets = adminTargets
+        self.holderSecrets = holderSecrets
         self.run = run
         self.mint = mint
+        self.pause = pause
     }
 
     /// Runs one plan and reports what it did.
     public func execute(_ plan: RotationPlan) async -> RotationReport {
         var report = RotationReport(keys: plan.keys)
 
+        // A re-seal checks its own door and every holder before the mint, because after the re-seal nothing goes back by itself.
+        if case .vaultReseal = plan.rotation.issuer {
+            let ready = RotationStep(phase: .ready, what: "the operator token opens vault's admin routes, and every holder is running")
+            do {
+                try await self.resealReady(plan)
+                report.done.append(ready)
+            } catch {
+                report.stopped = ready
+                report.reason = Self.explain(error)
+                return report
+            }
+        }
+
         let values: [String: String]
+        var resealed: VaultResealCount?
         do {
-            values = try await self.issue(plan)
-            report.done.append(
-                RotationStep(
-                    phase: .issue, what: plan.rotation.issuer.label(service: plan.service)))
+            let issued = try await self.issue(plan)
+            values = issued.values
+            resealed = issued.resealed
+            var what = plan.rotation.issuer.label(service: plan.service)
+            if let resealed {
+                what += "; vault re-sealed \(resealed.appDocuments) app document(s) and \(resealed.s3Keys) S3 key(s), "
+                    + "and kept the old set in \(resealed.backup ?? "its data directory")"
+            }
+            report.done.append(RotationStep(phase: .issue, what: what))
         } catch {
             report.stopped = RotationStep(
                 phase: .issue, what: plan.rotation.issuer.label(service: plan.service))
@@ -154,6 +188,23 @@ public struct RotationExecutor: Sendable {
             report.stopped = RotationStep(phase: .record, what: "the secrets file")
             report.reason = "\(error)"
             return report
+        }
+
+        // A dokku holder of another service keeps the value in its own secrets file too, and only where that file already declares the key.
+        for holder in plan.rotation.holders {
+            guard case .dokkuConfig(let app, let key, _) = holder, app != plan.service, let file = self.holderSecrets[app] else { continue }
+            let step = RotationStep(phase: .record, what: "\(key) written to the secrets file of \(app)")
+            do {
+                var held = try file.read()
+                guard held[key] != nil else { continue }
+                held[key] = try Self.value(for: key, plan: plan, values: values)
+                try file.write(held)
+                report.done.append(step)
+            } catch {
+                report.stopped = step
+                report.reason = "\(error)"
+                return report
+            }
         }
 
         for holder in plan.rotation.holders {
@@ -184,6 +235,23 @@ public struct RotationExecutor: Sendable {
                 report.reason = Self.explain(error)
                 return report
             }
+        }
+
+        // A re-seal ends with vault opening every document under the new value, in the restarted process, house#45.
+        if let resealed {
+            let check = RotationStep(phase: .check, what: plan.rotation.issuer.checkLabel(service: plan.service))
+            do {
+                let found = try await self.awaitResealCheck(expecting: resealed)
+                report.done.append(
+                    RotationStep(
+                        phase: .check,
+                        what: "vault opens \(found.appDocuments) app document(s) and \(found.s3Keys) S3 key(s) under the new value"))
+            } catch {
+                report.stopped = check
+                report.reason = "\(error)"
+                return report
+            }
+            return report
         }
 
         // A token's run ends with the check and the revoke, house#56. Every other class ends at the restarts.
@@ -219,20 +287,26 @@ public struct RotationExecutor: Sendable {
 
     // MARK: - The issuers
 
+    /// What an issuer answered: the new value of every key, and for a re-seal what vault counted.
+    struct Issued {
+        var values: [String: String]
+        var resealed: VaultResealCount?
+    }
+
     /// The new value for every key of the plan, from whatever issues it.
-    private func issue(_ plan: RotationPlan) async throws -> [String: String] {
+    private func issue(_ plan: RotationPlan) async throws -> Issued {
         switch plan.rotation.issuer {
         case .vaultAppKey:
-            return [try plan.singleKey(): try await self.vault.rotateAppKey(app: plan.service)]
+            return Issued(values: [try plan.singleKey(): try await self.vault.rotateAppKey(app: plan.service)])
 
         case .vaultS3Key(let app):
             let pair = try await self.vault.rotateS3Key(app: app)
-            return try Self.s3Values(pair, keys: plan.keys)
+            return Issued(values: try Self.s3Values(pair, keys: plan.keys))
 
         case .vaultSecret(let app, let name):
             let value = self.mint(32)
             try await self.vault.setSecret(app: app, name: name, value: value)
-            return [try plan.singleKey(): value]
+            return Issued(values: [try plan.singleKey(): value])
 
         case .postgresRole(let server, let role):
             let password = self.mint(32)
@@ -240,14 +314,63 @@ public struct RotationExecutor: Sendable {
                 Self.alterRoleCommand(
                     server: server, role: role, password: password,
                     on: self.adminTargets[server] ?? server))
-            return try self.rewrittenURLs(plan, password: password)
+            return Issued(values: try self.rewrittenURLs(plan, password: password))
+
+        case .vaultReseal:
+            // Vault refuses and writes nothing while any one document does not open, and then the new value is dropped here unused.
+            let key = try plan.singleKey()
+            let value = self.mint(32)
+            let resealed = try await self.vault.reseal(secret: value)
+            return Issued(values: [key: value], resealed: resealed)
 
         case .random(let bytes):
-            return [try plan.singleKey(): self.mint(bytes)]
+            return Issued(values: [try plan.singleKey(): self.mint(bytes)])
 
         case .manual(let recipe):
             throw RotationRefusal.manualIssuer(keys: plan.keys, recipe: recipe)
         }
+    }
+
+    // MARK: - The re-seal
+
+    /// The checks a re-seal makes before the mint: the operator token opens vault's admin routes, and every dokku holder is running.
+    /// Vault's health route is the preflight's probe, so it is not asked again here.
+    private func resealReady(_ plan: RotationPlan) async throws {
+        _ = try await self.vault.whoami()
+        for holder in plan.rotation.holders {
+            guard case .dokkuConfig(let app, _, _) = holder else { continue }
+            let target = try Self.dokkuTarget(app, in: self.dokkuTargets)
+            let answer = try await self.run(Self.runningCommand(app, on: target))
+            guard String(decoding: answer, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "true" else {
+                throw RotationExecutorError.notRunning(app: app)
+            }
+        }
+    }
+
+    /// Asks dokku whether an app's containers are running, which it answers as `true`, `false` or `mixed`.
+    static func runningCommand(_ app: String, on target: String) -> [String] {
+        ["ssh", "-o", "BatchMode=yes", target, "ps:report", app, "--running"]
+    }
+
+    /// Reads vault's re-seal check until the restarted vault answers, and accepts it only when every value opens.
+    /// A read that fails while vault starts is tried again, and a read that names a file is final, because a restart does not change it.
+    private func awaitResealCheck(expecting resealed: VaultResealCount) async throws -> VaultResealCount {
+        var last: Error = RotationExecutorError.resealUnchecked
+        for attempt in 1...Self.resealCheckAttempts {
+            if attempt > 1 { await self.pause(Self.resealCheckPause) }
+            let found: VaultResealCount
+            do {
+                found = try await self.vault.resealCheck()
+            } catch {
+                last = error
+                continue
+            }
+            guard found.failed.isEmpty, found.appDocuments >= resealed.appDocuments, found.s3Keys >= resealed.s3Keys else {
+                throw RotationExecutorError.resealDoesNotOpen(found: found, expected: resealed)
+            }
+            return found
+        }
+        throw last
     }
 
     /// The plan's keys with the new password put back into the connection URL each one holds.
@@ -465,6 +588,9 @@ public struct RotationExecutor: Sendable {
 /// - `notASingleKey`: this issuer answers one value, and the plan holds more than one key.
 /// - `ambiguousValue`: a holder does not know which of the plan's values is its own, whether it renames the
 ///   value or, like `file`, names no key of its own at all, and the plan issued more than one.
+/// - `notRunning`: a re-seal holder's app is not running, so the run stops before the mint.
+/// - `resealDoesNotOpen`: the restarted vault does not open every value the re-seal sealed. The old set is in the backup vault named.
+/// - `resealUnchecked`: vault never answered the re-seal check after its restart.
 public enum RotationExecutorError: Error, CustomStringConvertible, Equatable {
     case noBox(app: String)
     case unknownRestart(app: String)
@@ -473,6 +599,9 @@ public enum RotationExecutorError: Error, CustomStringConvertible, Equatable {
     case notAPair(keys: [String])
     case notASingleKey(keys: [String])
     case ambiguousValue(key: String, keys: [String])
+    case notRunning(app: String)
+    case resealDoesNotOpen(found: VaultResealCount, expected: VaultResealCount)
+    case resealUnchecked
 
     public var description: String {
         switch self {
@@ -496,6 +625,18 @@ public enum RotationExecutorError: Error, CustomStringConvertible, Equatable {
         case .notASingleKey(let keys):
             return "this issuer answers one value, and the declaration gives it "
                 + keys.joined(separator: " + ")
+
+        case .notRunning(let app):
+            return "dokku does not report \(app) as running, so nothing is minted; start it and run the rotation again"
+
+        case .resealDoesNotOpen(let found, let expected):
+            let failed = found.failed.isEmpty ? "" : "; it does not open " + found.failed.joined(separator: ", ")
+            return "the restarted vault opens \(found.appDocuments) of \(expected.appDocuments) app document(s) "
+                + "and \(found.s3Keys) of \(expected.s3Keys) S3 key(s)\(failed). The old set is in \(expected.backup ?? "vault's reseal-backups"); "
+                + "roll back by the README's re-seal recipe"
+
+        case .resealUnchecked:
+            return "vault did not answer the re-seal check after its restart"
 
         case .ambiguousValue(let key, let keys):
             return "the holder names \(key), which the issuer did not answer for, and the plan issued "

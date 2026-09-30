@@ -85,7 +85,7 @@ struct SecretClassDeclarationTests {
         } throws: { error in
             guard case .classDoesNotFit(_, let key, let secretClass, let issuer) = error as? KindFileError else { return false }
             return key == "SESSION_SECRET" && secretClass == .sealingKey && issuer == "random"
-                && "\(error)".contains("a sealingKey takes manual")
+                && "\(error)".contains("a sealingKey takes vaultReseal, manual")
         }
     }
 
@@ -107,7 +107,7 @@ struct SecretClassDeclarationTests {
     func fitTable() {
         let issuers: [KindFile.Issuer] = [
             .vaultAppKey, .vaultS3Key(app: "a"), .vaultSecret(app: "a", name: "N"),
-            .postgresRole(server: "s", role: "r"), .random(bytes: 32), .manual(recipe: "r"),
+            .postgresRole(server: "s", role: "r"), .vaultReseal, .random(bytes: 32), .manual(recipe: "r"),
         ]
         for secretClass in SecretClass.allCases {
             let fitting = issuers.filter { secretClass.fits($0) }.map(\.typeName)
@@ -115,6 +115,9 @@ struct SecretClassDeclarationTests {
         }
         #expect(!SecretClass.sealingKey.fits(.random(bytes: 32)))
         #expect(!SecretClass.sealingKey.fits(.vaultSecret(app: "vault", name: "SESSION_SECRET")))
+        #expect(SecretClass.sealingKey.fits(.vaultReseal))
+        #expect(!SecretClass.sharedKey.fits(.vaultReseal))
+        #expect(!SecretClass.token.fits(.vaultReseal))
         #expect(!SecretClass.token.fits(.random(bytes: 32)))
         #expect(SecretClass.password.fits(.postgresRole(server: "rookery-pg", role: "rookery")))
     }
@@ -136,7 +139,7 @@ struct SecretClassRotationTests {
         } throws: { error in
             guard case .noResealRoute(let keys, let recipe) = error as? RotationRefusal else { return false }
             return keys == ["SESSION_SECRET"] && recipe == "re-seal every document first"
-                && "\(error)".contains("house#45")
+                && "\(error)".contains("Declare the vaultReseal issuer")
         }
     }
 

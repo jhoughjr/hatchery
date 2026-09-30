@@ -430,6 +430,7 @@ A secret is declared in its kind file with a `rotation`: who issues the value, a
 | `vaultS3Key` `app` | vault, a new S3 key for an app |
 | `vaultSecret` `app` `name` | vault, a named secret in an app's document |
 | `postgresRole` `server` `role` | a new password on a database role |
+| `vaultReseal` | hatchery, and vault re-seals every app secrets document and S3 key under the value before any holder takes it |
 | `random` `bytes` | hatchery, random bytes |
 | `manual` `recipe` | a person, by the recipe; the rotation refuses and prints it |
 
@@ -451,13 +452,15 @@ Every secret declares a `class`, ruled on 2026-09-30 in house#56. The class deci
 | --- | --- | --- | --- |
 | `token` | `vaultAppKey`, `vaultS3Key`, `manual` | the issuer answers | mint, place, check the new value works, revoke the old |
 | `sharedKey` | `vaultSecret`, `random`, `manual` | every holder's host answers | one value onto every holder, restart each |
-| `sealingKey` | `manual` | a re-seal route is declared, else refused | the re-seal route, never a mint and place |
+| `sealingKey` | `vaultReseal`, `manual` | the issuer is `vaultReseal`, the operator token works, and every holder is running; a `manual` issuer is refused | mint, re-seal, every holder, every restart, then vault opens every document |
 | `password` | `postgresRole`, `manual` | the database answers | the role change first, then every holder |
 | `address` | `manual` | none | refused with the recipe; a person renames it on the device |
 
 A URL that always carries a password is a `password`, because the URL belongs to the password. A shared key whose receiver takes a list declares `"list": true`, and its value overlaps: the new value joins the list, every holder moves, then the old value leaves. Today only vault's kiosk tokens, upload tokens and S3 keys do. A secret with no class cannot run: the rotation refuses that row, nothing guesses a class from its name, the ledger shows the class as owed, and the rest of the run goes on.
 
-vault's `SESSION_SECRET` is a `sealingKey`. vault seals every app's secrets document and every S3 key under a key derived from it, so a new value locks every document with no symptom until an app restarts. No re-seal route exists yet (house#45), so the rotation refuses it by the class rule and the ledger shows it as a re-seal, with its recipe.
+vault's `SESSION_SECRET` is a `sealingKey`. vault seals every app's secrets document and every S3 key under a key derived from it, so a new value locks every document with no symptom until an app restarts, which is what happened on 2026-09-28. Its issuer is `vaultReseal`, house#45, and its holders are vault and pulse, both `stopStart`. The run mints a value and calls `POST /api/admin/reseal`, which opens every document under the old value, seals it under the new one and refuses while any one does not open. Then vault's and pulse's secrets files take the value, both configs take it with `--no-restart`, vault restarts, pulse restarts, and the run reads `GET /api/admin/reseal` until the restarted vault opens every document. A dokku holder's own secrets file takes a held value too, where that file already declares the key, so the next apply of that service does not put the old value back.
+
+If the check fails, vault kept the old set in `DATA_DIR/reseal-backups/<stamp>/`, named in the report. Stop vault, copy that directory's files over `DATA_DIR/authz/`, set the old value back on vault and pulse and in both secrets files from the state backup sealed before the run, and start both. A check that fails on every file with vault still on the old value needs no rollback: set the new value from vault's secrets file on vault and restart it. A manual `sealingKey` issuer is still refused, and the ledger shows it as a re-seal with its recipe.
 
 `secrets ledger` lists every declared secret: its issuer, whether it is known to work, the day it was issued, its expiry, and what is owed next. The dates live in `~/.config/hatchery/ledger.json` on the Mac that runs the rotations, names and dates and never a value. A key the ledger has never seen with a date shows the day it first saw it and is put up for rotation; a finished rotation stamps the day, and `secrets issued <stack>/<service> KEY` stamps a key a person turned over by hand. A held key shows its owner's day. A key no API can check, an Apple private key or a Google client secret, never reads live, and a typed `expires` on such a key is a review date, when a person looks at the issuer's console. `--due <days>` prints the reminders owed inside the window and exits 1 when any is, which is how the daily publish carries a reminder to the board.
 

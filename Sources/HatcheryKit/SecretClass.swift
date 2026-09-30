@@ -10,7 +10,7 @@ import Foundation
 /// - `sharedKey`: one value that every holder carries and nobody issues. Every holder's host must answer first.
 ///   The run puts one value onto every holder and restarts each.
 /// - `sealingKey`: other values are sealed under it, so a new value locks them.
-///   It runs only through a declared re-seal route, never a mint and place.
+///   It runs only through a declared re-seal route, `vaultReseal`, never a mint and place.
 /// - `password`: a database role's password, and a URL that always carries it. The database must answer first.
 ///   The run changes the role, then every holder.
 /// - `address`: a name that works as a secret, such as an ntfy topic. It is never run.
@@ -29,7 +29,8 @@ extension SecretClass {
     /// Whether this class can be minted by this issuer.
     ///
     /// A mint issuer (`random` or `vaultSecret`) makes a value nobody can take back, so it fits only a shared key.
-    /// A sealing key never fits a mint, because a minted value locks everything sealed under the old one.
+    /// A sealing key never fits a plain mint, because a minted value locks everything sealed under the old one.
+    /// It fits `vaultReseal`, which re-seals everything under the new value before any holder takes it, house#45.
     public func fits(_ issuer: KindFile.Issuer) -> Bool {
         switch (self, issuer) {
         case (.token, .vaultAppKey), (.token, .vaultS3Key), (.token, .manual):
@@ -38,7 +39,7 @@ extension SecretClass {
         case (.sharedKey, .random), (.sharedKey, .vaultSecret), (.sharedKey, .manual):
             return true
 
-        case (.sealingKey, .manual):
+        case (.sealingKey, .vaultReseal), (.sealingKey, .manual):
             return true
 
         case (.password, .postgresRole), (.password, .manual):
@@ -57,7 +58,7 @@ extension SecretClass {
         switch self {
         case .token: return ["vaultAppKey", "vaultS3Key", "manual"]
         case .sharedKey: return ["vaultSecret", "random", "manual"]
-        case .sealingKey: return ["manual"]
+        case .sealingKey: return ["vaultReseal", "manual"]
         case .password: return ["postgresRole", "manual"]
         case .address: return ["manual"]
         }
@@ -72,7 +73,7 @@ extension SecretClass {
         switch self {
         case .token: return "the issuer answers"
         case .sharedKey: return "every holder's host answers"
-        case .sealingKey: return "a re-seal route is declared"
+        case .sealingKey: return "a re-seal route is declared, the operator token works, and every holder is running"
         case .password: return "the database answers"
         case .address: return "none"
         }
@@ -83,7 +84,7 @@ extension SecretClass {
         switch self {
         case .token: return "mint, place, check the new value works, revoke the old"
         case .sharedKey: return "one value onto every holder, restart each"
-        case .sealingKey: return "the re-seal route, never a mint and place"
+        case .sealingKey: return "mint, re-seal every document under the value, every holder, every restart, then vault opens every document"
         case .password: return "the role change first, then every holder"
         case .address: return "refused; a person renames it on the device"
         }

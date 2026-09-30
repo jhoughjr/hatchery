@@ -241,7 +241,8 @@ struct Secrets: AsyncParsableCommand {
                 vault: VaultAdmin(credential: credential),
                 secrets: .onDisk(at: Secrets.secretsURL(for: resolved)),
                 dokkuTargets: dokkuTargets,
-                adminTargets: adminTargets)
+                adminTargets: adminTargets,
+                holderSecrets: Secrets.holderSecrets(in: resolved.stack, manifestPath: resolved.manifestPath))
 
             // One plan at a time, and the first failure ends the run. A later plan would issue a value while
             // an earlier one had already turned a value over that nothing took.
@@ -291,7 +292,8 @@ struct Secrets: AsyncParsableCommand {
                                 adminTargets: adminTargets,
                                 secretsURL: Secrets.secretsURL(
                                     service: service, stack: stack, manifestPath: entry.path),
-                                carried: carried))
+                                carried: carried,
+                                holderSecrets: Secrets.holderSecrets(in: stack, manifestPath: entry.path)))
                     }
                 }
             }
@@ -316,7 +318,8 @@ struct Secrets: AsyncParsableCommand {
                         vault: vault,
                         secrets: .onDisk(at: target.secretsURL),
                         dokkuTargets: target.dokkuTargets,
-                        adminTargets: target.adminTargets)
+                        adminTargets: target.adminTargets,
+                        holderSecrets: target.holderSecrets)
                 },
                 probe: ShellRunner.live,
                 say: { line in
@@ -560,6 +563,17 @@ struct Secrets: AsyncParsableCommand {
     static func secretsURL(service: ServiceSpec, stack: StackSpec, manifestPath: String) -> URL {
         ConfigSync.secretsURL(for: service, in: stack, manifestPath: manifestPath)
             ?? ConfigSync.configURL(for: service, in: stack, manifestPath: manifestPath)
+    }
+
+    /// The secrets file of every service in a stack that has one, by service name.
+    /// A rotation writes a held value into the holder's own file too, so the next apply of that service does not set the old value again.
+    static func holderSecrets(in stack: StackSpec, manifestPath: String) -> [String: SecretsFile] {
+        var files: [String: SecretsFile] = [:]
+        for service in stack.services {
+            guard let url = ConfigSync.secretsURL(for: service, in: stack, manifestPath: manifestPath) else { continue }
+            files[service.name] = .onDisk(at: url)
+        }
+        return files
     }
 
     /// Every dokku app in every stack, with the target its commands arrive at.

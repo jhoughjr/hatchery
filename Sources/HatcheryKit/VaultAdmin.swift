@@ -70,6 +70,22 @@ public struct VaultRequirement: Codable, Sendable, Equatable {
     }
 }
 
+/// What vault's re-seal route counted: the app secrets documents and S3 keys it sealed or opened, and the files that did not open.
+/// The route answers counts and file names and never a value.
+public struct VaultResealCount: Sendable, Equatable {
+    public var appDocuments: Int
+    public var s3Keys: Int
+    public var backup: String?
+    public var failed: [String]
+
+    public init(appDocuments: Int, s3Keys: Int, backup: String? = nil, failed: [String] = []) {
+        self.appDocuments = appDocuments
+        self.s3Keys = s3Keys
+        self.backup = backup
+        self.failed = failed
+    }
+}
+
 /// Vault's admin routes, which mint the values a rotation issues.
 ///
 /// Every route here answers its value once. Vault stores only the sealed form, so a value not written down in
@@ -224,6 +240,31 @@ public struct VaultAdmin: Sendable {
         }
     }
 
+    /// Re-seals every app secrets document and every S3 key in vault under a new session secret, house#45.
+    /// Vault refuses with 409 and writes nothing while any one value does not open, and the error names the files.
+    public func reseal(secret: String) async throws -> VaultResealCount {
+        let route = "/api/admin/reseal"
+        let body = try JSONSerialization.data(withJSONObject: ["secret": secret])
+        let answer = try await self.call(route, method: "POST", body: body)
+        guard let documents = answer["app_documents"] as? Int, let s3Keys = answer["s3_keys"] as? Int else {
+            throw VaultAdminError.unreadable(route: route, field: "app_documents")
+        }
+        return VaultResealCount(appDocuments: documents, s3Keys: s3Keys, backup: answer["backup"] as? String)
+    }
+
+    /// Asks vault to open every sealed value under the secret it runs with now, and writes nothing.
+    /// A rotation calls this after vault restarts, because a document that does not open shows nothing until an app boots.
+    public func resealCheck() async throws -> VaultResealCount {
+        let route = "/api/admin/reseal"
+        let answer = try await self.call(route, method: "GET", body: nil)
+        guard let documents = answer["app_documents"] as? Int, let s3Keys = answer["s3_keys"] as? Int,
+              let failed = answer["failed"] as? [String]
+        else {
+            throw VaultAdminError.unreadable(route: route, field: "app_documents")
+        }
+        return VaultResealCount(appDocuments: documents, s3Keys: s3Keys, failed: failed)
+    }
+
     /// A legal secret name is `[A-Z][A-Z0-9_]{0,63}`, which is vault's own rule for one.
     /// The shape is an environment variable's, because that is where the value lands in the app that reads it.
     public static func isValidSecretName(_ name: String) -> Bool {
@@ -252,7 +293,11 @@ public struct VaultAdmin: Sendable {
 
         let (data, response) = try await self.exchange(request)
         let decoded = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        let message = (decoded["error"] as? String) ?? String(decoding: data, as: UTF8.self)
+        var message = (decoded["error"] as? String) ?? String(decoding: data, as: UTF8.self)
+        // The re-seal names the files it could not open, and a refusal that drops them leaves a person nothing to look at.
+        if let failed = decoded["failed"] as? [String], !failed.isEmpty {
+            message += ": " + failed.joined(separator: ", ")
+        }
         switch response.statusCode {
         case 200:
             return decoded

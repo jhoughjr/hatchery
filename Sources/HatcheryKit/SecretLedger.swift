@@ -71,7 +71,8 @@ public struct LedgerRow: Sendable, Equatable {
     /// - `nothing`: the issue date is known and nothing is owed.
     /// - `rotate`: the issue date is unknown, and hatchery can rotate it.
     /// - `rotateByHand`: the issue date is unknown, and a person rotates it by the recipe.
-    /// - `reseal`: a sealing key, so a new value locks what is sealed under the old one and it is never put up for rotation.
+    /// - `reseal`: a sealing key with no re-seal route declared.
+    ///   A new value locks what is sealed under the old one, so it is never put up for rotation.
     /// - `heldFrom`: another service's rotation turns it over, so the owner's row carries the date.
     /// - `declareRotation`: the issue date is unknown, and no rotation is declared to turn it over.
     /// - `declareClass`: the key declares no class, so the rotation refuses it until the kind file names one.
@@ -199,6 +200,8 @@ public enum SecretLedger {
 
         case .sealingKey?:
             if case .owned = entry.rotation { break }
+            // A sealing key with the declared re-seal route is rotated like any other key, house#45.
+            if case .declared(let rotation)? = entry.rotation, case .vaultReseal = rotation.issuer { break }
             next = .reseal
 
         case .token?, .sharedKey?, .password?, .address?:
@@ -224,7 +227,7 @@ public enum SecretLedger {
     /// The one word for who issues a value, short enough for a column.
     static func issuerWord(_ issuer: KindFile.Issuer) -> String {
         switch issuer {
-        case .vaultAppKey, .vaultS3Key, .vaultSecret:
+        case .vaultAppKey, .vaultS3Key, .vaultSecret, .vaultReseal:
             return "vault"
 
         case .postgresRole:
@@ -341,8 +344,8 @@ extension SecretLedger {
         for row in rows where row.next == .reseal {
             out.append("")
             out.append(
-                "  \(row.stack)/\(row.service) \(row.key) is a sealing key with no re-seal route declared, so it is re-sealed, "
-                    + "not rotated. The re-seal route is house#45. The recipe:")
+                "  \(row.stack)/\(row.service) \(row.key) is a sealing key with no re-seal route declared, so it is never minted "
+                    + "and placed. Declare the vaultReseal issuer to rotate it. The recipe:")
             out.append("    \(row.recipe ?? "none declared")")
         }
         return out

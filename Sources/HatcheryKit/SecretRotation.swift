@@ -21,6 +21,9 @@ extension KindFile.Issuer {
         case .postgresRole(let server, let role):
             return "a new password for role \(role) on \(server), by ALTER ROLE"
 
+        case .vaultReseal:
+            return "hatchery mints a value, and vault re-seals every app secrets document and S3 key under it"
+
         case .random(let bytes):
             return "hatchery mints \(bytes) random bytes"
 
@@ -50,6 +53,9 @@ extension KindFile.Issuer {
         case .vaultS3Key:
             return "no route checks an S3 pair, so the first signed request is the check"
 
+        case .vaultReseal:
+            return "vault opens every app secrets document and S3 key under the new value after its restart"
+
         case .vaultSecret, .postgresRole, .random, .manual:
             return "no check for this issuer"
         }
@@ -64,7 +70,7 @@ extension KindFile.Issuer {
         case .vaultS3Key:
             return "vault replaced the old pair when it minted the new one"
 
-        case .vaultSecret, .postgresRole, .random, .manual:
+        case .vaultSecret, .postgresRole, .vaultReseal, .random, .manual:
             return "nothing revokes the old value for this issuer"
         }
     }
@@ -242,6 +248,9 @@ public struct RotationPlan: Sendable, Equatable {
             lines.append("    checks   \(self.rotation.issuer.checkLabel(service: self.service))")
             lines.append("    revokes  \(self.rotation.issuer.revokeLabel)")
         }
+        if self.secretClass == .sealingKey {
+            lines.append("    checks   \(self.rotation.issuer.checkLabel(service: self.service))")
+        }
         return lines
     }
 }
@@ -256,7 +265,7 @@ public struct RotationPlan: Sendable, Equatable {
 /// - `manualIssuer`: only a person can issue this value. The recipe is the answer, and the run stops.
 /// - `noVaultSession`: this machine holds no vault credential, and a vault issuer needs one.
 /// - `noClass`: the key declares no class, so no check and no run shape apply. Nothing guesses one from the name.
-/// - `noResealRoute`: a sealing key with no declared re-seal route. A mint and place would lock everything sealed under the old value.
+/// - `noResealRoute`: a sealing key whose issuer is not `vaultReseal`. A mint and place would lock everything sealed under the old value.
 /// - `address`: an address is renamed by a person on the device, by the recipe.
 public enum RotationRefusal: Error, CustomStringConvertible, Equatable {
     case noKindFile(service: String, kind: String)
@@ -277,7 +286,7 @@ public enum RotationRefusal: Error, CustomStringConvertible, Equatable {
 
         case .noResealRoute(let keys, let recipe):
             return "\(keys.joined(separator: " + ")) is a sealingKey and declares no re-seal route, so it is never minted and placed; "
-                + "a new value would lock everything sealed under the old one. The re-seal route is house#45. The recipe:\n"
+                + "a new value would lock everything sealed under the old one. Declare the vaultReseal issuer to run it. The recipe:\n"
                 + "    \(recipe ?? "none declared")"
 
         case .address(let keys, let recipe):
@@ -379,8 +388,10 @@ public enum RotationPlanner {
             throw RotationRefusal.noClass(keys: plan.keys)
 
         case .sealingKey?:
-            // No issuer type is a re-seal route yet, so every sealing key is refused here until house#45 declares one.
-            throw RotationRefusal.noResealRoute(keys: plan.keys, recipe: plan.rotation.issuer.recipe)
+            // A sealing key runs only through the declared re-seal route, house#45. Any other issuer is refused with its recipe.
+            guard case .vaultReseal = plan.rotation.issuer else {
+                throw RotationRefusal.noResealRoute(keys: plan.keys, recipe: plan.rotation.issuer.recipe)
+            }
 
         case .address?:
             throw RotationRefusal.address(keys: plan.keys, recipe: plan.rotation.issuer.recipe)
@@ -452,11 +463,14 @@ public struct RotationTarget: Sendable {
     /// declares is planned for a service only when that service carries the key. With `nil` every declared
     /// rotation is planned, which is what a test with no sidecar wants.
     public var carried: Set<String>?
+    /// The secrets file of every other service in the stack, for a dokku holder that keeps the value there too.
+    public var holderSecrets: [String: SecretsFile]
 
     public init(
         stack: String, service: String, kind: KindFile,
         dokkuTargets: [String: String], adminTargets: [String: String], secretsURL: URL,
-        carried: Set<String>? = nil
+        carried: Set<String>? = nil,
+        holderSecrets: [String: SecretsFile] = [:]
     ) {
         self.stack = stack
         self.service = service
@@ -465,6 +479,7 @@ public struct RotationTarget: Sendable {
         self.adminTargets = adminTargets
         self.secretsURL = secretsURL
         self.carried = carried
+        self.holderSecrets = holderSecrets
     }
 }
 
@@ -658,7 +673,7 @@ public enum RotationPreflight {
                 let admin = adminTargets[server] ?? server
                 add("the database \(server) on \(admin)", Self.databaseProbe(server: server, on: admin))
 
-            case .vaultAppKey, .vaultS3Key, .vaultSecret:
+            case .vaultAppKey, .vaultS3Key, .vaultSecret, .vaultReseal:
                 add("vault at \(vault)", Self.vaultProbe(vault))
 
             case .random, .manual:
@@ -737,7 +752,7 @@ extension KindFile.Issuer {
     /// Whether this issuer goes through vault's admin routes, and therefore needs a session.
     public var needsVaultSession: Bool {
         switch self {
-        case .vaultAppKey, .vaultS3Key, .vaultSecret: return true
+        case .vaultAppKey, .vaultS3Key, .vaultSecret, .vaultReseal: return true
         case .postgresRole, .random, .manual: return false
         }
     }
