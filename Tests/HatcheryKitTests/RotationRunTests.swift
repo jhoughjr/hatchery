@@ -14,6 +14,7 @@ private func allFixtureTargets() throws -> [RotationTarget] {
               "kind": "alpha",
               "environment": {
                 "ALPHA_TOKEN": {
+                  "class": "sharedKey",
                   "secret": true,
                   "rotation": { "issuer": { "type": "random", "bytes": 32 }, "holders": [] }
                 }
@@ -28,10 +29,12 @@ private func allFixtureTargets() throws -> [RotationTarget] {
               "kind": "beta",
               "environment": {
                 "BETA_TOKEN": {
+                  "class": "token",
                   "secret": true,
                   "rotation": { "issuer": { "type": "manual", "recipe": "ask ops" }, "holders": [] }
                 },
                 "SHARED_KEY": {
+                  "class": "sharedKey",
                   "secret": true,
                   "rotation": { "owner": "vault/vault" }
                 }
@@ -78,6 +81,7 @@ struct RotationRunTests {
                   "kind": "gamma",
                   "environment": {
                     "GAMMA_TOKEN": {
+                      "class": "sharedKey",
                       "secret": true,
                       "rotation": {
                         "issuer": { "type": "random", "bytes": 32 },

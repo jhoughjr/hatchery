@@ -9,6 +9,7 @@
   "environment": {
     "FORGEJO__storage__MINIO_ACCESS_KEY_ID": {
       "required": true,
+      "class": "token",
       "secret": true,
       "why": "One half of the S3 key vault rotates. Vault answers both halves at once, so both keys carry the same rotation and hatchery runs it once.",
       "rotation": {
@@ -31,6 +32,7 @@
     },
     "FORGEJO__storage__MINIO_SECRET_ACCESS_KEY": {
       "required": true,
+      "class": "token",
       "secret": true,
       "why": "The other half of the same key. It declares the same rotation, because one issuer answers for both.",
       "rotation": {
@@ -53,6 +55,7 @@
     },
     "FORGE_PULL_TOKEN": {
       "required": true,
+      "class": "token",
       "secret": true,
       "why": "The forge access token the boxes log in to the package registry with. The forge refuses token creation over its API, so a person issues this one.",
       "rotation": {

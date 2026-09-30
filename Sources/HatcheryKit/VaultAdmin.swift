@@ -207,6 +207,23 @@ public struct VaultAdmin: Sendable {
 
     static func secretsRoute(_ app: String) -> String { "/api/admin/apps/\(app)/secrets" }
 
+    /// Asks vault to open an app's own secrets document with an app key, which is how a token rotation checks the new key works.
+    /// The call is the app's route and not an admin route, so the key goes as the bearer and the admin credential stays out of it.
+    public func checkAppKey(app: String, key: String) async throws {
+        let route = "/api/apps/\(app)/secrets"
+        guard let url = URL(string: self.baseURL + route) else {
+            throw VaultAdminError.unreadable(route: route, field: "address")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await self.exchange(request)
+        guard response.statusCode == 200 else {
+            let decoded = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            throw VaultAdminError.refused(route: route, message: (decoded["error"] as? String) ?? "status \(response.statusCode)")
+        }
+    }
+
     /// A legal secret name is `[A-Z][A-Z0-9_]{0,63}`, which is vault's own rule for one.
     /// The shape is an environment variable's, because that is where the value lands in the app that reads it.
     public static func isValidSecretName(_ name: String) -> Bool {

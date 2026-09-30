@@ -57,6 +57,11 @@ private final class Estate: @unchecked Sendable {
         case "/api/admin/apps/hatchery/secrets":
             body = ["ok": true, "names": ["HATCHERY_SERVE_TOKEN"]]
 
+        // The app's own route opens only for the key vault minted last, the way the real one does.
+        case "/api/apps/rookery/secrets":
+            let presented = request.value(forHTTPHeaderField: "Authorization") ?? ""
+            body = presented == "Bearer new-app-key" ? ["DATABASE_URL": "postgres://"] : ["error": "bad app key"]
+
         default:
             body = ["error": "no such route"]
         }
@@ -133,6 +138,25 @@ struct RotationExecutorTests {
                 "run ssh -o BatchMode=yes dokku@opi config:set rookery VAULT_APP_KEY=new-app-key",
             ])
         #expect(estate.secrets["VAULT_APP_KEY"] == "new-app-key")
+    }
+
+    @Test("a token's run ends by opening the app's document with the new key, then reports the old key revoked")
+    func tokenRunChecksThenRevokes() async throws {
+        let estate = Estate()
+        let kind = try recordedKind("rookery.kind.json")
+        let plan = RotationPlan(
+            service: "rookery",
+            keys: ["VAULT_APP_KEY"],
+            rotation: try #require(kind.rotation(forKey: "VAULT_APP_KEY")),
+            in: kind)
+
+        let report = await makeExecutor(estate).execute(plan)
+
+        #expect(plan.secretClass == .token)
+        #expect(report.succeeded)
+        #expect(estate.happened.last == "vault GET /api/apps/rookery/secrets")
+        #expect(report.done.map(\.phase) == [.issue, .record, .hold, .restart, .check, .revoke])
+        #expect(report.done.last?.what == "vault stopped the old key when it minted the new one")
     }
 
     @Test("the secrets file holds the new value before the first config:set, so a crash between them loses nothing")

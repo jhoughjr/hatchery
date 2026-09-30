@@ -14,22 +14,27 @@ private func vaultKind(appleExpires: String? = nil, googleExpires: String? = nil
               "kind": "vault",
               "environment": {
                 "APPLE_PRIVATE_KEY": {
+                  "class": "token",
                   "secret": true,
                   "rotation": { "issuer": { "type": "manual", "recipe": "App Store Connect, Keys" }, "holders": [] }
                 },
                 "GOOGLE_CLIENT_SECRET": {
+                  "class": "token",
                   "secret": true,
                   "rotation": { "issuer": { "type": "manual", "recipe": "Google Cloud console" }, "holders": [] }
                 },
                 "SESSION_SECRET": {
+                  "class": "sealingKey",
                   "secret": true,
                   "rotation": { "issuer": { "type": "manual", "recipe": "re-seal every document first" }, "holders": [] }
                 },
                 "NODE_KEY": {
+                  "class": "sharedKey",
                   "secret": true,
                   "rotation": { "issuer": { "type": "random", "bytes": 32 }, "holders": [] }
                 },
                 "HATCHERY_TOKEN": {
+                  "class": "sharedKey",
                   "secret": true,
                   "rotation": { "owner": "air/hatchery-serve" }
                 },

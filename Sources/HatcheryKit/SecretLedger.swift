@@ -35,6 +35,10 @@ public struct LedgerRow: Sendable, Equatable {
     public var next: Next
     /// The recipe of a person-issued key, which is the whole of what a person needs to turn it over.
     public var recipe: String?
+    /// The class the kind file declares, or `nil` when the class is owed.
+    public var secretClass: SecretClass?
+    /// The database role a password belongs to, from its `postgresRole` issuer, so a page names it beside the key.
+    public var role: String?
 
     /// What the ledger knows about whether the value works.
     ///
@@ -67,9 +71,10 @@ public struct LedgerRow: Sendable, Equatable {
     /// - `nothing`: the issue date is known and nothing is owed.
     /// - `rotate`: the issue date is unknown, and hatchery can rotate it.
     /// - `rotateByHand`: the issue date is unknown, and a person rotates it by the recipe.
-    /// - `reseal`: a new value locks what is sealed under the old one, so this key is never put up for rotation.
+    /// - `reseal`: a sealing key, so a new value locks what is sealed under the old one and it is never put up for rotation.
     /// - `heldFrom`: another service's rotation turns it over, so the owner's row carries the date.
     /// - `declareRotation`: the issue date is unknown, and no rotation is declared to turn it over.
+    /// - `declareClass`: the key declares no class, so the rotation refuses it until the kind file names one.
     public enum Next: Sendable, Equatable {
         case nothing
         case rotate
@@ -77,6 +82,7 @@ public struct LedgerRow: Sendable, Equatable {
         case reseal
         case heldFrom(String)
         case declareRotation
+        case declareClass
     }
 
     /// Whether this row is put up for rotation: its issue date is unknown, and a rotation is how it becomes known.
@@ -85,10 +91,13 @@ public struct LedgerRow: Sendable, Equatable {
         case .rotate, .rotateByHand, .declareRotation:
             return true
 
-        case .nothing, .reseal, .heldFrom:
+        case .nothing, .reseal, .heldFrom, .declareClass:
             return false
         }
     }
+
+    /// Whether the kind file owes this key a class.
+    public var classOwed: Bool { self.secretClass == nil }
 }
 
 /// The token ledger: every secret the declarations name, one row per service that carries it.
@@ -99,10 +108,6 @@ public enum SecretLedger {
     /// Keys whose issuer has no API that says the value works, as house#3 found: Apple's private keys and Google's client
     /// secrets. A kind file can mark any other key with `"probe": "none"`.
     public static let noIssuerAPI: Set<String> = ["APPLE_PRIVATE_KEY", "GOOGLE_CLIENT_SECRET"]
-
-    /// Keys that other values are sealed under, as `<kind> <KEY>`, which a rotation must never turn over.
-    /// On 2026-09-28 a minted `SESSION_SECRET` locked every app document in vault with no symptom until a restart.
-    public static let sealingKeys: Set<String> = ["vault SESSION_SECRET"]
 
     /// How many days before a typed expiry the ledger starts to remind.
     /// Thirty covers a person away for a fortnight and the daily publish that carries the reminder to the board.
@@ -134,7 +139,7 @@ public enum SecretLedger {
                     record: record)
                 // A held key is turned over by its owner's rotation, so the owner's stamp is its issue date.
                 // The owner's record is read and not seen, because the owner may sit on a manifest this run did not load.
-                if case .heldFrom(let owner) = row.next, row.issued == nil {
+                if case .owned(let owner)? = declared.rotation, row.issued == nil {
                     row.issued = state.records["\(owner) \(entry.key)"]?.issued
                 }
                 rows.append(row)
@@ -168,6 +173,7 @@ public enum SecretLedger {
 
         var issuer = "none declared"
         var recipe: String?
+        var role: String?
         var next: LedgerRow.Next = record.issued == nil ? .declareRotation : .nothing
         switch entry.rotation {
         case .owned(let owner)?:
@@ -176,7 +182,8 @@ public enum SecretLedger {
 
         case .declared(let rotation)?:
             issuer = Self.issuerWord(rotation.issuer)
-            if case .manual(let text) = rotation.issuer { recipe = text }
+            recipe = rotation.issuer.recipe
+            if case .postgresRole(_, let name) = rotation.issuer { role = name }
             if record.issued == nil {
                 next = rotation.issuer.isManual ? .rotateByHand : .rotate
             }
@@ -184,9 +191,18 @@ public enum SecretLedger {
         case nil:
             break
         }
-        // Checked last, so a sealing key is never put up for rotation even with its issue date unknown.
-        if Self.sealingKeys.contains("\(kind) \(key)") {
+        // The class is read last, so a sealing key is never put up for rotation with its issue date unknown, and a class owed
+        // is what the row asks for first. The owner's row carries a held sealing key's re-seal.
+        switch entry.secretClass {
+        case nil:
+            next = .declareClass
+
+        case .sealingKey?:
+            if case .owned = entry.rotation { break }
             next = .reseal
+
+        case .token?, .sharedKey?, .password?, .address?:
+            break
         }
 
         return LedgerRow(
@@ -200,7 +216,9 @@ public enum SecretLedger {
             expiry: expiry,
             review: cannotProbe,
             next: next,
-            recipe: recipe)
+            recipe: recipe,
+            secretClass: entry.secretClass,
+            role: role)
     }
 
     /// The one word for who issues a value, short enough for a column.
@@ -293,10 +311,11 @@ extension SecretLedger {
 extension SecretLedger {
     /// The ledger as a table, one row per token, then the recipe of every key that is re-sealed rather than rotated.
     public static func lines(for rows: [LedgerRow]) -> [String] {
-        let header = ["TOKEN", "ISSUER", "LIVE", "ISSUED", "EXPIRES", "NEXT"]
+        let header = ["TOKEN", "CLASS", "ISSUER", "LIVE", "ISSUED", "EXPIRES", "NEXT"]
         let cells = rows.map { row in
             [
-                "\(row.stack)/\(row.service) \(row.key)",
+                "\(row.stack)/\(row.service) \(row.key)" + (row.role.map { " (role \($0))" } ?? ""),
+                row.secretClass?.rawValue ?? "owed",
                 row.issuer,
                 row.liveness.rawValue,
                 row.issued ?? "unknown, first seen \(row.firstSeen)",
@@ -321,7 +340,9 @@ extension SecretLedger {
         out += cells.map(render)
         for row in rows where row.next == .reseal {
             out.append("")
-            out.append("  \(row.stack)/\(row.service) \(row.key) is re-sealed, not rotated. The recipe:")
+            out.append(
+                "  \(row.stack)/\(row.service) \(row.key) is a sealing key with no re-seal route declared, so it is re-sealed, "
+                    + "not rotated. The re-seal route is house#45. The recipe:")
             out.append("    \(row.recipe ?? "none declared")")
         }
         return out
@@ -344,6 +365,7 @@ extension SecretLedger {
         case .reseal: return "re-seal, not a rotation"
         case .heldFrom(let owner): return "the owner's row, \(owner)"
         case .declareRotation: return "rotate; declare a rotation first"
+        case .declareClass: return "declare a class first; the rotation refuses it until then"
         }
     }
 }
@@ -373,12 +395,25 @@ public struct LedgerDocument: Codable, Sendable, Equatable {
         public var expiryNote: String?
         /// Whether `expires` is a review date, so a page says "review by" and not "expires".
         public var review: Bool
-        /// `nothing`, `rotate`, `rotateByHand`, `reseal`, `heldFrom`, or `declareRotation`.
+        /// `nothing`, `rotate`, `rotateByHand`, `reseal`, `heldFrom`, `declareRotation`, or `declareClass`.
         public var next: String
         /// The owner's `stack/service` when `next` is `heldFrom`.
         public var owner: String?
         public var listedForRotation: Bool
         public var recipe: String?
+        /// The class, written `class`: `token`, `sharedKey`, `sealingKey`, `password` or `address`, or `nil` when it is owed.
+        /// The coop's Classified Secrets page groups by it.
+        public var secretClass: String?
+        /// Whether the kind file owes this key a class, so a page shows the gap and not an empty group.
+        public var classOwed: Bool
+        /// The database role of a password, which a page names beside the key.
+        public var role: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case stack, service, key, issuer, liveness, issued, firstSeen, expires, expiryNote, review, next, owner
+            case listedForRotation, recipe, classOwed, role
+            case secretClass = "class"
+        }
 
         public init(_ row: LedgerRow) {
             self.stack = row.stack
@@ -410,10 +445,14 @@ public struct LedgerDocument: Codable, Sendable, Equatable {
             case .reseal: self.next = "reseal"
             case .heldFrom: self.next = "heldFrom"
             case .declareRotation: self.next = "declareRotation"
+            case .declareClass: self.next = "declareClass"
             }
             if case .heldFrom(let owner) = row.next { self.owner = owner } else { self.owner = nil }
             self.listedForRotation = row.listedForRotation
             self.recipe = row.recipe
+            self.secretClass = row.secretClass?.rawValue
+            self.classOwed = row.classOwed
+            self.role = row.role
         }
     }
 

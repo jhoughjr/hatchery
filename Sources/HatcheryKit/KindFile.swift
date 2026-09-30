@@ -77,11 +77,23 @@ public struct KindFile: Codable, Sendable, Equatable {
         public var expires: String?
         /// Whether an API can say this value is live. Absent means the issuer has one, unless the ledger knows otherwise.
         public var probe: Probe?
+        /// What kind of value the secret is, written `class`, which decides the rotation's check and the shape of its run.
+        /// Absent means the class is owed: the rotation refuses the key, and nothing guesses a class from the name.
+        public var secretClass: SecretClass?
+        /// Whether the receiver takes a list of values, so a rotation adds the new value, moves the holders, and removes the old.
+        /// Only a shared key declares it, and today only vault's kiosk tokens, upload tokens and S3 keys do.
+        public var list: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case `default`, deployed, example, required, secret, why, rotation, expires, probe, list
+            case secretClass = "class"
+        }
 
         public init(
             default: String? = nil, deployed: String? = nil, example: String? = nil,
             required: Bool? = nil, secret: Bool? = nil, why: String? = nil,
-            rotation: RotationDeclaration? = nil, expires: String? = nil, probe: Probe? = nil
+            rotation: RotationDeclaration? = nil, expires: String? = nil, probe: Probe? = nil,
+            secretClass: SecretClass? = nil, list: Bool? = nil
         ) {
             self.default = `default`
             self.deployed = deployed
@@ -92,6 +104,8 @@ public struct KindFile: Codable, Sendable, Equatable {
             self.rotation = rotation
             self.expires = expires
             self.probe = probe
+            self.secretClass = secretClass
+            self.list = list
         }
     }
 
@@ -187,13 +201,24 @@ public struct KindFile: Codable, Sendable, Equatable {
 /// The way a kind file fails to load.
 ///
 /// - `invalidKind`: the file's `kind` is not lower-case letters, digits, and hyphens.
+/// - `classDoesNotFit`: a secret's class and its issuer do not fit, such as a sealing key with a `random` issuer.
+/// - `listNotShared`: a secret declares a list receiver and is not a shared key.
 public enum KindFileError: Error, CustomStringConvertible, Equatable {
     case invalidKind(file: String, kind: String)
+    case classDoesNotFit(file: String, key: String, secretClass: SecretClass, issuer: String)
+    case listNotShared(file: String, key: String)
 
     public var description: String {
         switch self {
         case .invalidKind(let file, let kind):
             return "\(file) declares kind '\(kind)', which must be lower-case letters, digits, and hyphens"
+
+        case .classDoesNotFit(let file, let key, let secretClass, let issuer):
+            return "\(file) declares \(key) a \(secretClass.rawValue) with a \(issuer) issuer, which do not fit; "
+                + "a \(secretClass.rawValue) takes \(secretClass.fittingIssuers.joined(separator: ", "))"
+
+        case .listNotShared(let file, let key):
+            return "\(file) declares \(key) a list, and only a sharedKey takes a list"
         }
     }
 }
@@ -207,14 +232,33 @@ extension KindFile {
         return kind.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
-    /// Reads and decodes a kind file, refusing one whose `kind` is not a usable service name.
+    /// Reads and decodes a kind file, refusing one whose `kind` is not a usable service name or whose secrets do not validate.
     public static func load(atPath path: String) throws -> KindFile {
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         let file = try JSONDecoder().decode(KindFile.self, from: data)
         guard isUsableKind(file.kind) else {
             throw KindFileError.invalidKind(file: path, kind: file.kind)
         }
+        try file.validateClasses(file: path)
         return file
+    }
+
+    /// Refuses a secret whose class does not fit its issuer, or that declares a list and is not a shared key.
+    /// A secret with no class passes here, because a missing class is owed and not wrong, and the rotation refuses that key alone.
+    public func validateClasses(file: String) throws {
+        for (key, entry) in self.environment.sorted(by: { $0.key < $1.key }) {
+            guard let secretClass = entry.secretClass else { continue }
+            if case .declared(let rotation)? = entry.rotation, !secretClass.fits(rotation.issuer) {
+                throw KindFileError.classDoesNotFit(
+                    file: file,
+                    key: key,
+                    secretClass: secretClass,
+                    issuer: rotation.issuer.typeName)
+            }
+            if entry.list == true, secretClass != .sharedKey {
+                throw KindFileError.listNotShared(file: file, key: key)
+            }
+        }
     }
 
     /// The environment contract this file declares, in the shape the built-in kinds carry.

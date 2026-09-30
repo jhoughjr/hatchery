@@ -12,6 +12,7 @@
     "ROOKERY_PORT": { "default": "8422", "deployed": "5000" },
     "VAULT_APP_KEY": {
       "required": true,
+      "class": "token",
       "secret": true,
       "why": "The app key rookery reads at boot to fetch its own secrets from vault.",
       "rotation": {
@@ -23,6 +24,7 @@
     },
     "ROOKERY_TOKEN": {
       "required": true,
+      "class": "sharedKey",
       "secret": true,
       "why": "The machine door. The coop bears the same token, so a new value invalidates the coop at the same moment.",
       "rotation": {
@@ -35,6 +37,7 @@
     },
     "DATABASE_URL": {
       "required": true,
+      "class": "password",
       "secret": true,
       "why": "The owner role's connection string. The password inside it is the role's, so the role is the issuer.",
       "rotation": {

@@ -483,7 +483,9 @@ struct Secrets: AsyncParsableCommand {
 
             SecretLedger.lines(for: rows).forEach { print($0) }
             print("")
-            print("  \(rows.count) token(s), \(rows.filter(\.listedForRotation).count) put up for rotation")
+            print(
+                "  \(rows.count) token(s), \(rows.filter(\.listedForRotation).count) put up for rotation, "
+                    + "\(rows.filter(\.classOwed).count) owe a class")
             reminders.forEach { print("  reminder: \($0)") }
         }
     }

@@ -109,6 +109,18 @@ extension KindFile {
             }
         }
 
+        /// The issuer's `type` as a kind file writes it.
+        public var typeName: String {
+            switch self {
+            case .vaultAppKey: return "vaultAppKey"
+            case .vaultS3Key: return "vaultS3Key"
+            case .vaultSecret: return "vaultSecret"
+            case .postgresRole: return "postgresRole"
+            case .random: return "random"
+            case .manual: return "manual"
+            }
+        }
+
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             switch self {
@@ -295,16 +307,33 @@ extension KindFile {
         return owner
     }
 
+    /// The class a group of keys shares, or `nil` when any of them declares none or two of them differ.
+    /// A group runs as one rotation, so keys that disagree on their class are a class owed and not a guess.
+    public func secretClass(forKeys keys: [String]) -> SecretClass? {
+        let classes = keys.map { self.environment[$0]?.secretClass }
+        guard let first = classes.first, let found = first, classes.allSatisfy({ $0 == found }) else { return nil }
+        return found
+    }
+
+    /// Whether any key of a group declares a list receiver.
+    public func takesList(keys: [String]) -> Bool {
+        keys.contains { self.environment[$0]?.list == true }
+    }
+
     /// The rotatable keys grouped by the declaration they share, in key order.
     ///
     /// The forge's S3 pair is why this exists for a declared rotation: one issuer answers for both halves, so
     /// both keys declare the same rotation, and running it once replaces the pair. The same folding applies to
     /// two keys owned by the same service, which is one pointer read once rather than two.
+    /// Two keys fold only when their classes match too, so a key with its class owed never runs inside a group that has one.
     public func rotationGroups() -> [(keys: [String], rotation: RotationDeclaration)] {
         var groups: [(keys: [String], rotation: RotationDeclaration)] = []
         for entry in self.secretRotations() {
             guard let rotation = entry.rotation else { continue }
-            if let index = groups.firstIndex(where: { $0.rotation == rotation }) {
+            let secretClass = self.environment[entry.key]?.secretClass
+            if let index = groups.firstIndex(where: {
+                $0.rotation == rotation && self.environment[$0.keys[0]]?.secretClass == secretClass
+            }) {
                 groups[index].keys.append(entry.key)
             } else {
                 groups.append((keys: [entry.key], rotation: rotation))

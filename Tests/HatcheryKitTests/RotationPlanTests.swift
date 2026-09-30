@@ -33,6 +33,9 @@ struct RotationPlanTests {
         #expect(
             plans.flatMap { $0.lines() } == [
                 "  ROOKERY_TOKEN",
+                "    class    sharedKey",
+                "    before   every holder's host answers",
+                "    runs     one value onto every holder, restart each",
                 "    issues   hatchery mints 32 random bytes",
                 "    holds    ROOKERY_TOKEN in the config of rookery, rolling deploy",
                 "    holds    ROOKERY_TOKEN in the config of coop, rolling deploy",
@@ -53,6 +56,9 @@ struct RotationPlanTests {
         #expect(
             plans.flatMap { $0.lines() } == [
                 "  DATABASE_URL",
+                "    class    password",
+                "    before   the database answers",
+                "    runs     the role change first, then every holder",
                 "    issues   a new password for role rookery on rookery-pg, by ALTER ROLE",
                 "    holds    DATABASE_URL in the config of rookery, rolling deploy",
                 "    restarts rookery, rolling deploy",
@@ -89,6 +95,9 @@ struct RotationPlanTests {
         #expect(
             plans.flatMap { $0.lines() } == [
                 "  HATCHERY_SERVE_TOKEN",
+                "    class    sharedKey",
+                "    before   every holder's host answers",
+                "    runs     one value onto every holder, restart each",
                 "    issues   hatchery mints a value, and vault stores it as HATCHERY_SERVE_TOKEN on hatchery",
                 "    holds    HATCHERY_SERVE_TOKEN read from vault at boot by hatchery",
                 "    holds    ROOST_HATCHERY_TOKEN in ~/.roostrc on mini",

@@ -8,9 +8,11 @@ import Foundation
 /// - `record`: the new values reached the service's secrets file, before any holder was told.
 /// - `hold`: a holder took the value.
 /// - `restart`: a holder was restarted so it reads the value.
+/// - `check`: a token's new value was checked against its issuer.
+/// - `revoke`: a token's old value stopped working.
 public struct RotationStep: Sendable, Equatable {
     public enum Phase: String, Sendable, Equatable {
-        case issue, record, hold, restart
+        case issue, record, hold, restart, check, revoke
     }
 
     public var phase: Phase
@@ -183,6 +185,22 @@ public struct RotationExecutor: Sendable {
                 return report
             }
         }
+
+        // A token's run ends with the check and the revoke, house#56. Every other class ends at the restarts.
+        guard plan.secretClass == .token else { return report }
+        let check = RotationStep(phase: .check, what: plan.rotation.issuer.checkLabel(service: plan.service))
+        do {
+            if case .vaultAppKey = plan.rotation.issuer, let key = values.values.first {
+                try await self.vault.checkAppKey(app: plan.service, key: key)
+            }
+            report.done.append(check)
+        } catch {
+            report.stopped = check
+            report.reason = "\(error)"
+            return report
+        }
+        // Vault's key and S3 routes stop the old value at the mint, so the revoke is a fact to report and not a call to make.
+        report.done.append(RotationStep(phase: .revoke, what: plan.rotation.issuer.revokeLabel))
         return report
     }
 

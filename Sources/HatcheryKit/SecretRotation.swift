@@ -34,6 +34,40 @@ extension KindFile.Issuer {
         if case .manual = self { return true }
         return false
     }
+
+    /// The recipe of a person-issued value, or `nil` for an issuer hatchery runs.
+    public var recipe: String? {
+        if case .manual(let recipe) = self { return recipe }
+        return nil
+    }
+
+    /// How a token run checks the new value works, for a person reading the plan.
+    public func checkLabel(service: String) -> String {
+        switch self {
+        case .vaultAppKey:
+            return "vault opens the secrets document of \(service) with the new key"
+
+        case .vaultS3Key:
+            return "no route checks an S3 pair, so the first signed request is the check"
+
+        case .vaultSecret, .postgresRole, .random, .manual:
+            return "no check for this issuer"
+        }
+    }
+
+    /// How a token run revokes the old value, for a person reading the plan.
+    public var revokeLabel: String {
+        switch self {
+        case .vaultAppKey:
+            return "vault stopped the old key when it minted the new one"
+
+        case .vaultS3Key:
+            return "vault replaced the old pair when it minted the new one"
+
+        case .vaultSecret, .postgresRole, .random, .manual:
+            return "nothing revokes the old value for this issuer"
+        }
+    }
 }
 
 extension KindFile.Holder {
@@ -135,17 +169,38 @@ public struct RotationPlan: Sendable, Equatable {
     public var service: String
     public var keys: [String]
     public var rotation: KindFile.Rotation
-
-    public init(service: String, keys: [String], rotation: KindFile.Rotation) {
-        self.service = service
-        self.keys = keys
-        self.rotation = rotation
-    }
+    /// The class the keys declare, or `nil` when it is owed, which the planner refuses.
+    public var secretClass: SecretClass?
+    /// Whether the receiver takes a list, so the new value overlaps the old until every holder has moved.
+    public var list: Bool
 
     /// The holders that restart something, in the order their restarts run.
     public var restarting: [KindFile.Holder] {
         self.rotation.holders.filter(\.restarts)
     }
+
+    public init(
+        service: String, keys: [String], rotation: KindFile.Rotation, secretClass: SecretClass? = nil, list: Bool = false
+    ) {
+        self.service = service
+        self.keys = keys
+        self.rotation = rotation
+        self.secretClass = secretClass
+        self.list = list
+    }
+
+    /// The plan for a group of keys, with the class and the list flag the kind file declares for them.
+    public init(service: String, keys: [String], rotation: KindFile.Rotation, in kind: KindFile) {
+        self.init(
+            service: service,
+            keys: keys,
+            rotation: rotation,
+            secretClass: kind.secretClass(forKeys: keys),
+            list: kind.takesList(keys: keys))
+    }
+
+    /// The line a list receiver's plan prints, and a refused one too, so the recipe a person follows keeps the overlap.
+    static let overlapLine = "    overlaps the new value joins the list, every holder moves, then the old value leaves it"
 
     /// The plan's one key, for an issuer that answers one value.
     ///
@@ -158,12 +213,20 @@ public struct RotationPlan: Sendable, Equatable {
         return key
     }
 
-    /// The plan as printed, in the ruled order: the issuer, then the holders, then the restarts.
+    /// The plan as printed: the class with its check and its run, then the issuer, the holders and the restarts in the ruled order.
     ///
     /// The order is the whole point of printing it. A value reissued elsewhere rotates issuer first, then the
     /// config, then the restart, and a reader who cannot see that order cannot check the plan against the rule.
     public func lines() -> [String] {
         var lines = ["  \(self.keys.joined(separator: " + "))"]
+        if let secretClass = self.secretClass {
+            lines.append("    class    \(secretClass.rawValue)")
+            lines.append("    before   \(secretClass.checkLabel)")
+            lines.append("    runs     \(secretClass.runLabel)")
+        }
+        if self.list {
+            lines.append(Self.overlapLine)
+        }
         lines.append("    issues   \(self.rotation.issuer.label(service: self.service))")
         for holder in self.rotation.holders {
             lines.append("    holds    \(holder.label)")
@@ -174,6 +237,10 @@ public struct RotationPlan: Sendable, Equatable {
             for holder in self.restarting {
                 lines.append("    restarts \(holder.restartLabel)")
             }
+        }
+        if self.secretClass == .token {
+            lines.append("    checks   \(self.rotation.issuer.checkLabel(service: self.service))")
+            lines.append("    revokes  \(self.rotation.issuer.revokeLabel)")
         }
         return lines
     }
@@ -188,6 +255,9 @@ public struct RotationPlan: Sendable, Equatable {
 ///   while one bearer of it was never told.
 /// - `manualIssuer`: only a person can issue this value. The recipe is the answer, and the run stops.
 /// - `noVaultSession`: this machine holds no vault credential, and a vault issuer needs one.
+/// - `noClass`: the key declares no class, so no check and no run shape apply. Nothing guesses one from the name.
+/// - `noResealRoute`: a sealing key with no declared re-seal route. A mint and place would lock everything sealed under the old value.
+/// - `address`: an address is renamed by a person on the device, by the recipe.
 public enum RotationRefusal: Error, CustomStringConvertible, Equatable {
     case noKindFile(service: String, kind: String)
     case notRotatable(key: String, service: String, rotatable: [String])
@@ -195,9 +265,25 @@ public enum RotationRefusal: Error, CustomStringConvertible, Equatable {
     case unknownHolder(key: String, holder: String, missing: String)
     case manualIssuer(keys: [String], recipe: String)
     case noVaultSession
+    case noClass(keys: [String])
+    case noResealRoute(keys: [String], recipe: String?)
+    case address(keys: [String], recipe: String?)
 
     public var description: String {
         switch self {
+        case .noClass(let keys):
+            return "\(keys.joined(separator: " + ")) declares no class, so it cannot run; declare one of "
+                + SecretClass.allCases.map(\.rawValue).joined(separator: ", ") + " in the kind file as class"
+
+        case .noResealRoute(let keys, let recipe):
+            return "\(keys.joined(separator: " + ")) is a sealingKey and declares no re-seal route, so it is never minted and placed; "
+                + "a new value would lock everything sealed under the old one. The re-seal route is house#45. The recipe:\n"
+                + "    \(recipe ?? "none declared")"
+
+        case .address(let keys, let recipe):
+            return "\(keys.joined(separator: " + ")) is an address, and a person renames it on the device. The recipe:\n"
+                + "    \(recipe ?? "none declared")"
+
         case .noKindFile(let service, let kind):
             return "\(service) declares kind '\(kind)', and the registry beside the manifest holds no file for it"
 
@@ -260,7 +346,7 @@ public enum RotationPlanner {
         // is where a caller reads it instead.
         let plans = wanted.compactMap { group -> RotationPlan? in
             guard case .declared(let rotation) = group.rotation else { return nil }
-            return RotationPlan(service: service, keys: group.keys, rotation: rotation)
+            return RotationPlan(service: service, keys: group.keys, rotation: rotation, in: kind)
         }
         for plan in plans {
             try Self.check(plan, apps: apps, hosts: hosts)
@@ -282,11 +368,26 @@ public enum RotationPlanner {
         }
     }
 
-    /// Refuses a plan hatchery must not run: a manual issuer, or a holder nothing can reach.
+    /// Refuses a plan hatchery must not run: a class owed, a class that never runs by a mint, a manual issuer, or a holder
+    /// nothing can reach.
     ///
-    /// The manual issuer is checked first. Its recipe is the useful answer, and a complaint about a holder
+    /// The class is checked first, then the manual issuer. Each answer carries a recipe, and a complaint about a holder
     /// would bury it.
     static func check(_ plan: RotationPlan, apps: Set<String>, hosts: Set<String>) throws {
+        switch plan.secretClass {
+        case nil:
+            throw RotationRefusal.noClass(keys: plan.keys)
+
+        case .sealingKey?:
+            // No issuer type is a re-seal route yet, so every sealing key is refused here until house#45 declares one.
+            throw RotationRefusal.noResealRoute(keys: plan.keys, recipe: plan.rotation.issuer.recipe)
+
+        case .address?:
+            throw RotationRefusal.address(keys: plan.keys, recipe: plan.rotation.issuer.recipe)
+
+        case .token?, .sharedKey?, .password?:
+            break
+        }
         if case .manual(let recipe) = plan.rotation.issuer {
             throw RotationRefusal.manualIssuer(keys: plan.keys, recipe: recipe)
         }
@@ -431,7 +532,7 @@ public enum RotationRun {
             for group in target.kind.rotationGroups() {
                 if let carried = target.carried, !group.keys.contains(where: { carried.contains($0) }) { continue }
                 guard case .declared(let rotation) = group.rotation else { continue }
-                let plan = RotationPlan(service: target.service, keys: group.keys, rotation: rotation)
+                let plan = RotationPlan(service: target.service, keys: group.keys, rotation: rotation, in: target.kind)
                 guard (try? RotationPlanner.check(plan, apps: apps, hosts: hosts)) != nil else { continue }
                 planned.append((target, plan))
             }
@@ -455,21 +556,25 @@ public enum RotationRun {
                 // are held to it. On 2026-09-23 the air job kind planned the serve token nine times, once per job.
                 if let carried = target.carried, !group.keys.contains(where: { carried.contains($0) }) { continue }
                 let heading = "  \(target.stack)/\(target.service) \(group.keys.joined(separator: " + "))"
+                let classLine = "    class    \(target.kind.secretClass(forKeys: group.keys)?.rawValue ?? "owed")"
 
                 switch group.rotation {
                 case .owned(let owner):
                     tell(heading)
+                    tell(classLine)
                     tell("    held from \(owner)")
                     outcomes.append(
                         RotationOutcome(
                             stack: target.stack, service: target.service, keys: group.keys, state: .skipped))
 
                 case .declared(let rotation):
-                    let plan = RotationPlan(service: target.service, keys: group.keys, rotation: rotation)
+                    let plan = RotationPlan(service: target.service, keys: group.keys, rotation: rotation, in: target.kind)
                     do {
                         try RotationPlanner.check(plan, apps: apps, hosts: hosts)
                     } catch {
                         tell(heading)
+                        tell(classLine)
+                        if plan.list { tell(RotationPlan.overlapLine) }
                         tell("    refused  \(error)")
                         outcomes.append(
                             RotationOutcome(
@@ -515,42 +620,60 @@ public struct RotationRunResult: Sendable {
 
 // MARK: - The preflight
 
-/// The hosts a set of plans reaches, probed before any issuer runs.
+/// The hosts a set of plans reaches, and the check each plan's class makes, probed before any issuer runs.
 ///
 /// A rotation that mints and then cannot deliver leaves a value in vault that no holder has. On 2026-09-27 a run
 /// from a Mac off the home network did exactly that for two keys, because the planner checks the manifest and not
-/// the network. So every distinct host a plan's holders, restarts and postgres issuers reach is asked once, before
-/// the first mint, and one silent host refuses the whole run.
+/// the network. So every distinct host a plan's holders and restarts reach is asked once, before the first mint, and
+/// one silent host refuses the whole run.
+/// The class adds its own check, house#56: a token's issuer answers, a password's database answers, and vault answers for a shared key it holds.
 public enum RotationPreflight {
-    /// One probe per host: what to run, and the host it names.
+    /// One probe per host or per check: what to run, and the name a person reads when it fails.
     public struct Probe: Sendable, Equatable {
         public var host: String
         public var command: [String]
     }
 
-    /// The distinct probes for these plans. `local` and its spellings are this machine and are never probed.
+    /// The distinct probes for these plans. `local` and its spellings are this machine, and no host probe asks it.
     /// A dokku target runs only dokku commands, so it is asked its `version`; a shell host is asked for `true`.
-    public static func probes(of plans: [(RotationPlan, [String: String], [String: String])]) -> [Probe] {
+    public static func probes(
+        of plans: [(RotationPlan, [String: String], [String: String])],
+        vault: String = VaultAdmin.defaultBaseURL
+    ) -> [Probe] {
         var seen: Set<String> = []
         var out: [Probe] = []
-        func add(_ host: String, _ command: [String]) {
-            guard !AdminChannel.isLocal(host), !seen.contains(host) else { return }
-            seen.insert(host)
-            out.append(Probe(host: host, command: command))
+        func add(_ name: String, _ command: [String]) {
+            guard !seen.contains(name) else { return }
+            seen.insert(name)
+            out.append(Probe(host: name, command: command))
+        }
+        func addHost(_ host: String, _ command: [String]) {
+            guard !AdminChannel.isLocal(host) else { return }
+            add(host, command)
         }
         for (plan, dokkuTargets, adminTargets) in plans {
-            if case .postgresRole(let server, _) = plan.rotation.issuer, let admin = adminTargets[server] {
-                add(admin, Self.shellProbe(admin))
+            // The class check: what must answer before anything is minted.
+            switch plan.rotation.issuer {
+            case .postgresRole(let server, _):
+                let admin = adminTargets[server] ?? server
+                add("the database \(server) on \(admin)", Self.databaseProbe(server: server, on: admin))
+
+            case .vaultAppKey, .vaultS3Key, .vaultSecret:
+                add("vault at \(vault)", Self.vaultProbe(vault))
+
+            case .random, .manual:
+                break
             }
+
             for holder in plan.rotation.holders {
                 switch holder {
                 case .dokkuConfig(let app, _, _):
-                    if let target = dokkuTargets[app] { add(target, Self.dokkuProbe(target)) }
+                    if let target = dokkuTargets[app] { addHost(target, Self.dokkuProbe(target)) }
                 case .roostrc(let host, _), .launchdEnvironment(let host, _, _), .systemdEnvironment(let host, _, _),
                     .file(let host, _):
-                    add(host, Self.shellProbe(host))
+                    addHost(host, Self.shellProbe(host))
                 case .vaultSecret:
-                    break
+                    add("vault at \(vault)", Self.vaultProbe(vault))
                 }
             }
         }
@@ -576,6 +699,17 @@ public enum RotationPreflight {
 
     static func dokkuProbe(_ target: String) -> [String] {
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", target, "version"]
+    }
+
+    /// Asks the postgres server whether it takes connections, over the same `docker exec` channel the role change uses.
+    static func databaseProbe(server: String, on target: String) -> [String] {
+        let hop = AdminChannel.isLocal(target) ? [] : ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", target]
+        return hop + ["docker", "exec", server, "pg_isready", "-U", "postgres"]
+    }
+
+    /// Asks vault's health route for a 2xx answer, through curl, so the probe runs through the same runner as the host probes.
+    static func vaultProbe(_ baseURL: String) -> [String] {
+        ["curl", "-fsS", "-o", "/dev/null", "--max-time", "6", baseURL + "/health"]
     }
 }
 
