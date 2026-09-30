@@ -80,7 +80,7 @@ struct Space: AsyncParsableCommand {
 struct Box: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Prepare machines to host stacks.",
-        subcommands: [Init.self, Order.self, Scan.self, Adopt.self, Space.self, Runner.self]
+        subcommands: [Init.self, Order.self, Scan.self, Adopt.self, Space.self, Runner.self, Voter.self]
     )
 
     /// A build box's runner: read off the box into its declaration, checked against it, or given new labels.

@@ -154,6 +154,18 @@ struct InstallRowsTests {
         #expect(mac.probe() == nil)
     }
 
+    @Test("a kept-alive job restarts when its checkout moves, and a job from another checkout does not")
+    func restartsAfterCheckout() {
+        let linux = InstallPlan(host: "jimmy@opi", platform: .linux, things: [], rendered: [:],
+                                longRunning: ["box-watch": "/home/jimmy/roost/bin/box-watch.py", "other": "/home/jimmy/elsewhere/run.sh"])
+        let steps = linux.restartSteps(afterCheckout: "/home/jimmy/roost")
+        #expect(steps.map(\.label) == ["box-watch"])
+        #expect(steps.first?.step == "systemctl --user restart box-watch.service")
+        let mac = InstallPlan(host: "local", platform: .darwin, things: [], rendered: [:], longRunning: ["net.x.watch": "/Users/j/repos/roost/bin/box-watch.py"])
+        #expect(mac.restartSteps(afterCheckout: "/Users/j/repos/roost").first?.step == "launchctl kickstart -k gui/$(id -u)/net.x.watch")
+        #expect(mac.restartSteps(afterCheckout: "/Users/j/repos/hatchery").isEmpty)
+    }
+
     @Test("the report groups rows by host and reads back whole")
     func report() throws {
         let rows = [

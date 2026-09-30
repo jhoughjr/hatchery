@@ -131,6 +131,27 @@ public struct InstallPlan: Sendable, Equatable {
     public var things: [InstallKind]
     /// The rendered job files by their destination under the home, which the host hashes beside its own copies.
     public var rendered: [String: String]
+    /// The jobs that are kept alive, by label, with the program each runs. A job that runs for ever never reads a
+    /// pulled checkout on its own, so an install restarts it when its checkout moves.
+    public var longRunning: [String: String]
+
+    public init(host: String, platform: HostPlatform, things: [InstallKind], rendered: [String: String], longRunning: [String: String] = [:]) {
+        self.host = host
+        self.platform = platform
+        self.things = things
+        self.rendered = rendered
+        self.longRunning = longRunning
+    }
+
+    /// The remote lines that restart every kept-alive job whose program lives in this checkout.
+    public func restartSteps(afterCheckout root: String) -> [(label: String, step: String)] {
+        self.longRunning.filter { $0.value.hasPrefix(root + "/") }.sorted { $0.key < $1.key }.map { label, _ in
+            switch self.platform {
+            case .darwin: return (label, "launchctl kickstart -k gui/$(id -u)/\(label)")
+            case .linux: return (label, "systemctl --user restart \(label).service")
+            }
+        }
+    }
 
     /// The tools a checkout is recognised by when it sits directly under the home, as `~/roost` does on the opi.
     public static let homeCheckouts: Set<String> = ["roost", "hatchery", "house", "statusgen"]
@@ -152,6 +173,7 @@ public struct InstallPlan: Sendable, Equatable {
                 guard let host = stack.host, !host.isEmpty else { continue }
                 var things: [InstallKind] = []
                 var rendered: [String: String] = [:]
+                var longRunning: [String: String] = [:]
                 let platform = stack.platform
                 let roost = Self.roostRoot(in: stack, platform: platform)
                 for service in stack.services {
@@ -162,6 +184,7 @@ public struct InstallPlan: Sendable, Equatable {
                         }
                     }
                     let label = HostProvider.jobLabel(for: service, platform: platform)
+                    if job.keepAlive, let program = Self.program(of: job) { longRunning[label] = Self.homed(program) }
                     guard let file = HostProvider.jobDestinations(for: service, platform: platform).first else { continue }
                     let environment = try ConfigSync.readDeclared(
                         config: ConfigSync.configURL(for: service, in: stack, manifestPath: entry.path),
@@ -172,7 +195,7 @@ public struct InstallPlan: Sendable, Equatable {
                         things.append(.job(label: label, file: file))
                     }
                 }
-                plans.append(InstallPlan(host: host, platform: platform, things: things, rendered: rendered))
+                plans.append(InstallPlan(host: host, platform: platform, things: things, rendered: rendered, longRunning: longRunning))
             }
         }
         return plans

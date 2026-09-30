@@ -121,6 +121,13 @@ struct Install: AsyncParsableCommand {
                     let output = try await execute(plan.command(steps.joined(separator: " && ")), nil)
                     if output.status == 0 {
                         print("  \(plan.host) \(row.name): installed")
+                        // A job that is kept alive holds the old code until it restarts, so it restarts now.
+                        if case .checkout(_, let root) = row.kind {
+                            for (label, step) in plan.restartSteps(afterCheckout: root) {
+                                let restarted = try await execute(plan.command(step), nil)
+                                print("  \(plan.host) \(label): \(restarted.status == 0 ? "restarted on the new checkout" : "did not restart, " + restarted.combined.trimmingCharacters(in: .whitespacesAndNewlines))")
+                            }
+                        }
                     } else {
                         failed = true
                         print("  \(plan.host) \(row.name): failed, \(output.combined.trimmingCharacters(in: .whitespacesAndNewlines))")
