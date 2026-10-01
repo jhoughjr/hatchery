@@ -17,23 +17,45 @@ extension KindFile {
         }
     }
 
-    /// What a secret's `rotation` key decodes to: a full declaration, or a note that another service's own
-    /// rotation is the one that turns this key over.
+    /// What a secret's `rotation` key decodes to: a full declaration, a note that another service's own
+    /// rotation is the one that turns this key over, or a ruling that nothing rotates it.
     ///
     /// - `declared`: this service issues the value and tells every holder, in ``Rotation``'s ruled order.
     /// - `owned`: `<stack>/<service>` runs the rotation that replaces this key. `holders` prints where it is
     ///   held rather than an issuer, `rotate` skips it rather than running it, and `rotate --all` counts it once,
     ///   under the owner, rather than running it again here.
+    /// - `unrotated`: written `{"none": "<reason>"}`. Nothing rotates this key, for the reason given, house#50.
+    ///   The ledger shows the reason and never puts the key up for rotation, and `rotate` skips it with the reason.
     public enum RotationDeclaration: Codable, Sendable, Equatable {
         case declared(Rotation)
         case owned(by: String)
+        case unrotated(reason: String)
 
         private enum CodingKeys: String, CodingKey {
-            case owner
+            case owner, issuer, holders
+            case unrotated = "none"
         }
 
+        /// A `none` with an empty reason, or with an issuer or holders beside it, fails here.
+        /// The lab passwords of 2026-09-30 are why a reason is required: a bare `none` hides the ruling from the next reader.
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let reason = try container.decodeIfPresent(String.self, forKey: .unrotated) {
+                guard !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .unrotated,
+                        in: container,
+                        debugDescription: "a rotation of none needs a reason")
+                }
+                guard !container.contains(.issuer), !container.contains(.holders), !container.contains(.owner) else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .unrotated,
+                        in: container,
+                        debugDescription: "a rotation of none takes no issuer, holders or owner")
+                }
+                self = .unrotated(reason: reason)
+                return
+            }
             if let owner = try container.decodeIfPresent(String.self, forKey: .owner) {
                 self = .owned(by: owner)
                 return
@@ -49,6 +71,10 @@ extension KindFile {
             case .owned(let owner):
                 var container = encoder.container(keyedBy: CodingKeys.self)
                 try container.encode(owner, forKey: .owner)
+
+            case .unrotated(let reason):
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(reason, forKey: .unrotated)
             }
         }
     }
@@ -61,6 +87,10 @@ extension KindFile {
     /// - `postgresRole`: a new password by `ALTER ROLE` on the named server's role.
     /// - `vaultReseal`: hatchery mints a value, and vault re-seals every app secrets document and S3 key under it before any holder takes it.
     /// - `random`: hatchery mints this many bytes, because nothing else holds a claim on the value.
+    /// - `forgeToken`: the forge's CLI on the opi mints an access token of this name and these scopes for jimmy.
+    ///   The forge refuses a second token of one name, so the run retires the token of this name, and every name in `retires`, first.
+    /// - `homeAssistantToken`: Home Assistant makes a long-lived token, signed in with the token the service holds now.
+    ///   The old token is deleted only after every holder has the new one, house#47.
     /// - `manual`: a person issues it. The recipe is printed, and the run refuses to go on.
     ///
     /// `vaultAppKey` names no app, because the app is the service's own vault app and the service already
@@ -72,10 +102,12 @@ extension KindFile {
         case postgresRole(server: String, role: String)
         case vaultReseal
         case random(bytes: Int)
+        case forgeToken(name: String, scopes: String, retires: [String])
+        case homeAssistantToken(url: String, name: String)
         case manual(recipe: String)
 
         private enum CodingKeys: String, CodingKey {
-            case type, app, name, server, role, bytes, recipe
+            case type, app, name, server, role, bytes, recipe, scopes, retires, url
         }
 
         public init(from decoder: Decoder) throws {
@@ -104,6 +136,23 @@ extension KindFile {
             case "random":
                 self = .random(bytes: try container.decodeIfPresent(Int.self, forKey: .bytes) ?? 32)
 
+            case "forgeToken":
+                let name = try container.decode(String.self, forKey: .name)
+                let scopes = try container.decode(String.self, forKey: .scopes)
+                let retires = try container.decodeIfPresent([String].self, forKey: .retires) ?? []
+                // The names and scopes travel in the remote command line, so a character a shell reads is refused here.
+                guard ([name, scopes] + retires).allSatisfy(ForgeTokenIssuer.isPlainWord) else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .name, in: container,
+                        debugDescription: "a forge token's name, scopes and retired names take letters, digits, ':', ',', '-' and '_' only")
+                }
+                self = .forgeToken(name: name, scopes: scopes, retires: retires)
+
+            case "homeAssistantToken":
+                self = .homeAssistantToken(
+                    url: try container.decode(String.self, forKey: .url),
+                    name: try container.decode(String.self, forKey: .name))
+
             case "manual":
                 self = .manual(recipe: try container.decode(String.self, forKey: .recipe))
 
@@ -123,6 +172,8 @@ extension KindFile {
             case .postgresRole: return "postgresRole"
             case .vaultReseal: return "vaultReseal"
             case .random: return "random"
+            case .forgeToken: return "forgeToken"
+            case .homeAssistantToken: return "homeAssistantToken"
             case .manual: return "manual"
             }
         }
@@ -154,6 +205,17 @@ extension KindFile {
                 try container.encode("random", forKey: .type)
                 try container.encode(bytes, forKey: .bytes)
 
+            case .forgeToken(let name, let scopes, let retires):
+                try container.encode("forgeToken", forKey: .type)
+                try container.encode(name, forKey: .name)
+                try container.encode(scopes, forKey: .scopes)
+                if !retires.isEmpty { try container.encode(retires, forKey: .retires) }
+
+            case .homeAssistantToken(let url, let name):
+                try container.encode("homeAssistantToken", forKey: .type)
+                try container.encode(url, forKey: .url)
+                try container.encode(name, forKey: .name)
+
             case .manual(let recipe):
                 try container.encode("manual", forKey: .type)
                 try container.encode(recipe, forKey: .recipe)
@@ -169,6 +231,9 @@ extension KindFile {
     /// - `systemdEnvironment`: a key in a systemd unit's environment, with the unit started again.
     /// - `vaultSecret`: a holder that reads the value from vault at boot, so it takes no write and only restarts.
     /// - `file`: the value written whole into a file on a host, at a path the declaration names, mode 600.
+    /// - `vaultDocument`: the value written into a vault app's secrets document, which its readers fetch at each use, so nothing restarts.
+    /// - `forgeRepoSecret`: an Actions secret of this name, on every forge repository that holds one when the run starts.
+    ///   CI reads it at each job, so nothing restarts.
     ///
     /// A shared value has several holders, and every one of them is named here. A bearer invalidates every
     /// holder at once, so a holder this list forgets is the outage the declaration promised would not happen.
@@ -179,6 +244,8 @@ extension KindFile {
         case systemdEnvironment(host: String, unit: String, key: String)
         case vaultSecret(app: String, name: String)
         case file(host: String, path: String)
+        case vaultDocument(app: String, name: String)
+        case forgeRepoSecret(name: String)
 
         private enum CodingKeys: String, CodingKey {
             case type, app, key, restart, host, label, unit, name, path
@@ -220,6 +287,14 @@ extension KindFile {
                 self = .file(
                     host: try container.decode(String.self, forKey: .host),
                     path: try container.decode(String.self, forKey: .path))
+
+            case "vaultDocument":
+                self = .vaultDocument(
+                    app: try container.decode(String.self, forKey: .app),
+                    name: try container.decode(String.self, forKey: .name))
+
+            case "forgeRepoSecret":
+                self = .forgeRepoSecret(name: try container.decode(String.self, forKey: .name))
 
             default:
                 throw DecodingError.dataCorruptedError(
@@ -263,6 +338,15 @@ extension KindFile {
                 try container.encode("file", forKey: .type)
                 try container.encode(host, forKey: .host)
                 try container.encode(path, forKey: .path)
+
+            case .vaultDocument(let app, let name):
+                try container.encode("vaultDocument", forKey: .type)
+                try container.encode(app, forKey: .app)
+                try container.encode(name, forKey: .name)
+
+            case .forgeRepoSecret(let name):
+                try container.encode("forgeRepoSecret", forKey: .type)
+                try container.encode(name, forKey: .name)
             }
         }
     }
@@ -296,8 +380,21 @@ extension KindFile {
 
     /// The keys a rotation is declared for, sorted by name, whether this service runs that rotation itself or
     /// another service owns it. `rotate` acts on the first kind and skips the second.
+    /// A key declared with a rotation of none is not in this list.
     public func rotatableKeys() -> [String] {
-        self.secretRotations().filter { $0.rotation != nil }.map(\.key)
+        self.secretRotations()
+            .filter { entry in
+                guard let rotation = entry.rotation else { return false }
+                if case .unrotated = rotation { return false }
+                return true
+            }
+            .map(\.key)
+    }
+
+    /// The reason nothing rotates one key, or `nil` when the key does not declare a rotation of none.
+    public func unrotatedReason(forKey key: String) -> String? {
+        guard case .unrotated(let reason)? = self.environment[key]?.rotation else { return nil }
+        return reason
     }
 
     /// The rotation this service runs for one key: its issuer and its holders.
@@ -314,6 +411,16 @@ extension KindFile {
     public func owner(forKey key: String) -> String? {
         guard case .owned(let owner)? = self.environment[key]?.rotation else { return nil }
         return owner
+    }
+
+    /// The secret keys whose every holder is a vault document or a forge repository, so no service file names them.
+    /// The declaration carries these keys itself: the ledger lists them and `rotate --all` plans them for the service whose kind declares them.
+    public func keysHeldOutsideFiles() -> Set<String> {
+        Set(
+            self.environment.compactMap { key, entry -> String? in
+                guard entry.secret == true, case .declared(let rotation)? = entry.rotation, !rotation.holders.isEmpty else { return nil }
+                return rotation.holders.allSatisfy(\.isOutsideFiles) ? key : nil
+            })
     }
 
     /// The class a group of keys shares, or `nil` when any of them declares none or two of them differ.
@@ -335,10 +442,15 @@ extension KindFile {
     /// both keys declare the same rotation, and running it once replaces the pair. The same folding applies to
     /// two keys owned by the same service, which is one pointer read once rather than two.
     /// Two keys fold only when their classes match too, so a key with its class owed never runs inside a group that has one.
+    /// A key with a rotation of none never folds, so every such key gets its own line and its own outcome.
     public func rotationGroups() -> [(keys: [String], rotation: RotationDeclaration)] {
         var groups: [(keys: [String], rotation: RotationDeclaration)] = []
         for entry in self.secretRotations() {
             guard let rotation = entry.rotation else { continue }
+            if case .unrotated = rotation {
+                groups.append((keys: [entry.key], rotation: rotation))
+                continue
+            }
             let secretClass = self.environment[entry.key]?.secretClass
             if let index = groups.firstIndex(where: {
                 $0.rotation == rotation && self.environment[$0.keys[0]]?.secretClass == secretClass

@@ -4,12 +4,14 @@ import Foundation
 ///
 /// Adopt and `config audit` read a service's own word here before falling back to the
 /// built-in table, so a kind hatchery does not know built in still gets a real contract.
+/// The directory is the real manifest file's, through any symlink: `~/.config/hatchery/hatchery.json` links into
+/// infra-state, and a registry beside the link would sit outside the repository and its seal.
 public struct KindRegistry: Sendable {
     private let directory: String
 
     public init(manifestPath: String) {
         self.directory = Paths.join(
-            URL(fileURLWithPath: manifestPath).deletingLastPathComponent().path, "kinds")
+            URL(fileURLWithPath: manifestPath).resolvingSymlinksInPath().deletingLastPathComponent().path, "kinds")
     }
 
     private func path(for kind: String) -> String {

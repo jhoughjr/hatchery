@@ -446,6 +446,8 @@ A value never goes into a command's arguments, because `ps` on the Mac and on th
 
 A key another service turns over is declared as `{ "rotation": { "owner": "<stack>/<service>" } }`, and its row points at the owner. A kind shared by several jobs declares a key once, and only the jobs whose config or secrets file carries it are planned, so a shared kind rotates once per issuer.
 
+A key that nothing rotates is declared as `{ "rotation": { "none": "<reason>" } }`, house#50. The reason is required, and a `none` beside an issuer, holders or an owner fails when the kind file loads. The ledger shows the reason as the row's next step, never puts the key up for rotation, and gives it no reminder. `rotate` and `rotate --all` skip the key and print the reason. The lab database passwords of `mwstack-pg-dev` and `mwstack-pg-staging` on the box declare it, because a person resets them only when the lab is rebuilt.
+
 `secrets rotate --all` runs every declared rotation on every manifest. Before its first issuer it probes every host it will touch, and a silent host refuses the whole run, because a value minted in vault with no holder able to take it is the failure of 2026-09-27. Lines print as each step finishes. A person-issued key is refused with its recipe.
 
 Every secret declares a `class`, ruled on 2026-09-30 in house#56. The class decides the check before anything is minted and the shape of the run, and the issuer still says who mints. A class and an issuer that do not fit fail when the kind file loads.
@@ -466,7 +468,7 @@ If the check fails, vault kept the old set in `DATA_DIR/reseal-backups/<stamp>/`
 
 `secrets ledger` lists every declared secret: its issuer, whether it is known to work, the day it was issued, its expiry, and what is owed next. The dates live in `~/.config/hatchery/ledger.json` on the Mac that runs the rotations, names and dates and never a value. A key the ledger has never seen with a date shows the day it first saw it and is put up for rotation; a finished rotation stamps the day, and `secrets issued <stack>/<service> KEY` stamps a key a person turned over by hand. A held key shows its owner's day. A key no API can check, an Apple private key or a Google client secret, never reads live, and a typed `expires` on such a key is a review date, when a person looks at the issuer's console. `--due <days>` prints the reminders owed inside the window and exits 1 when any is, which is how the daily publish carries a reminder to the board.
 
-`secrets ledger --publish` sends the same rows as one document to pulse's `/api/ledger` with the roost node key, beside the declaration, and the coop's Tokens page draws them with the owed tokens first. `house-rotate` publishes after every run, and the air runs it daily.
+`secrets ledger --publish` sends the same rows as one document to pulse's `/api/ledger` with the roost node key, beside the declaration, and the coop's Tokens page draws them with the owed tokens first. A row with a rotation of none has `next` set to `none` and carries the kind file's reason in `noneReason`. `house-rotate` publishes after every run, and the air runs it daily.
 
 ### Installing what a host declares
 

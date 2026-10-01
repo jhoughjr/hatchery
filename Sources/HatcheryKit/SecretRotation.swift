@@ -27,6 +27,14 @@ extension KindFile.Issuer {
         case .random(let bytes):
             return "hatchery mints \(bytes) random bytes"
 
+        case .forgeToken(let name, let scopes, let retires):
+            let retired = ([name] + retires).map { "'\($0)'" }.joined(separator: " and ")
+            return "the forge's CLI on \(ForgeTokenIssuer.box) retires \(retired), "
+                + "then mints '\(name)' for \(ForgeTokenIssuer.user) with scopes \(scopes)"
+
+        case .homeAssistantToken(let url, let name):
+            return "Home Assistant at \(url) makes a long-lived token named \(name) with the time, signed in with the token \(service) holds now"
+
         case .manual(let recipe):
             return "a person issues it: \(recipe)"
         }
@@ -56,6 +64,12 @@ extension KindFile.Issuer {
         case .vaultReseal:
             return "vault opens every app secrets document and S3 key under the new value after its restart"
 
+        case .forgeToken:
+            return "the forge takes the new token at its API"
+
+        case .homeAssistantToken:
+            return "the new token signs in to Home Assistant's websocket"
+
         case .vaultSecret, .postgresRole, .random, .manual:
             return "no check for this issuer"
         }
@@ -69,6 +83,12 @@ extension KindFile.Issuer {
 
         case .vaultS3Key:
             return "vault replaced the old pair when it minted the new one"
+
+        case .forgeToken:
+            return "the forge retired the old token of this name before the mint"
+
+        case .homeAssistantToken:
+            return "Home Assistant deletes the old token, found by its id and checked by its name, after every holder has the new one"
 
         case .vaultSecret, .postgresRole, .vaultReseal, .random, .manual:
             return "nothing revokes the old value for this issuer"
@@ -97,6 +117,12 @@ extension KindFile.Holder {
 
         case .file(let host, let path):
             return "\(path) on \(host), mode 600"
+
+        case .vaultDocument(let app, let name):
+            return "\(name) in vault's \(app) document, read at each use"
+
+        case .forgeRepoSecret(let name):
+            return "\(name) as an Actions secret on every forge repository that holds it"
         }
     }
 
@@ -106,8 +132,16 @@ extension KindFile.Holder {
     /// carries the new value and there is nothing to stop.
     public var restarts: Bool {
         switch self {
-        case .roostrc, .file: return false
+        case .roostrc, .file, .vaultDocument, .forgeRepoSecret: return false
         case .dokkuConfig, .launchdEnvironment, .systemdEnvironment, .vaultSecret: return true
+        }
+    }
+
+    /// Whether this holder keeps the value outside every service file, in a vault document or on the forge.
+    public var isOutsideFiles: Bool {
+        switch self {
+        case .vaultDocument, .forgeRepoSecret: return true
+        case .dokkuConfig, .roostrc, .launchdEnvironment, .systemdEnvironment, .vaultSecret, .file: return false
         }
     }
 
@@ -117,7 +151,7 @@ extension KindFile.Holder {
         case .dokkuConfig(let app, _, let restart):
             return "\(app), \(restart.label)"
 
-        case .roostrc, .file:
+        case .roostrc, .file, .vaultDocument, .forgeRepoSecret:
             return ""
 
         case .launchdEnvironment(let host, let label, _):
@@ -140,6 +174,8 @@ extension KindFile.Holder {
         case .systemdEnvironment(let host, _, _): return .host(host)
         case .vaultSecret(let app, _): return .vaultApp(app)
         case .file(let host, _): return .host(host)
+        case .vaultDocument(let app, _): return .vaultApp(app)
+        case .forgeRepoSecret: return .forge
         }
     }
 
@@ -148,10 +184,12 @@ extension KindFile.Holder {
     /// - `dokkuApp`: a service the manifest declares.
     /// - `host`: a box the manifest or the host registry knows.
     /// - `vaultApp`: an app in vault, which the manifest never knows and never has to.
+    /// - `forge`: the forge's repositories, which the run reads from the forge and not from the manifest.
     public enum Target: Sendable, Equatable {
         case dokkuApp(String)
         case host(String)
         case vaultApp(String)
+        case forge
     }
 }
 
@@ -251,7 +289,23 @@ public struct RotationPlan: Sendable, Equatable {
         if self.secretClass == .sealingKey {
             lines.append("    checks   \(self.rotation.issuer.checkLabel(service: self.service))")
         }
+        if let handStep = self.handStep {
+            lines.append("    by hand  \(handStep)")
+        }
         return lines
+    }
+
+    /// The one step a person takes after an address runs, or `nil` for every other class.
+    /// It names the holder of the topic and never the topic itself, which is in the service's secrets file after the run.
+    public var handStep: String? {
+        guard self.secretClass == .address else { return nil }
+        let held = self.rotation.holders.map { holder -> String in
+            if case .dokkuConfig(let app, let key, _) = holder { return "\(app)'s \(key)" }
+            return holder.label
+        }
+        let names = held.isEmpty ? self.keys.joined(separator: " + ") : held.joined(separator: " and ")
+        return "subscribe the phone's ntfy app to the new topic in \(names), and drop the old topic; "
+            + "the new name is in the secrets file of \(self.service)"
     }
 }
 
@@ -266,7 +320,7 @@ public struct RotationPlan: Sendable, Equatable {
 /// - `noVaultSession`: this machine holds no vault credential, and a vault issuer needs one.
 /// - `noClass`: the key declares no class, so no check and no run shape apply. Nothing guesses one from the name.
 /// - `noResealRoute`: a sealing key whose issuer is not `vaultReseal`. A mint and place would lock everything sealed under the old value.
-/// - `address`: an address is renamed by a person on the device, by the recipe.
+/// - `address`: an address with a person as its issuer is renamed on the device, by the recipe.
 public enum RotationRefusal: Error, CustomStringConvertible, Equatable {
     case noKindFile(service: String, kind: String)
     case notRotatable(key: String, service: String, rotatable: [String])
@@ -343,7 +397,8 @@ public enum RotationPlanner {
             wanted = groups
         } else {
             let rotatable = kind.rotatableKeys()
-            for key in keys where !rotatable.contains(key) {
+            // A key with a rotation of none is named on purpose, so it is skipped with its reason and not refused.
+            for key in keys where !rotatable.contains(key) && kind.unrotatedReason(forKey: key) == nil {
                 throw RotationRefusal.notRotatable(key: key, service: service, rotatable: rotatable)
             }
             // A named half of the forge's pair brings its other half with it, because one issuer answers for
@@ -377,6 +432,18 @@ public enum RotationPlanner {
         }
     }
 
+    /// The named keys, or every key when none are named, that declare a rotation of none, each with its reason.
+    ///
+    /// `rotate` reads this to print why a key is not rotated, in place of a plan for it.
+    public static func unrotated(keys: [String], in kind: KindFile) -> [(keys: [String], reason: String)] {
+        let groups = kind.rotationGroups()
+        let matching = keys.isEmpty ? groups : groups.filter { group in group.keys.contains { keys.contains($0) } }
+        return matching.compactMap { group in
+            guard case .unrotated(let reason) = group.rotation else { return nil }
+            return (keys: group.keys, reason: reason)
+        }
+    }
+
     /// Refuses a plan hatchery must not run: a class owed, a class that never runs by a mint, a manual issuer, or a holder
     /// nothing can reach.
     ///
@@ -394,7 +461,10 @@ public enum RotationPlanner {
             }
 
         case .address?:
-            throw RotationRefusal.address(keys: plan.keys, recipe: plan.rotation.issuer.recipe)
+            // An address with a random issuer runs, house#47. One a person names is renamed on the device by the recipe.
+            if plan.rotation.issuer.isManual {
+                throw RotationRefusal.address(keys: plan.keys, recipe: plan.rotation.issuer.recipe)
+            }
 
         case .token?, .sharedKey?, .password?:
             break
@@ -414,7 +484,7 @@ public enum RotationPlanner {
                     key: plan.keys.joined(separator: " + "), holder: holder.label,
                     missing: "the host \(host)")
 
-            case .dokkuApp, .host, .vaultApp:
+            case .dokkuApp, .host, .vaultApp, .forge:
                 continue
             }
         }
@@ -490,7 +560,7 @@ public struct RotationTarget: Sendable {
 ///   moved on to the next one.
 /// - `failed`: the executor stopped partway; the printed report says where.
 /// - `dry`: `--dry-run`, or `--yes` was not given, so the plan printed and nothing ran.
-/// - `skipped`: another service owns this key's rotation, so it did not run here.
+/// - `skipped`: another service owns this key's rotation, or the key declares a rotation of none, so it did not run here.
 public struct RotationOutcome: Sendable, Equatable {
     public enum State: String, Sendable, Equatable {
         case run, refused, failed, dry, skipped
@@ -520,6 +590,7 @@ public struct RotationOutcome: Sendable, Equatable {
 public enum RotationRun {
     /// A manual issuer or an unreachable holder refuses that one key and the run goes on to the next; a key
     /// another service owns is skipped, because its rotation runs once, under that service, and never here.
+    /// A key with a rotation of none is skipped too, and its reason prints.
     /// The lines a person reads print as each key finishes, and the outcomes are handed back for the table
     /// that ends the run.
     public static func all(
@@ -534,6 +605,8 @@ public enum RotationRun {
     ) async -> RotationRunResult {
         var lines: [String] = []
         var outcomes: [RotationOutcome] = []
+        // The hand steps of the addresses that ran or were planned, which end the run, house#47.
+        var handSteps: [String] = []
         // Every line is said the moment it is made, and kept for the caller. A run that is killed then leaves
         // every finished step on the screen, which the run of 2026-09-27 did not.
         func tell(_ line: String) {
@@ -582,6 +655,14 @@ public enum RotationRun {
                         RotationOutcome(
                             stack: target.stack, service: target.service, keys: group.keys, state: .skipped))
 
+                case .unrotated(let reason):
+                    tell(heading)
+                    tell(classLine)
+                    tell("    not rotated  \(reason)")
+                    outcomes.append(
+                        RotationOutcome(
+                            stack: target.stack, service: target.service, keys: group.keys, state: .skipped))
+
                 case .declared(let rotation):
                     let plan = RotationPlan(service: target.service, keys: group.keys, rotation: rotation, in: target.kind)
                     do {
@@ -599,6 +680,7 @@ public enum RotationRun {
 
                     guard yes, !dryRun else {
                         plan.lines().forEach(tell)
+                        if let step = plan.handStep { handSteps.append("  by hand: \(target.stack)/\(target.service) \(step)") }
                         outcomes.append(
                             RotationOutcome(
                                 stack: target.stack, service: target.service, keys: group.keys, state: .dry))
@@ -607,6 +689,9 @@ public enum RotationRun {
 
                     let report = await makeExecutor(target).execute(plan)
                     report.lines().forEach(tell)
+                    if report.succeeded, let step = plan.handStep {
+                        handSteps.append("  by hand: \(target.stack)/\(target.service) \(step)")
+                    }
                     outcomes.append(
                         RotationOutcome(
                             stack: target.stack, service: target.service, keys: group.keys,
@@ -616,6 +701,7 @@ public enum RotationRun {
         }
 
         outcomes.map(\.line).forEach(tell)
+        handSteps.forEach(tell)
         return RotationRunResult(lines: lines, outcomes: outcomes, silent: silent)
     }
 }
@@ -676,6 +762,12 @@ public enum RotationPreflight {
             case .vaultAppKey, .vaultS3Key, .vaultSecret, .vaultReseal:
                 add("vault at \(vault)", Self.vaultProbe(vault))
 
+            case .forgeToken:
+                addHost(ForgeTokenIssuer.box, Self.shellProbe(ForgeTokenIssuer.box))
+
+            case .homeAssistantToken(let url, _):
+                add("Home Assistant at \(url)", Self.answerProbe(url + "/api/"))
+
             case .random, .manual:
                 break
             }
@@ -687,8 +779,11 @@ public enum RotationPreflight {
                 case .roostrc(let host, _), .launchdEnvironment(let host, _, _), .systemdEnvironment(let host, _, _),
                     .file(let host, _):
                     addHost(host, Self.shellProbe(host))
-                case .vaultSecret:
+                case .vaultSecret, .vaultDocument:
                     add("vault at \(vault)", Self.vaultProbe(vault))
+
+                case .forgeRepoSecret:
+                    add("the forge at \(ForgeSecrets.forgeBaseURL)", Self.vaultProbe(ForgeSecrets.forgeBaseURL, route: "/api/v1/version"))
                 }
             }
         }
@@ -722,9 +817,15 @@ public enum RotationPreflight {
         return hop + ["docker", "exec", server, "pg_isready", "-U", "postgres"]
     }
 
-    /// Asks vault's health route for a 2xx answer, through curl, so the probe runs through the same runner as the host probes.
-    static func vaultProbe(_ baseURL: String) -> [String] {
-        ["curl", "-fsS", "-o", "/dev/null", "--max-time", "6", baseURL + "/health"]
+    /// Asks vault's health route, or another route that answers without a credential, for a 2xx answer, through curl.
+    /// The probe runs through the same runner as the host probes.
+    static func vaultProbe(_ baseURL: String, route: String = "/health") -> [String] {
+        ["curl", "-fsS", "-o", "/dev/null", "--max-time", "6", baseURL + route]
+    }
+
+    /// Asks a URL for any HTTP answer. A 401 from Home Assistant's API is an answer, so curl runs without `-f`.
+    static func answerProbe(_ url: String) -> [String] {
+        ["curl", "-sS", "-o", "/dev/null", "--max-time", "6", url]
     }
 }
 
@@ -753,7 +854,17 @@ extension KindFile.Issuer {
     public var needsVaultSession: Bool {
         switch self {
         case .vaultAppKey, .vaultS3Key, .vaultSecret, .vaultReseal: return true
-        case .postgresRole, .random, .manual: return false
+        case .postgresRole, .random, .forgeToken, .homeAssistantToken, .manual: return false
+        }
+    }
+}
+
+extension KindFile.Rotation {
+    /// Whether the issuer or any holder goes through vault's admin routes, so the run resolves a credential first.
+    public var needsVaultSession: Bool {
+        self.issuer.needsVaultSession || self.holders.contains { holder in
+            if case .vaultDocument = holder { return true }
+            return false
         }
     }
 }

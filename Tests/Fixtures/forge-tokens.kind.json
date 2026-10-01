@@ -1,0 +1,79 @@
+{
+  "environment": {
+    "FORGE_ISSUE_TOKEN": {
+      "class": "token",
+      "rotation": {
+        "holders": [
+          {
+            "app": "forge",
+            "name": "FORGE_ISSUE_TOKEN",
+            "type": "vaultDocument"
+          }
+        ],
+        "issuer": {
+          "name": "house-issue",
+          "scopes": "write:issue",
+          "type": "forgeToken"
+        }
+      },
+      "secret": true,
+      "why": "The token forge-issue files, comments on and closes forge issues with. It lives in vault's forge app document, and the git credential on a Mac lacks write:issue."
+    },
+    "FORGE_PACKAGE_TOKEN": {
+      "class": "token",
+      "rotation": {
+        "holders": [
+          {
+            "app": "forge",
+            "name": "FORGE_PACKAGE_TOKEN",
+            "type": "vaultDocument"
+          },
+          {
+            "name": "FORGE_PACKAGE_TOKEN",
+            "type": "forgeRepoSecret"
+          }
+        ],
+        "issuer": {
+          "name": "house-package",
+          "scopes": "write:package",
+          "type": "forgeToken"
+        }
+      },
+      "secret": true,
+      "why": "The token CI pushes images to the forge's registry with. vault's forge app document is the source, and `hatchery forge secrets <repo>` sets it on a repository as an Actions secret, so a rotation writes every repository that holds it."
+    },
+    "FORGE_READ_TOKEN": {
+      "class": "token",
+      "rotation": {
+        "holders": [
+          {
+            "app": "forge",
+            "name": "FORGE_READ_TOKEN",
+            "type": "vaultDocument"
+          },
+          {
+            "app": "rookery",
+            "name": "FORGE_READ_TOKEN",
+            "type": "vaultDocument"
+          }
+        ],
+        "issuer": {
+          "name": "house-read",
+          "retires": [
+            "rookery-read"
+          ],
+          "scopes": "read:issue",
+          "type": "forgeToken"
+        }
+      },
+      "secret": true,
+      "why": "The read-only token forge-issue lists and reads issues with, and the one a rookery seat reads from rookery's document for rookery#58. One token serves both documents, so the run retires the separate rookery-read token that forge-token minted."
+    }
+  },
+  "kind": "forgejo",
+  "notes": [
+    "This file declares the tokens the forge issues to the estate, not the forge's own environment, which stays undeclared until the forge is adopted.",
+    "The forge mints a token only for a password or for its own CLI, so the forgeToken issuer runs the CLI inside the forge's container on the opi over ssh, house#47."
+  ],
+  "summary": "The house forge at forgejo.jimmyhoughjr.net, and the access tokens it issues to the estate."
+}

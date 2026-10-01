@@ -101,6 +101,9 @@ struct Secrets: AsyncParsableCommand {
 
                 case .owned(let owner):
                     print("    held from \(owner)")
+
+                case .unrotated(let reason):
+                    print("    not rotated  \(reason)")
                 }
             }
             let missing = resolved.kind.secretRotations().filter { $0.rotation == nil }
@@ -119,7 +122,7 @@ struct Secrets: AsyncParsableCommand {
             case .host(let host):
                 return resolved.hosts.contains(host) ? "" : "   (no host \(host) in the manifest)"
 
-            case .vaultApp:
+            case .vaultApp, .forge:
                 return ""
             }
         }
@@ -139,7 +142,8 @@ struct Secrets: AsyncParsableCommand {
                 A key issued by a person refuses the run and prints the recipe instead, and a holder the \
                 manifest does not know refuses it too, because a bearer nothing can reach keeps the old \
                 value after the new one is issued. A key another service owns is skipped, not run; that \
-                service's own rotation is what turns it over.
+                service's own rotation is what turns it over. A key that declares a rotation of none is \
+                skipped too, and its reason prints.
 
                 --all reads every named manifest and runs every declared rotation of every service it finds, \
                 in the same order, instead of the one service named on the command line. A refused key does \
@@ -203,6 +207,7 @@ struct Secrets: AsyncParsableCommand {
                 apps: resolved.apps,
                 hosts: resolved.hosts)
             let owned = RotationPlanner.owned(keys: self.keys, in: resolved.kind)
+            let unrotated = RotationPlanner.unrotated(keys: self.keys, in: resolved.kind)
 
             print("  \(resolved.stack.name)/\(resolved.service.name), \(plans.count) rotation(s):")
             plans.flatMap { $0.lines() }.forEach { print($0) }
@@ -210,13 +215,17 @@ struct Secrets: AsyncParsableCommand {
                 print("  \(entry.keys.joined(separator: " + "))")
                 print("    held from \(entry.owner)")
             }
+            for entry in unrotated {
+                print("  \(entry.keys.joined(separator: " + "))")
+                print("    not rotated  \(entry.reason)")
+            }
 
             guard self.yes, !self.dryRun else {
                 print("  nothing changed. Run it again with --yes to execute this plan.")
                 return
             }
             let credential: VaultAdminCredential
-            if plans.contains(where: { $0.rotation.issuer.needsVaultSession }) {
+            if plans.contains(where: { $0.rotation.needsVaultSession }) {
                 guard let resolved = VaultAdminCredential.resolve() else {
                     throw RotationRefusal.noVaultSession
                 }
@@ -259,6 +268,10 @@ struct Secrets: AsyncParsableCommand {
                 }
             }
             print("  run hatchery state seal so the new values reach the encrypted backup.")
+            // An address's phone step is the last line, house#47.
+            for step in plans.compactMap(\.handStep) {
+                print("  by hand: \(step)")
+            }
         }
 
         private func runAll() async throws {
@@ -278,11 +291,13 @@ struct Secrets: AsyncParsableCommand {
                         guard let kind = try registry.kindFile(for: service.kind) else { continue }
                         // What the service carries, from its config and secrets files, so a kind shared by several
                         // services plans a rotation only where the key is. A missing file reads as empty.
+                        // A key held only in vault documents or on the forge is carried by the declaration itself.
                         let carried = Set(
                             try ConfigSync.readDeclared(
                                 config: ConfigSync.configURL(for: service, in: stack, manifestPath: entry.path),
                                 secrets: ConfigSync.secretsURL(for: service, in: stack, manifestPath: entry.path)
-                            ).keys)
+                            ).keys
+                        ).union(kind.keysHeldOutsideFiles())
                         targets.append(
                             RotationTarget(
                                 stack: stack.name,
@@ -342,7 +357,7 @@ struct Secrets: AsyncParsableCommand {
         private static func needsVaultSession(in kind: KindFile) -> Bool {
             kind.rotationGroups().contains { group in
                 guard case .declared(let rotation) = group.rotation else { return false }
-                return rotation.issuer.needsVaultSession
+                return rotation.needsVaultSession
             }
         }
     }
@@ -416,7 +431,8 @@ struct Secrets: AsyncParsableCommand {
                 LIVE reads cannot probe for a key no issuer API can check, such as an Apple private key or a Google \
                 client secret. Such a key is checked by use, and it never reads live. A key whose issue date is \
                 unknown shows the day the ledger first saw it and is put up for rotation; a finished rotation, or \
-                hatchery secrets issued, stamps the date.
+                hatchery secrets issued, stamps the date. A key whose kind file declares a rotation of none \
+                shows the reason as NEXT, is never put up for rotation, and owes no reminder.
 
                 The ledger file holds names and dates, never a value.
 

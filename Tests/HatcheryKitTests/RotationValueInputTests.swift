@@ -220,7 +220,7 @@ struct RotationValueInputTests {
         defer { scratch.remove() }
         let value = "proof-\(UUID().uuidString)"
         // The fake ssh plays sshd: dokku's forced command for dokku@box, and the login shell running the joined words for any other target.
-        // It holds each command for a second, so the watcher below sees its arguments.
+        // The import waits until the watcher below has seen it in ps, for up to ten seconds, so a fast or busy runner cannot slip past the sample.
         try scratch.tool(
             "ssh",
             """
@@ -231,7 +231,7 @@ struct RotationValueInputTests {
               shift 3
               [ "$1" = "--no-restart" ] && shift
               cat > "$HOME/dokku-$1.json"
-              sleep 1
+              i=0; while [ ! -f "$HOME/import-seen" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
             else
               sh -c "$*"; rc=$?; sleep 1; exit $rc
             fi
@@ -252,12 +252,17 @@ struct RotationValueInputTests {
             },
             mint: { _ in value })
 
-        // When the run goes, a watcher reads every process's arguments every 50 ms.
+        // When the run goes, a watcher reads every process's arguments every 50 ms, and marks the import once it has seen it.
+        let importSeen = scratch.home.appendingPathComponent("import-seen")
         let watcher = Task { () -> [String] in
             var lines: [String] = []
             while !Task.isCancelled {
                 if let snapshot = try? await ShellRunner.withInput(ShellCommand(["ps", "-A", "-o", "args="])) {
-                    lines += String(decoding: snapshot, as: UTF8.self).split(separator: "\n").map(String.init)
+                    let sample = String(decoding: snapshot, as: UTF8.self).split(separator: "\n").map(String.init)
+                    lines += sample
+                    if sample.contains(where: { $0.contains("config:import") }) {
+                        FileManager.default.createFile(atPath: importSeen.path, contents: nil)
+                    }
                 }
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
