@@ -244,6 +244,12 @@ public enum SecretLedger {
         case .random:
             return "random"
 
+        case .forgeToken:
+            return "forge"
+
+        case .homeAssistantToken:
+            return "home assistant"
+
         case .manual:
             return "person"
         }
@@ -294,6 +300,7 @@ extension SecretLedger {
 extension SecretLedger {
     /// One target per service with a kind file, across every manifest, with the keys its config and secrets files carry.
     /// Only key names leave the files. A missing file reads as empty, the same rule `rotate --all` keeps.
+    /// A key held only in vault documents or on the forge is carried by the declaration itself, because no service file names it.
     public static func targets(in loaded: [(manifest: StackManifest, path: String)]) throws -> [LedgerTarget] {
         var targets: [LedgerTarget] = []
         for entry in loaded {
@@ -305,7 +312,8 @@ extension SecretLedger {
                         try ConfigSync.readDeclared(
                             config: ConfigSync.configURL(for: service, in: stack, manifestPath: entry.path),
                             secrets: ConfigSync.secretsURL(for: service, in: stack, manifestPath: entry.path)
-                        ).keys)
+                        ).keys
+                    ).union(kind.keysHeldOutsideFiles())
                     targets.append(
                         LedgerTarget(
                             stack: stack.name,

@@ -44,6 +44,23 @@ private let mixedKind = """
     }
     """
 
+/// The gigs board's topic as house#47 declares it: an address with a random issuer, held in the app's config.
+private let randomTopicKind = """
+    {
+      "kind": "gigs",
+      "environment": {
+        "GIGS_NTFY_TOPIC": {
+          "class": "address",
+          "secret": true,
+          "rotation": {
+            "issuer": { "type": "random", "bytes": 32 },
+            "holders": [ { "type": "dokkuConfig", "app": "gigs", "key": "GIGS_NTFY_TOPIC" } ]
+          }
+        }
+      }
+    }
+    """
+
 @Suite("A secret's class, as the kind file declares it")
 struct SecretClassDeclarationTests {
     @Test("the class decodes from class and survives a round trip")
@@ -107,7 +124,10 @@ struct SecretClassDeclarationTests {
     func fitTable() {
         let issuers: [KindFile.Issuer] = [
             .vaultAppKey, .vaultS3Key(app: "a"), .vaultSecret(app: "a", name: "N"),
-            .postgresRole(server: "s", role: "r"), .vaultReseal, .random(bytes: 32), .manual(recipe: "r"),
+            .postgresRole(server: "s", role: "r"), .vaultReseal, .random(bytes: 32),
+            .forgeToken(name: "house-read", scopes: "read:issue", retires: []),
+            .homeAssistantToken(url: "http://ha.example:8123", name: "gigs"),
+            .manual(recipe: "r"),
         ]
         for secretClass in SecretClass.allCases {
             let fitting = issuers.filter { secretClass.fits($0) }.map(\.typeName)
@@ -120,6 +140,18 @@ struct SecretClassDeclarationTests {
         #expect(!SecretClass.token.fits(.vaultReseal))
         #expect(!SecretClass.token.fits(.random(bytes: 32)))
         #expect(SecretClass.password.fits(.postgresRole(server: "rookery-pg", role: "rookery")))
+    }
+
+    @Test("house#47: an address fits random as well as manual, and a token fits the forge and Home Assistant")
+    func fitTableOfHouse47() {
+        #expect(SecretClass.address.fits(.random(bytes: 32)))
+        #expect(SecretClass.address.fits(.manual(recipe: "r")))
+        #expect(!SecretClass.address.fits(.vaultSecret(app: "a", name: "N")))
+        #expect(SecretClass.token.fits(.forgeToken(name: "coop-runs", scopes: "read:repository", retires: [])))
+        #expect(SecretClass.token.fits(.homeAssistantToken(url: "http://ha.example:8123", name: "pulse")))
+        #expect(!SecretClass.sharedKey.fits(.forgeToken(name: "coop-runs", scopes: "read:repository", retires: [])))
+        #expect(!SecretClass.sharedKey.fits(.homeAssistantToken(url: "http://ha.example:8123", name: "pulse")))
+        #expect(SecretClass.address.fittingIssuers == ["random", "manual"])
     }
 }
 
@@ -148,6 +180,51 @@ struct SecretClassRotationTests {
         #expect(throws: RotationRefusal.address(keys: ["NTFY_TOPIC"], recipe: "pick a new topic on the phone")) {
             try RotationPlanner.plans(service: "mixed", keys: ["NTFY_TOPIC"], in: try kind(mixedKind), apps: [], hosts: [])
         }
+    }
+
+    @Test("house#47: an address with a random issuer loads, plans, and its plan ends with the phone step naming the holder and not the topic")
+    func randomAddressPlansWithThePhoneStepLast() throws {
+        let file = try loaded(randomTopicKind)
+
+        let plans = try RotationPlanner.plans(service: "gigs", keys: ["GIGS_NTFY_TOPIC"], in: file, apps: ["gigs"], hosts: [])
+
+        let lines = try #require(plans.first).lines()
+        #expect(lines.contains("    runs     a new name onto every holder, restart each, then the phone subscribes to the new name"))
+        #expect(lines.last == "    by hand  subscribe the phone's ntfy app to the new topic in gigs's GIGS_NTFY_TOPIC, and drop the old topic; "
+            + "the new name is in the secrets file of gigs")
+    }
+
+    @Test("house#47: a finished address run ends its report with the phone step, and the topic is in no line")
+    func addressReportEndsWithThePhoneStep() async throws {
+        let plan = try #require(
+            try RotationPlanner.plans(service: "gigs", keys: [], in: try loaded(randomTopicKind), apps: ["gigs"], hosts: []).first)
+        let executor = RotationExecutor(
+            vault: VaultAdmin(session: ""),
+            secrets: SecretsFile(read: { [:] }, write: { _ in }),
+            dokkuTargets: ["gigs": "dokku@opi"],
+            run: { _ in Data() },
+            mint: { _ in "made-up-topic" })
+
+        let report = await executor.execute(plan)
+
+        #expect(report.succeeded)
+        #expect(report.lines().last?.hasPrefix("    by hand  subscribe the phone's ntfy app") == true)
+        #expect(!report.lines().joined().contains("made-up-topic"))
+    }
+
+    @Test("house#47: rotate --all ends on the phone step, after the outcome table")
+    func allEndsWithThePhoneStep() async throws {
+        let target = RotationTarget(
+            stack: "estate", service: "gigs", kind: try loaded(randomTopicKind),
+            dokkuTargets: ["gigs": "dokku@opi"], adminTargets: [:],
+            secretsURL: URL(fileURLWithPath: "/tmp/secret-class-tests.secrets.json"))
+        let executor = RotationExecutor(vault: VaultAdmin(session: ""), secrets: SecretsFile(read: { [:] }, write: { _ in }))
+
+        let run = await RotationRun.all(
+            targets: [target], apps: ["gigs"], hosts: [], dryRun: true, yes: false, makeExecutor: { _ in executor })
+
+        #expect(run.outcomes.map(\.state) == [.dry])
+        #expect(run.lines.last?.hasPrefix("  by hand: estate/gigs subscribe the phone's ntfy app to the new topic in gigs's GIGS_NTFY_TOPIC") == true)
     }
 
     @Test("rotate --all refuses each unrunnable row alone, prints its class, and the shared key still plans")

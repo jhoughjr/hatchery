@@ -126,7 +126,7 @@ public enum ConfigSync {
     /// the declaration reading the file lives: `jsondecode(file("${path.module}/x.config.json"))`
     /// is relative to the module, not to wherever the manifest happens to sit. Falling back to
     /// the manifest's directory keeps a single-stack layout — where the two are the same place —
-    /// working exactly as before.
+    /// working exactly as before. The manifest's directory is the real file's, through any symlink, the same as ``KindRegistry``.
     public static func configURL(
         for service: ServiceSpec,
         in stack: StackSpec? = nil,
@@ -138,7 +138,7 @@ public enum ConfigSync {
                 relativeTo: URL(fileURLWithPath: Paths.expanded(directory), isDirectory: true)
             ).standardizedFileURL
         }
-        let manifestURL = URL(fileURLWithPath: manifestPath)
+        let manifestURL = URL(fileURLWithPath: manifestPath).resolvingSymlinksInPath()
         let directory = manifestURL.deletingLastPathComponent()
         return URL(fileURLWithPath: service.configFile, relativeTo: directory).standardizedFileURL
     }
@@ -162,7 +162,7 @@ public enum ConfigSync {
                 relativeTo: URL(fileURLWithPath: Paths.expanded(directory), isDirectory: true)
             ).standardizedFileURL
         }
-        let manifestURL = URL(fileURLWithPath: manifestPath)
+        let manifestURL = URL(fileURLWithPath: manifestPath).resolvingSymlinksInPath()
         return URL(fileURLWithPath: name, relativeTo: manifestURL.deletingLastPathComponent())
             .standardizedFileURL
     }

@@ -35,14 +35,17 @@ public struct RotationReport: Sendable, Equatable {
     /// The step that failed, or `nil` when the whole plan ran.
     public var stopped: RotationStep?
     public var reason: String?
+    /// The one step a person takes after the run, printed as the last line of a finished report. Only an address has one.
+    public var handStep: String?
 
     public init(
-        keys: [String], done: [RotationStep] = [], stopped: RotationStep? = nil, reason: String? = nil
+        keys: [String], done: [RotationStep] = [], stopped: RotationStep? = nil, reason: String? = nil, handStep: String? = nil
     ) {
         self.keys = keys
         self.done = done
         self.stopped = stopped
         self.reason = reason
+        self.handStep = handStep
     }
 
     public var succeeded: Bool { self.stopped == nil }
@@ -55,6 +58,7 @@ public struct RotationReport: Sendable, Equatable {
         }
         guard let stopped = self.stopped else {
             lines.append("    finished. Seal the state so the new values are backed up.")
+            if let handStep = self.handStep { lines.append("    by hand  \(handStep)") }
             return lines
         }
         lines.append("    FAILED   \(stopped.phase.rawValue): \(stopped.what)")
@@ -113,6 +117,14 @@ public struct RotationExecutor: Sendable {
     private let holderSecrets: [String: SecretsFile]
     /// Waits between two reads of vault's re-seal check, while vault starts again.
     private let pause: @Sendable (Int) async -> Void
+    /// Whether the forge takes a token, the check of a `forgeToken` run.
+    private let forgeAccepts: @Sendable (String) async throws -> Bool
+    /// Writes a value to every forge repository whose Actions secrets hold the name, and answers those repositories.
+    private let forgeRepos: @Sendable (_ name: String, _ value: String) async throws -> [String]
+    /// Home Assistant's websocket, for a `homeAssistantToken` run.
+    private let homeAssistant: HomeAssistantCall
+    /// The time a Home Assistant token's name carries.
+    private let now: @Sendable () -> Date
 
     /// How many times the re-seal check reads vault after the restart, and the seconds between two reads.
     /// Twenty reads three seconds apart give a restarted vault a minute to answer before the run calls the check failed.
@@ -127,7 +139,11 @@ public struct RotationExecutor: Sendable {
         holderSecrets: [String: SecretsFile] = [:],
         run: @escaping ShellCommandRunner = ShellRunner.withInput,
         mint: @escaping @Sendable (Int) -> String = { SecretMinter().token(bytes: $0) },
-        pause: @escaping @Sendable (Int) async -> Void = { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000) }
+        pause: @escaping @Sendable (Int) async -> Void = { seconds in try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000) },
+        forgeAccepts: @escaping @Sendable (String) async throws -> Bool = { try await ForgeTokenIssuer.accepts($0) },
+        forgeRepos: (@Sendable (_ name: String, _ value: String) async throws -> [String])? = nil,
+        homeAssistant: @escaping HomeAssistantCall = HomeAssistantTokens.live,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.vault = vault
         self.secrets = secrets
@@ -137,11 +153,15 @@ public struct RotationExecutor: Sendable {
         self.run = run
         self.mint = mint
         self.pause = pause
+        self.forgeAccepts = forgeAccepts
+        self.forgeRepos = forgeRepos ?? { name, value in try await ForgeSecrets(vault: vault).replaceEverywhere(name: name, value: value) }
+        self.homeAssistant = homeAssistant
+        self.now = now
     }
 
     /// Runs one plan and reports what it did.
     public func execute(_ plan: RotationPlan) async -> RotationReport {
-        var report = RotationReport(keys: plan.keys)
+        var report = RotationReport(keys: plan.keys, handStep: plan.handStep)
 
         // A re-seal checks its own door and every holder before the mint, because after the re-seal nothing goes back by itself.
         if case .vaultReseal = plan.rotation.issuer {
@@ -158,10 +178,12 @@ public struct RotationExecutor: Sendable {
 
         let values: [String: String]
         var resealed: VaultResealCount?
+        var retiring: HomeAssistantTokens.Retiring?
         do {
             let issued = try await self.issue(plan)
             values = issued.values
             resealed = issued.resealed
+            retiring = issued.retiring
             var what = plan.rotation.issuer.label(service: plan.service)
             if let resealed {
                 what += "; vault re-sealed \(resealed.appDocuments) app document(s) and \(resealed.s3Keys) S3 key(s), "
@@ -208,12 +230,22 @@ public struct RotationExecutor: Sendable {
         }
 
         for holder in plan.rotation.holders {
-            let step = RotationStep(phase: .hold, what: holder.label)
+            var step = RotationStep(phase: .hold, what: holder.label)
             do {
-                for command in try Self.writeCommands(
-                    holder, plan: plan, values: values, dokkuTargets: self.dokkuTargets)
-                {
-                    _ = try await self.run(command)
+                switch holder {
+                case .vaultDocument(let app, let name):
+                    try await self.vault.setSecret(app: app, name: name, value: try Self.value(for: name, plan: plan, values: values))
+
+                case .forgeRepoSecret(let name):
+                    let repos = try await self.forgeRepos(name, try Self.value(for: name, plan: plan, values: values))
+                    step.what += repos.isEmpty ? "; no repository holds it" : "; " + repos.joined(separator: ", ")
+
+                case .dokkuConfig, .roostrc, .launchdEnvironment, .systemdEnvironment, .vaultSecret, .file:
+                    for command in try Self.writeCommands(
+                        holder, plan: plan, values: values, dokkuTargets: self.dokkuTargets)
+                    {
+                        _ = try await self.run(command)
+                    }
                 }
                 report.done.append(step)
             } catch {
@@ -258,17 +290,40 @@ public struct RotationExecutor: Sendable {
         guard plan.secretClass == .token else { return report }
         let check = RotationStep(phase: .check, what: plan.rotation.issuer.checkLabel(service: plan.service))
         do {
-            if case .vaultAppKey = plan.rotation.issuer, let key = values.values.first {
-                try await self.vault.checkAppKey(app: plan.service, key: key)
+            switch plan.rotation.issuer {
+            case .vaultAppKey:
+                if let key = values.values.first { try await self.vault.checkAppKey(app: plan.service, key: key) }
+
+            case .forgeToken(let name, _, _):
+                guard let token = values.values.first, try await self.forgeAccepts(token) else { throw ForgeTokenError.refused(name: name) }
+
+            case .homeAssistantToken(let url, _):
+                if let token = values.values.first { try await HomeAssistantTokens.check(url: url, token: token, call: self.homeAssistant) }
+
+            case .vaultS3Key, .vaultSecret, .postgresRole, .vaultReseal, .random, .manual:
+                break
             }
             report.done.append(check)
         } catch {
             report.stopped = check
-            report.reason = "\(error)"
+            report.reason = Self.redacting(Array(values.values), in: "\(error)")
             return report
         }
-        // Vault's key and S3 routes stop the old value at the mint, so the revoke is a fact to report and not a call to make.
-        report.done.append(RotationStep(phase: .revoke, what: plan.rotation.issuer.revokeLabel))
+
+        // Home Assistant is the one issuer whose old value is still live here, and it goes only now that every holder has the new one.
+        // Vault's key and S3 routes stopped the old value at the mint, and the forge retired it before, so for them the revoke is a fact to report.
+        let revoke = RotationStep(phase: .revoke, what: plan.rotation.issuer.revokeLabel)
+        if case .homeAssistantToken(let url, _) = plan.rotation.issuer, let retiring, let token = values.values.first {
+            do {
+                try await HomeAssistantTokens.revoke(url: url, token: token, retiring: retiring, call: self.homeAssistant)
+                report.done.append(RotationStep(phase: .revoke, what: "Home Assistant deleted the old token '\(retiring.clientName)'"))
+            } catch {
+                report.stopped = revoke
+                report.reason = Self.redacting(Array(values.values), in: "\(error)")
+            }
+            return report
+        }
+        report.done.append(revoke)
         return report
     }
 
@@ -291,6 +346,8 @@ public struct RotationExecutor: Sendable {
     struct Issued {
         var values: [String: String]
         var resealed: VaultResealCount?
+        /// The old Home Assistant token, which the revoke deletes after every holder has the new one.
+        var retiring: HomeAssistantTokens.Retiring?
     }
 
     /// The new value for every key of the plan, from whatever issues it.
@@ -335,9 +392,44 @@ public struct RotationExecutor: Sendable {
         case .random(let bytes):
             return Issued(values: [try plan.singleKey(): self.mint(bytes)])
 
+        case .forgeToken(let name, let scopes, let retires):
+            return Issued(values: [try plan.singleKey(): try await self.mintForgeToken(name: name, scopes: scopes, retires: retires)])
+
+        case .homeAssistantToken(let url, let name):
+            // Home Assistant makes a token only for a session that is signed in, and the token the service holds now is the one this run has.
+            let key = try plan.singleKey()
+            guard let current = try self.secrets.read()[key], !current.isEmpty else {
+                throw RotationExecutorError.noCurrentToken(key: key)
+            }
+            let minted = try await HomeAssistantTokens.mint(url: url, current: current, name: name, at: self.now(), call: self.homeAssistant)
+            return Issued(values: [key: minted.token], retiring: minted.retiring)
+
         case .manual(let recipe):
             throw RotationRefusal.manualIssuer(keys: plan.keys, recipe: recipe)
         }
+    }
+
+    /// Retires every earlier token of the name, then mints it, and answers the token the CLI printed.
+    /// The forge refuses a second token of one name, so the retire comes first, as `forge-token` does it.
+    private func mintForgeToken(name: String, scopes: String, retires: [String]) async throws -> String {
+        for retired in [name] + retires {
+            do {
+                _ = try await self.run(ForgeTokenIssuer.retireCommand(name: retired))
+            } catch is CommandFailure {
+                // The forge answers an error when no token has the name, which leaves nothing to retire.
+                continue
+            }
+        }
+        let output: Data
+        do {
+            output = try await self.run(ForgeTokenIssuer.mintCommand(name: name, scopes: scopes))
+        } catch let failure as CommandFailure {
+            throw ForgeTokenError.notMinted(name: name, reason: "exit \(failure.status): \(failure.message.prefix(200))")
+        }
+        guard let token = ForgeTokenIssuer.token(in: output) else {
+            throw ForgeTokenError.notMinted(name: name, reason: "the last line of the output is not a forge token")
+        }
+        return token
     }
 
     // MARK: - The re-seal
@@ -494,6 +586,10 @@ public struct RotationExecutor: Sendable {
         case .file(let host, let path):
             let value = try Self.value(for: path, plan: plan, values: values)
             return [Self.onHost(host, script: Self.fileScript(path: path), value: value)]
+
+        case .vaultDocument, .forgeRepoSecret:
+            // These take the value over HTTP in the executor, in a request body, and run no command.
+            return []
         }
     }
 
@@ -537,7 +633,7 @@ public struct RotationExecutor: Sendable {
             }
             return [["ssh", "-o", "BatchMode=yes", target, "ps:restart", app]]
 
-        case .file:
+        case .file, .vaultDocument, .forgeRepoSecret:
             return []
         }
     }
@@ -644,6 +740,7 @@ public struct RotationExecutor: Sendable {
 /// - `noBox`: a dokku holder's app is declared, and no stack says which box it runs on.
 /// - `unknownRestart`: a vault-reading holder names an app hatchery has no way to restart.
 /// - `noCurrentValue`: a URL rewrite needs the old URL, and the secrets file holds none.
+/// - `noCurrentToken`: Home Assistant makes a token only for a signed-in session, and the secrets file holds no current token to sign in with.
 /// - `notAConnectionURL`: the key holds something with no password in it to replace.
 /// - `notAPair`: an S3 rotation must name exactly two keys, one of them a secret.
 /// - `notASingleKey`: this issuer answers one value, and the plan holds more than one key.
@@ -656,6 +753,7 @@ public enum RotationExecutorError: Error, CustomStringConvertible, Equatable {
     case noBox(app: String)
     case unknownRestart(app: String)
     case noCurrentValue(key: String)
+    case noCurrentToken(key: String)
     case notAConnectionURL(key: String)
     case notAPair(keys: [String])
     case notASingleKey(keys: [String])
@@ -675,6 +773,10 @@ public enum RotationExecutorError: Error, CustomStringConvertible, Equatable {
 
         case .noCurrentValue(let key):
             return "the secrets file holds no \(key), and the new password goes inside the old URL"
+
+        case .noCurrentToken(let key):
+            return "the secrets file holds no \(key), and Home Assistant makes a new token only for a session signed in with the current one; "
+                + "seed it once with `pbpaste | house-secret <stack> <service> \(key)`"
 
         case .notAConnectionURL(let key):
             return "\(key) is not a connection URL with a password in it"

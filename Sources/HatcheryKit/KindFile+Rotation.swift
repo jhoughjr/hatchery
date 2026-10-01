@@ -87,6 +87,10 @@ extension KindFile {
     /// - `postgresRole`: a new password by `ALTER ROLE` on the named server's role.
     /// - `vaultReseal`: hatchery mints a value, and vault re-seals every app secrets document and S3 key under it before any holder takes it.
     /// - `random`: hatchery mints this many bytes, because nothing else holds a claim on the value.
+    /// - `forgeToken`: the forge's CLI on the opi mints an access token of this name and these scopes for jimmy.
+    ///   The forge refuses a second token of one name, so the run retires the token of this name, and every name in `retires`, first.
+    /// - `homeAssistantToken`: Home Assistant makes a long-lived token, signed in with the token the service holds now.
+    ///   The old token is deleted only after every holder has the new one, house#47.
     /// - `manual`: a person issues it. The recipe is printed, and the run refuses to go on.
     ///
     /// `vaultAppKey` names no app, because the app is the service's own vault app and the service already
@@ -98,10 +102,12 @@ extension KindFile {
         case postgresRole(server: String, role: String)
         case vaultReseal
         case random(bytes: Int)
+        case forgeToken(name: String, scopes: String, retires: [String])
+        case homeAssistantToken(url: String, name: String)
         case manual(recipe: String)
 
         private enum CodingKeys: String, CodingKey {
-            case type, app, name, server, role, bytes, recipe
+            case type, app, name, server, role, bytes, recipe, scopes, retires, url
         }
 
         public init(from decoder: Decoder) throws {
@@ -130,6 +136,23 @@ extension KindFile {
             case "random":
                 self = .random(bytes: try container.decodeIfPresent(Int.self, forKey: .bytes) ?? 32)
 
+            case "forgeToken":
+                let name = try container.decode(String.self, forKey: .name)
+                let scopes = try container.decode(String.self, forKey: .scopes)
+                let retires = try container.decodeIfPresent([String].self, forKey: .retires) ?? []
+                // The names and scopes travel in the remote command line, so a character a shell reads is refused here.
+                guard ([name, scopes] + retires).allSatisfy(ForgeTokenIssuer.isPlainWord) else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .name, in: container,
+                        debugDescription: "a forge token's name, scopes and retired names take letters, digits, ':', ',', '-' and '_' only")
+                }
+                self = .forgeToken(name: name, scopes: scopes, retires: retires)
+
+            case "homeAssistantToken":
+                self = .homeAssistantToken(
+                    url: try container.decode(String.self, forKey: .url),
+                    name: try container.decode(String.self, forKey: .name))
+
             case "manual":
                 self = .manual(recipe: try container.decode(String.self, forKey: .recipe))
 
@@ -149,6 +172,8 @@ extension KindFile {
             case .postgresRole: return "postgresRole"
             case .vaultReseal: return "vaultReseal"
             case .random: return "random"
+            case .forgeToken: return "forgeToken"
+            case .homeAssistantToken: return "homeAssistantToken"
             case .manual: return "manual"
             }
         }
@@ -180,6 +205,17 @@ extension KindFile {
                 try container.encode("random", forKey: .type)
                 try container.encode(bytes, forKey: .bytes)
 
+            case .forgeToken(let name, let scopes, let retires):
+                try container.encode("forgeToken", forKey: .type)
+                try container.encode(name, forKey: .name)
+                try container.encode(scopes, forKey: .scopes)
+                if !retires.isEmpty { try container.encode(retires, forKey: .retires) }
+
+            case .homeAssistantToken(let url, let name):
+                try container.encode("homeAssistantToken", forKey: .type)
+                try container.encode(url, forKey: .url)
+                try container.encode(name, forKey: .name)
+
             case .manual(let recipe):
                 try container.encode("manual", forKey: .type)
                 try container.encode(recipe, forKey: .recipe)
@@ -195,6 +231,9 @@ extension KindFile {
     /// - `systemdEnvironment`: a key in a systemd unit's environment, with the unit started again.
     /// - `vaultSecret`: a holder that reads the value from vault at boot, so it takes no write and only restarts.
     /// - `file`: the value written whole into a file on a host, at a path the declaration names, mode 600.
+    /// - `vaultDocument`: the value written into a vault app's secrets document, which its readers fetch at each use, so nothing restarts.
+    /// - `forgeRepoSecret`: an Actions secret of this name, on every forge repository that holds one when the run starts.
+    ///   CI reads it at each job, so nothing restarts.
     ///
     /// A shared value has several holders, and every one of them is named here. A bearer invalidates every
     /// holder at once, so a holder this list forgets is the outage the declaration promised would not happen.
@@ -205,6 +244,8 @@ extension KindFile {
         case systemdEnvironment(host: String, unit: String, key: String)
         case vaultSecret(app: String, name: String)
         case file(host: String, path: String)
+        case vaultDocument(app: String, name: String)
+        case forgeRepoSecret(name: String)
 
         private enum CodingKeys: String, CodingKey {
             case type, app, key, restart, host, label, unit, name, path
@@ -246,6 +287,14 @@ extension KindFile {
                 self = .file(
                     host: try container.decode(String.self, forKey: .host),
                     path: try container.decode(String.self, forKey: .path))
+
+            case "vaultDocument":
+                self = .vaultDocument(
+                    app: try container.decode(String.self, forKey: .app),
+                    name: try container.decode(String.self, forKey: .name))
+
+            case "forgeRepoSecret":
+                self = .forgeRepoSecret(name: try container.decode(String.self, forKey: .name))
 
             default:
                 throw DecodingError.dataCorruptedError(
@@ -289,6 +338,15 @@ extension KindFile {
                 try container.encode("file", forKey: .type)
                 try container.encode(host, forKey: .host)
                 try container.encode(path, forKey: .path)
+
+            case .vaultDocument(let app, let name):
+                try container.encode("vaultDocument", forKey: .type)
+                try container.encode(app, forKey: .app)
+                try container.encode(name, forKey: .name)
+
+            case .forgeRepoSecret(let name):
+                try container.encode("forgeRepoSecret", forKey: .type)
+                try container.encode(name, forKey: .name)
             }
         }
     }
@@ -353,6 +411,16 @@ extension KindFile {
     public func owner(forKey key: String) -> String? {
         guard case .owned(let owner)? = self.environment[key]?.rotation else { return nil }
         return owner
+    }
+
+    /// The secret keys whose every holder is a vault document or a forge repository, so no service file names them.
+    /// The declaration carries these keys itself: the ledger lists them and `rotate --all` plans them for the service whose kind declares them.
+    public func keysHeldOutsideFiles() -> Set<String> {
+        Set(
+            self.environment.compactMap { key, entry -> String? in
+                guard entry.secret == true, case .declared(let rotation)? = entry.rotation, !rotation.holders.isEmpty else { return nil }
+                return rotation.holders.allSatisfy(\.isOutsideFiles) ? key : nil
+            })
     }
 
     /// The class a group of keys shares, or `nil` when any of them declares none or two of them differ.

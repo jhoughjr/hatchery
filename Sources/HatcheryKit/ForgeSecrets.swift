@@ -77,14 +77,7 @@ public struct ForgeSecrets: Sendable {
     public func seed(name: String, value: String) async throws {
         if name.hasPrefix("FORGE_") {
             guard value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { throw Failure.notAToken(name) }
-            var accepted = false
-            for route in ["/api/v1/user", "/api/v1/repos/\(Self.scopeProbeRepo)/issues?limit=1&state=all"] {
-                var request = URLRequest(url: URL(string: self.forgeBaseURL + route)!)
-                request.setValue("token " + value, forHTTPHeaderField: "Authorization")
-                request.setValue("hatchery-forge-secrets/1", forHTTPHeaderField: "User-Agent")
-                let (_, response) = try await self.exchange(request)
-                if response.statusCode != 401 { accepted = true; break }
-            }
+            let accepted = try await ForgeTokenIssuer.accepts(value, forgeBaseURL: self.forgeBaseURL, exchange: self.exchange)
             guard accepted else { throw Failure.notAToken(name) }
         }
         _ = try await self.vault.registerApp(slug: Self.vaultApp, name: "Forge CI")
@@ -107,6 +100,31 @@ public struct ForgeSecrets: Sendable {
             done.append((name, .set))
         }
         return done
+    }
+
+    /// Writes a value to every repository whose Actions secrets hold this name, and answers those repositories in the forge's order.
+    /// A rotation of the package token uses it, because a repository that keeps the retired token fails its next image push.
+    public func replaceEverywhere(name: String, value: String) async throws -> [String] {
+        var replaced: [String] = []
+        for repo in try await self.repositories() where try await self.repoSecretNames(repo).contains(name) {
+            try await self.putRepoSecret(repo, name: name, value: value)
+            replaced.append(repo)
+        }
+        return replaced
+    }
+
+    /// Every repository the forge credential can see, by full name, read a page of fifty at a time.
+    func repositories() async throws -> [String] {
+        var names: [String] = []
+        for page in 1... {
+            let route = "/api/v1/repos/search?limit=50&page=\(page)"
+            let (data, response) = try await self.exchange(try self.forgeRequest(route, method: "GET", body: nil))
+            guard response.statusCode == 200 else { throw Failure.refused(route: route, status: response.statusCode) }
+            let rows = ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["data"] as? [[String: Any]]) ?? []
+            guard !rows.isEmpty else { break }
+            names += rows.compactMap { $0["full_name"] as? String }
+        }
+        return names
     }
 
     /// The `forge` app's document, read with a key rotated for this run.

@@ -122,7 +122,7 @@ struct Secrets: AsyncParsableCommand {
             case .host(let host):
                 return resolved.hosts.contains(host) ? "" : "   (no host \(host) in the manifest)"
 
-            case .vaultApp:
+            case .vaultApp, .forge:
                 return ""
             }
         }
@@ -225,7 +225,7 @@ struct Secrets: AsyncParsableCommand {
                 return
             }
             let credential: VaultAdminCredential
-            if plans.contains(where: { $0.rotation.issuer.needsVaultSession }) {
+            if plans.contains(where: { $0.rotation.needsVaultSession }) {
                 guard let resolved = VaultAdminCredential.resolve() else {
                     throw RotationRefusal.noVaultSession
                 }
@@ -268,6 +268,10 @@ struct Secrets: AsyncParsableCommand {
                 }
             }
             print("  run hatchery state seal so the new values reach the encrypted backup.")
+            // An address's phone step is the last line, house#47.
+            for step in plans.compactMap(\.handStep) {
+                print("  by hand: \(step)")
+            }
         }
 
         private func runAll() async throws {
@@ -287,11 +291,13 @@ struct Secrets: AsyncParsableCommand {
                         guard let kind = try registry.kindFile(for: service.kind) else { continue }
                         // What the service carries, from its config and secrets files, so a kind shared by several
                         // services plans a rotation only where the key is. A missing file reads as empty.
+                        // A key held only in vault documents or on the forge is carried by the declaration itself.
                         let carried = Set(
                             try ConfigSync.readDeclared(
                                 config: ConfigSync.configURL(for: service, in: stack, manifestPath: entry.path),
                                 secrets: ConfigSync.secretsURL(for: service, in: stack, manifestPath: entry.path)
-                            ).keys)
+                            ).keys
+                        ).union(kind.keysHeldOutsideFiles())
                         targets.append(
                             RotationTarget(
                                 stack: stack.name,
@@ -351,7 +357,7 @@ struct Secrets: AsyncParsableCommand {
         private static func needsVaultSession(in kind: KindFile) -> Bool {
             kind.rotationGroups().contains { group in
                 guard case .declared(let rotation) = group.rotation else { return false }
-                return rotation.issuer.needsVaultSession
+                return rotation.needsVaultSession
             }
         }
     }

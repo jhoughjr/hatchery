@@ -13,8 +13,8 @@ import Foundation
 ///   It runs only through a declared re-seal route, `vaultReseal`, never a mint and place.
 /// - `password`: a database role's password, and a URL that always carries it. The database must answer first.
 ///   The run changes the role, then every holder.
-/// - `address`: a name that works as a secret, such as an ntfy topic. It is never run.
-///   A person renames it on the device by the recipe.
+/// - `address`: a name that works as a secret, such as an ntfy topic.
+///   The run mints a new name and puts it onto every holder, and its last line is the one hand step: the phone subscribes to the new name.
 public enum SecretClass: String, Codable, Sendable, Equatable, CaseIterable {
     case token
     case sharedKey
@@ -28,12 +28,14 @@ public enum SecretClass: String, Codable, Sendable, Equatable, CaseIterable {
 extension SecretClass {
     /// Whether this class can be minted by this issuer.
     ///
-    /// A mint issuer (`random` or `vaultSecret`) makes a value nobody can take back, so it fits only a shared key.
+    /// A mint issuer (`random` or `vaultSecret`) makes a value nobody can take back, so it fits a shared key.
+    /// `random` fits an address too, because a topic is a name and not a credential, ruled on house#47 on 2026-09-30.
+    /// A token fits an issuer that can take the old value back: vault, the forge's CLI, and Home Assistant.
     /// A sealing key never fits a plain mint, because a minted value locks everything sealed under the old one.
     /// It fits `vaultReseal`, which re-seals everything under the new value before any holder takes it, house#45.
     public func fits(_ issuer: KindFile.Issuer) -> Bool {
         switch (self, issuer) {
-        case (.token, .vaultAppKey), (.token, .vaultS3Key), (.token, .manual):
+        case (.token, .vaultAppKey), (.token, .vaultS3Key), (.token, .forgeToken), (.token, .homeAssistantToken), (.token, .manual):
             return true
 
         case (.sharedKey, .random), (.sharedKey, .vaultSecret), (.sharedKey, .manual):
@@ -45,7 +47,7 @@ extension SecretClass {
         case (.password, .postgresRole), (.password, .manual):
             return true
 
-        case (.address, .manual):
+        case (.address, .random), (.address, .manual):
             return true
 
         default:
@@ -56,11 +58,11 @@ extension SecretClass {
     /// The issuer types this class fits, in the words a kind file uses, for a refusal to name.
     public var fittingIssuers: [String] {
         switch self {
-        case .token: return ["vaultAppKey", "vaultS3Key", "manual"]
+        case .token: return ["vaultAppKey", "vaultS3Key", "forgeToken", "homeAssistantToken", "manual"]
         case .sharedKey: return ["vaultSecret", "random", "manual"]
         case .sealingKey: return ["vaultReseal", "manual"]
         case .password: return ["postgresRole", "manual"]
-        case .address: return ["manual"]
+        case .address: return ["random", "manual"]
         }
     }
 }
@@ -75,7 +77,7 @@ extension SecretClass {
         case .sharedKey: return "every holder's host answers"
         case .sealingKey: return "a re-seal route is declared, the operator token works, and every holder is running"
         case .password: return "the database answers"
-        case .address: return "none"
+        case .address: return "every holder's host answers"
         }
     }
 
@@ -86,7 +88,7 @@ extension SecretClass {
         case .sharedKey: return "one value onto every holder, restart each"
         case .sealingKey: return "mint, re-seal every document under the value, every holder, every restart, then vault opens every document"
         case .password: return "the role change first, then every holder"
-        case .address: return "refused; a person renames it on the device"
+        case .address: return "a new name onto every holder, restart each, then the phone subscribes to the new name"
         }
     }
 }
